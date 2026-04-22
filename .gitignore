@@ -53,3 +53,24 @@ yarn-debug.log
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Model Weights & Data
+weights/
+*.pth
+*.onnx
+*.h5
+data/raw/
+data/processed/
+
+# ESP32 / PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+firmware/**/build/
+*.bin
+*.elf
+*.map
+
+# Logs & Monitoring
+logs/
+*.log
