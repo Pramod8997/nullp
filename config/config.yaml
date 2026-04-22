@@ -1,0 +1,21 @@
+app:
+  name: "Digital Twin EMS"
+  debug: true
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topics:
+    reads: "home/sensor/+/power"
+    writes: "home/plug/+/command"
+
+database:
+  path: "data/ems_state.db"
+
+system_safety:
+  max_aggregate_wattage: 3500.0
+  device_wattage_limits:
+    fridge: 800.0
+    microwave: 2000.0
+    kettle: 2500.0
+    default: 1500.0
