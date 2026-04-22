@@ -20,7 +20,7 @@ class AggregateNILMClassifier:
             "microwave": {"mean": 800.0, "std": 20.0},
             "tv": {"mean": 100.0, "std": 5.0}
         }
-        self.last_aggregate = 0.0
+        self.last_aggregate = 0.00
         self.active_devices = set()
 
     def process_aggregate(self, current_aggregate: float) -> list:
