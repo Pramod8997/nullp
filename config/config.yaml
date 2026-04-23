@@ -8,6 +8,7 @@ mqtt:
   topics:
     reads: "home/sensor/+/power"
     writes: "home/plug/+/command"
+    events: "home/ui/events"
 
 database:
   path: "data/ems_state.db"
@@ -15,7 +16,25 @@ database:
 system_safety:
   max_aggregate_wattage: 3500.0
   device_wattage_limits:
-    fridge: 800.0
-    microwave: 2000.0
-    kettle: 2500.0
+    esp32_fridge: 800.0
+    esp32_microwave: 2000.0
+    esp32_kettle: 2500.0
+    esp32_hvac: 2000.0
+    esp32_tv: 500.0
     default: 1500.0
+
+protonet:
+  weights_path: "backend/models/weights/cnn_weights.pth"
+  anchors_path: "backend/models/weights/protonet_anchors.pt"
+  window_size: 60
+  embedding_size: 64
+  distance_threshold: 15.0
+
+analytics:
+  cost_per_kwh: 0.15
+
+rl:
+  cooldown_seconds: 15.0
+  empathy_pmv_min: -1.0
+  empathy_pmv_max: 1.0
+  q_table_path: "backend/models/weights/q_table.pkl"
