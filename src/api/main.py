@@ -235,3 +235,9 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+    except RuntimeError as e:
+        logger.warning(f"WebSocket disconnected with error: {e}")
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"Unexpected WebSocket error: {e}")
+        manager.disconnect(websocket)
