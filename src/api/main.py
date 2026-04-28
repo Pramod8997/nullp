@@ -1,6 +1,7 @@
 import json
 import asyncio
 import logging
+import time
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -15,13 +16,16 @@ logger = logging.getLogger(__name__)
 # ─── Shared State ────────────────────────────────────────────────────
 # Updated by the MQTT listener, read by REST endpoints and WebSocket broadcasts.
 system_state: Dict[str, Any] = {
-    "devices": {},          # device_id -> {power, state, classification, last_seen}
+    "devices": {},          # device_id -> {power, state, classification, confidence, last_seen}
     "phantom_loads": {},    # device_id -> watts
     "total_phantom": 0.0,
     "pmv_score": 0.0,
     "analytics": {},        # daily summary
     "active_mitigations": [],
     "pipeline_status": "initializing",
+    "pending_labels": [],   # NEW: devices awaiting user label
+    "low_confidence_log": [],  # NEW: recent low-confidence events
+    "safety_warnings": [],  # NEW: recent safety warnings
 }
 
 
@@ -87,6 +91,7 @@ async def mqtt_listener_task():
                                     "power": event_data.get("power", 0),
                                     "state": event_data.get("state", "unknown"),
                                     "classification": event_data.get("classification", "unknown"),
+                                    "confidence": event_data.get("confidence", 0),
                                     "pmv": event_data.get("pmv", 0),
                                     "last_seen": event_data.get("timestamp", ""),
                                 }
@@ -97,6 +102,55 @@ async def mqtt_listener_task():
                                 system_state["analytics"] = event_data.get("summary", {})
                             elif event_type == "PMV_UPDATE":
                                 system_state["pmv_score"] = event_data.get("pmv", 0)
+
+                            # ── NEW: Handle LABEL_REQUEST events ──
+                            elif event_type == "LABEL_REQUEST":
+                                label_entry = {
+                                    "device_id": event_data.get("device_id", ""),
+                                    "power": event_data.get("power", 0),
+                                    "confidence": event_data.get("confidence", 0),
+                                    "message": event_data.get("message", ""),
+                                    "timestamp": time.time(),
+                                }
+                                system_state["pending_labels"].append(label_entry)
+                                # Keep only last 50 entries
+                                system_state["pending_labels"] = system_state["pending_labels"][-50:]
+                                logger.info(f"📋 LABEL_REQUEST: {label_entry['device_id']}")
+
+                            # ── NEW: Handle LOW_CONFIDENCE events ──
+                            elif event_type == "LOW_CONFIDENCE":
+                                lc_entry = {
+                                    "device_id": event_data.get("device_id", ""),
+                                    "classified_as": event_data.get("classified_as", ""),
+                                    "confidence": event_data.get("confidence", 0),
+                                    "threshold": event_data.get("threshold", 0.90),
+                                    "message": event_data.get("message", ""),
+                                    "timestamp": time.time(),
+                                }
+                                system_state["low_confidence_log"].append(lc_entry)
+                                system_state["low_confidence_log"] = system_state["low_confidence_log"][-100:]
+
+                            # ── NEW: Handle SAFETY_WARNING events ──
+                            elif event_type in ["SAFETY_WARNING", "SAFETY_CUTOFF"]:
+                                sw_entry = {
+                                    "device_id": event_data.get("device_id", ""),
+                                    "severity": event_data.get("severity", "warning"),
+                                    "message": event_data.get("message", ""),
+                                    "timestamp": time.time(),
+                                }
+                                system_state["safety_warnings"].append(sw_entry)
+                                system_state["safety_warnings"] = system_state["safety_warnings"][-50:]
+
+                            # ── NEW: Handle EMPATHY_ACTION / RL_ACTION events ──
+                            elif event_type in ["EMPATHY_ACTION", "RL_ACTION"]:
+                                system_state["active_mitigations"].append({
+                                    "type": event_type,
+                                    "action": event_data.get("action", ""),
+                                    "device_id": event_data.get("device_id", ""),
+                                    "pmv": event_data.get("pmv", 0),
+                                    "timestamp": time.time(),
+                                })
+                                system_state["active_mitigations"] = system_state["active_mitigations"][-50:]
 
                             await manager.broadcast(event_data)
                         except json.JSONDecodeError:
@@ -212,6 +266,46 @@ async def get_status():
         "total_phantom_watts": system_state["total_phantom"],
         "active_ws_clients": len(manager.active_connections),
     }
+
+
+@app.get("/api/pending-labels")
+async def get_pending_labels():
+    """Devices awaiting user classification label."""
+    return {"pending_labels": system_state["pending_labels"]}
+
+
+@app.get("/api/low-confidence")
+async def get_low_confidence():
+    """Recent low-confidence classification events."""
+    return {"low_confidence_log": system_state["low_confidence_log"]}
+
+
+@app.get("/api/safety-warnings")
+async def get_safety_warnings():
+    """Recent safety warning and cutoff events."""
+    return {"safety_warnings": system_state["safety_warnings"]}
+
+
+class LabelSubmission(BaseModel):
+    device_id: str
+    label: str
+
+
+@app.post("/api/submit-label")
+async def submit_label(submission: LabelSubmission):
+    """Submit a user-provided label for an unknown device."""
+    # Remove from pending labels
+    system_state["pending_labels"] = [
+        p for p in system_state["pending_labels"] if p["device_id"] != submission.device_id
+    ]
+    logger.info(f"Label submitted: {submission.device_id} → {submission.label}")
+    # Broadcast label event for pipeline to pick up
+    await manager.broadcast({
+        "type": "LABEL_SUBMITTED",
+        "device_id": submission.device_id,
+        "label": submission.label,
+    })
+    return {"status": "ok", "message": f"Label '{submission.label}' applied to {submission.device_id}"}
 
 
 # ─── WebSocket Endpoint ─────────────────────────────────────────────

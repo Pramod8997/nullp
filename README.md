@@ -1,7 +1,7 @@
 # ⚡ Confidence-Aware Digital Twin Energy Management System
 
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
-![Tests](https://img.shields.io/badge/tests-27%2F27-brightgreen)
+![Tests](https://img.shields.io/badge/tests-39%2B-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Node](https://img.shields.io/badge/node-18%2B-green)
 ![License](https://img.shields.io/badge/license-Academic-orange)
@@ -42,15 +42,19 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 
 | Step | Module | Description |
 |------|--------|-------------|
-| 1 | **Safety Monitor** | Parallel threshold check → hardware relay cutoff (highest priority) |
-| 2 | **Watchdog** | Rolling z-score anomaly detection for sensor drift |
-| 3 | **ProtoNet CNN** | 1D CNN feature extraction → prototypical distance → open-set known/unknown classification |
-| 4 | **Phantom Tracker** | Exponential moving average of vampire loads when devices are "OFF" |
-| 5 | **Database** | aiosqlite with WAL mode, batched writes every 10s |
-| 6 | **Analytics** | Per-device kWh accumulation and cost estimation |
-| 7 | **Digital Twin** | Simplified ISO 7730 PMV thermal comfort index |
-| 8 | **RL Agent** | Tabular Q-Learning with 15s cooldown + PMV empathy gate |
-| 9 | **Broadcast** | Structured JSON events to dashboard via MQTT → WebSocket bridge |
+| 0 | **Safety Monitor** | **Parallel asyncio.Task** — independent MQTT subscription, 110% warning / 125% cutoff |
+| 1 | **Watchdog** | Rolling z-score anomaly detection for sensor drift |
+| 2 | **ProtoNet CNN** | 5-layer 1D CNN + Temporal Attention → 128D embedding → prototypical distance |
+| 2b | **OpenMax** | Weibull EVT on tail distances → open-set unknown rejection |
+| 2c | **Temp Scaling** | Learned temperature T for calibrated softmax confidence |
+| 3 | **Confidence Gate** | If confidence < 0.90 → skip RL, emit `LOW_CONFIDENCE` event |
+| 4 | **Delta Stability** | Buffer unknown embeddings; stable → `LABEL_REQUEST`, transient → discard |
+| 5 | **Phantom Tracker** | Exponential moving average of vampire loads when devices are "OFF" |
+| 6 | **Database** | aiosqlite with WAL mode, batched writes every 10s |
+| 7 | **Analytics** | Per-device kWh accumulation and ToU cost estimation |
+| 8 | **Digital Twin** | Full ISO 7730 Fanger PMV (6-input) thermal comfort model |
+| 9 | **RL Agent** | Tabular Q-Learning with confidence gate + PMV empathy gate + ToU reward shaping |
+| 10 | **Broadcast** | Structured JSON events to dashboard via MQTT → WebSocket bridge |
 
 ### Failure Handling
 
@@ -58,6 +62,37 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 |---------|------------|
 | Server crash | ESP32 relay still operates locally |
 | MQTT disconnect | Local edge execution mode, queue for sync |
+
+---
+
+## 📊 Implementation Status
+
+### Phase 1 (Current — Simulation)
+| Feature | Status |
+|---------|--------|
+| 5-layer CNN ProtoNet (128D embeddings) | ✅ |
+| Temporal Attention layer | ✅ |
+| Episodic N-way K-shot meta-learning | ✅ |
+| OpenMax + Weibull EVT unknown rejection | ✅ |
+| Temperature Scaling calibration | ✅ |
+| Full ISO 7730 Fanger PMV (6-input) | ✅ |
+| Q-Learning with ToU pricing & confidence gate | ✅ |
+| Safety monitor (parallel asyncio task) | ✅ |
+| Delta stability for unknown device routing | ✅ |
+| 10-device ESP32 simulator (1Hz) | ✅ |
+| React dashboard with 6 panels | ✅ |
+| API handling for LABEL_REQUEST / LOW_CONFIDENCE | ✅ |
+| Real UK-DALE dataset (requires nilmtk) | 🔲 Phase 2 |
+| Real REDD dataset | 🔲 Phase 2 |
+| ESP32 hardware deployment | 🔲 Phase 2 |
+| Real CT clamp sensors | 🔲 Phase 2 |
+
+### Phase 2 (Planned)
+- ESP32 firmware with Tier-0 hardware relay (125% rated wattage)
+- Real UK-DALE 1Hz data loading via NILMTK
+- Real REDD data loading via NILMTK
+- Live MQTT from physical smart plugs
+- Evaluation on real household data
 | DB failure | Log to fallback, continue safety monitoring |
 | Model drift | Fall back to rule-based thresholds |
 

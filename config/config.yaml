@@ -15,26 +15,50 @@ database:
 
 system_safety:
   max_aggregate_wattage: 3500.0
+  warning_pct: 1.10
+  critical_pct: 1.25
   device_wattage_limits:
-    esp32_fridge: 800.0
-    esp32_microwave: 2000.0
+    esp32_fridge: 200.0
+    esp32_microwave: 1200.0
     esp32_kettle: 2500.0
     esp32_hvac: 2000.0
-    esp32_tv: 500.0
+    esp32_tv: 150.0
+    esp32_washer: 1800.0
+    esp32_dryer: 2000.0
+    esp32_dishwasher: 1500.0
+    esp32_oven: 3000.0
+    esp32_lighting: 100.0
     default: 1500.0
 
 protonet:
   weights_path: "backend/models/weights/cnn_weights.pth"
   anchors_path: "backend/models/weights/protonet_anchors.pt"
   window_size: 60
-  embedding_size: 64
+  embedding_size: 128
   distance_threshold: 15.0
+  confidence_threshold: 0.90
+  openmax_tail_size: 20
+  openmax_alpha: 3
 
 analytics:
-  cost_per_kwh: 0.15
+  tou_pricing:
+    peak:   { hours: [7,8,9,17,18,19,20,21], rate: 0.28 }
+    mid:    { hours: [10,11,12,13,14,15,16], rate: 0.18 }
+    off_peak: { hours: [0,1,2,3,4,5,6,22,23], rate: 0.09 }
 
 rl:
   cooldown_seconds: 15.0
-  empathy_pmv_min: -1.0
-  empathy_pmv_max: 1.0
+  empathy_pmv_min: -0.5
+  empathy_pmv_max: 0.5
   q_table_path: "backend/models/weights/q_table.pkl"
+
+preprocessing:
+  sg_window: 11
+  sg_poly: 2
+  transient_threshold_w: 50.0
+  transient_window_s: 5
+
+delta_stability:
+  buffer_size: 10
+  stability_threshold: 3.0
+  min_occurrences: 3

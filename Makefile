@@ -2,14 +2,20 @@ PYTHON=venv/bin/python3
 PIP=venv/bin/pip
 PWD=$(shell pwd)
 
-.PHONY: install train_all test_safety test run clean
+.PHONY: install generate_data train_all train_synthetic test_safety test run clean
 
 install:
 	$(PIP) install -r requirements.txt
 	cd frontend && npm install
 
+generate_data:
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/generate_mock_ukdale.py
+
 train_all:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --datasets ukdale redd synd --cuda
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --datasets synthetic ukdale redd --episodes 2000 --cuda
+
+train_synthetic:
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --datasets synthetic --episodes 2000
 
 test_safety:
 	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/test_safety_cutoff.py --spike 4000
