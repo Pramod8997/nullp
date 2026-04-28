@@ -108,10 +108,13 @@ class TabularQLearningAgent:
         ]
         return "::".join(parts)
 
-    def act(self, state_dict: Dict[str, Any], pmv: float, confidence: float, classified_device: str) -> str:
-        # Gate 1: confidence must be >= threshold
-        if confidence < self.confidence_threshold:
-            return "DEFER"  # do nothing when uncertain
+    def act(self, state_dict: Dict[str, Any], pmv: float, confidence: float,
+            classified_device: str, min_confidence: float = None) -> str:
+        """Act based on current state. Returns action string."""
+        # Gate 1: confidence gate — block RL when uncertain (FR3 / SRS NF-Accuracy)
+        threshold = min_confidence if min_confidence is not None else self.confidence_threshold
+        if confidence < threshold:
+            return "DEFER"  # no_op when uncertain
             
         # Gate 2: PMV empathy gate (Category A bounds: -0.5 to 0.5)
         if pmv < self.pmv_min or pmv > self.pmv_max:
@@ -194,3 +197,54 @@ class TabularQLearningAgent:
             logger.info(f"Loaded Q-table from {self.q_table_path}")
         except Exception as e:
             logger.warning(f"Could not load Q-table: {e}")
+
+
+# ── Alias ─────────────────────────────────────────────────────────────────────
+# QLearningAgent is the canonical name used in run_pipeline.py and tests.
+QLearningAgent = TabularQLearningAgent
+
+
+# ── GAP 8: Policy Promotion Gate ──────────────────────────────────────────────
+
+class PolicyPromotionGate:
+    """
+    Tracks validation episodes run in the digital twin sandbox.
+    A policy is 'promoted' to live relay control only after completing
+    MIN_VALIDATION_EPISODES without exceeding the cumulative PMV penalty budget.
+
+    Usage:
+        gate = PolicyPromotionGate()
+        gate.record_twin_episode(pmv_penalty=thermo.pmv_penalty(pmv))
+        if gate.is_promoted:
+            issue_relay_command(action)
+        else:
+            # shadow mode: run in digital twin only
+    """
+
+    MIN_VALIDATION_EPISODES = 50
+    PMV_PENALTY_LIMIT       = 0.5   # max allowed cumulative PMV penalty
+
+    def __init__(self):
+        self._val_episodes:   int   = 0
+        self._cumulative_pmv: float = 0.0
+        self._promoted:       bool  = False
+
+    def record_twin_episode(self, pmv_penalty: float) -> None:
+        """Record one digital-twin validation episode."""
+        self._val_episodes   += 1
+        self._cumulative_pmv += pmv_penalty
+
+    @property
+    def is_promoted(self) -> bool:
+        """True once >= 50 validation episodes with acceptable PMV penalty."""
+        if self._promoted:
+            return True
+        if (self._val_episodes >= self.MIN_VALIDATION_EPISODES
+                and self._cumulative_pmv <= self.PMV_PENALTY_LIMIT):
+            self._promoted = True
+        return self._promoted
+
+    def reset(self) -> None:
+        self._val_episodes   = 0
+        self._cumulative_pmv = 0.0
+        self._promoted       = False

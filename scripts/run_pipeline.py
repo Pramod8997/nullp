@@ -38,14 +38,16 @@ import numpy as np
 from src.database.session import DatabaseSession
 from src.hardware.mqtt import MQTTClientManager
 from src.pipeline.safety import SafetyMonitor
-from src.rl.agent import TabularQLearningAgent
+from src.rl.agent import TabularQLearningAgent, PolicyPromotionGate
 
 # ML & Pipeline Modules
-from src.models.thermodynamics import ThermodynamicsModel as DigitalTwinEnv
+from src.models.thermodynamics import ThermodynamicsModel as DigitalTwinEnv, PMVThermodynamics
 from src.models.protonet import (
     CNN1DEncoder, TemperatureScaler, WEibullOpenMax,
-    SupportSetManager, ProtoNet
+    SupportSetManager, ProtoNet, PrototypeRegistry, OpenMaxWeibull
 )
+from src.models.calibration import TemperatureScaler as CalibratedTemperatureScaler
+from src.pipeline.aggregate_nilm import NILMTransientDetector
 from src.pipeline.delta_stability import DeltaStabilityAnalyzer
 from src.pipeline.phantom_tracker import PhantomTracker
 from src.pipeline.watchdog import SoftAnomalyWatchdog
@@ -113,13 +115,26 @@ class EMSOrchestrator:
         # ── Delta Stability Analyzer ──
         ds_cfg = self.config.get("delta_stability", {})
         self.delta_analyzer = DeltaStabilityAnalyzer(
-            buffer_size=ds_cfg.get("buffer_size", 10),
-            stability_threshold=ds_cfg.get("stability_threshold", 3.0),
-            min_occurrences=ds_cfg.get("min_occurrences", 3),
+            window=ds_cfg.get("buffer_size", 10),
+            threshold=ds_cfg.get("stability_threshold", 15.0),
+            min_count=ds_cfg.get("min_occurrences", 3),
         )
 
+        # ── NILM Transient Detector (SG filter + derivative) ──
+        pre_cfg = self.config.get("preprocessing", {})
+        self.nilm_detector = NILMTransientDetector(
+            sg_window=pre_cfg.get("sg_window", 7),
+            sg_polyord=pre_cfg.get("sg_poly", 2),
+            threshold=pre_cfg.get("transient_threshold_w", 50.0),
+            window_size=pre_cfg.get("transient_window_s", 5),
+            embed_window=128,
+        )
+
+        # ── Policy Promotion Gate ──
+        self.promo_gate = PolicyPromotionGate()
+
         # Rolling windows for CNN input (per device)
-        self.power_windows: Dict[str, deque] = {}
+        self.power_windows: Dict[str, deque] = {}  # legacy rolling window
 
         # ── RL Agent (reads config internally) ──
         self.agent = TabularQLearningAgent()
@@ -139,7 +154,43 @@ class EMSOrchestrator:
         weights_dir = os.path.dirname(weights_path) if weights_path else "backend/models/weights"
 
         try:
-            if os.path.exists(weights_path):
+            # ── Try new Phase-1 weights first (protonet.pt) ──
+            new_weights = os.path.join(weights_dir, "protonet.pt")
+            if os.path.exists(new_weights):
+                proto = ProtoNet(seq_len=128)
+                proto.load_state_dict(torch.load(new_weights, map_location="cpu", weights_only=False))
+                proto.eval()
+                self.encoder = proto   # ProtoNet is the primary encoder
+                logger.info(f"✅ Phase-1 ProtoNet loaded from {new_weights}")
+
+                # Load Prototype Registry
+                registry_path = os.path.join(weights_dir, "prototype_registry.pt")
+                if os.path.exists(registry_path):
+                    self.prototype_registry = PrototypeRegistry(proto)
+                    self.prototype_registry.load(registry_path)
+                    logger.info(f"✅ Prototype Registry loaded ({len(self.prototype_registry.class_names())} classes)")
+                else:
+                    self.prototype_registry = None
+                    logger.warning("Prototype Registry not found — run train_models.py first")
+
+                # Load new OpenMax Weibull
+                omw_path = os.path.join(weights_dir, "openmax_weibull.pkl")
+                if os.path.exists(omw_path):
+                    self.weibull = OpenMaxWeibull(num_classes=10)
+                    self.weibull.load(omw_path)
+                    logger.info(f"✅ OpenMax Weibull loaded")
+
+                # Load calibrated temperature scaler
+                ts_path = os.path.join(weights_dir, "temperature_scaler.pt")
+                if os.path.exists(ts_path):
+                    self.calibrated_scaler = CalibratedTemperatureScaler()
+                    self.calibrated_scaler.load(ts_path)
+                    logger.info(f"✅ Calibrated T-Scaler loaded (T={self.calibrated_scaler.temperature.item():.4f})")
+                else:
+                    self.calibrated_scaler = None
+
+            elif os.path.exists(weights_path):
+                # Fallback: legacy CNN weights
                 self.encoder = CNN1DEncoder(
                     input_size=self.window_size,
                     embedding_size=self.embedding_size
@@ -148,26 +199,28 @@ class EMSOrchestrator:
                     torch.load(weights_path, map_location="cpu", weights_only=False)
                 )
                 self.encoder.eval()
-                logger.info(f"✅ ProtoNet CNN loaded from {weights_path}")
+                self.prototype_registry = None
+                self.calibrated_scaler = None
+                logger.info(f"✅ Legacy CNN loaded from {weights_path}")
             else:
-                logger.warning(f"ProtoNet weights not found at {weights_path}. Classification disabled.")
+                logger.warning("No model weights found. Run python scripts/train_models.py first.")
+                self.encoder = None
+                self.prototype_registry = None
+                self.calibrated_scaler = None
 
             if os.path.exists(anchors_path):
                 self.support_manager.load_registry(anchors_path)
-                logger.info(f"✅ Support registry loaded from {anchors_path}")
-            else:
-                logger.warning(f"Support registry not found at {anchors_path}.")
+                logger.info(f"✅ Legacy support registry loaded from {anchors_path}")
 
             scaler_path = os.path.join(weights_dir, "temperature_scaler.pth")
-            if os.path.exists(scaler_path):
+            if os.path.exists(scaler_path) and not hasattr(self, 'calibrated_scaler'):
                 self.temp_scaler.load(scaler_path)
-                logger.info(f"✅ Temperature scaler loaded (T={self.temp_scaler.temperature.item():.4f})")
+                logger.info(f"✅ Legacy temperature scaler loaded")
 
             weibull_path = os.path.join(weights_dir, "weibull_openmax.pkl")
-            if os.path.exists(weibull_path):
+            if os.path.exists(weibull_path) and not hasattr(self.weibull, '_weibull_by_name'):
                 with open(weibull_path, 'rb') as f:
                     self.weibull = pickle.load(f)
-                logger.info(f"✅ Weibull OpenMax loaded ({len(self.weibull.weibull_models)} classes)")
 
         except Exception as e:
             logger.error(f"Failed to load ML models: {e}. Falling back to rule-based classification.")
@@ -286,21 +339,29 @@ class EMSOrchestrator:
                 if device_id in self.power_windows and len(self.power_windows[device_id]) >= self.window_size:
                     window_np = np.array(list(self.power_windows[device_id]), dtype=np.float32)
                     with torch.no_grad():
-                        x = torch.tensor(window_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                        embedding = self.encoder(x).squeeze(0).numpy() if self.encoder else np.zeros(self.embedding_size)
+                        if isinstance(self.encoder, ProtoNet) and hasattr(self.encoder, 'embed'):
+                            x   = torch.tensor(window_np[:128] if len(window_np) >= 128 else np.pad(window_np, (0, 128 - len(window_np))), dtype=torch.float32).unsqueeze(0)
+                            embedding = self.encoder.embed(x).squeeze(0).numpy()
+                        elif self.encoder:
+                            x = torch.tensor(window_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                            embedding = self.encoder(x).squeeze(0).numpy()
+                        else:
+                            embedding = np.zeros(self.embedding_size)
 
-                    is_stable, temp_id = self.delta_analyzer.check(embedding)
-                    if is_stable:
+                    # Use new push() API for DFD P4.3 compliance
+                    stability, cluster_mean = self.delta_analyzer.push(embedding)
+                    if stability == 'stable':
                         logger.info(f"❓ Stable unknown on {device_id} ({power_watts:.1f}W) — requesting label")
                         await self._broadcast_event({
                             "type": "LABEL_REQUEST",
                             "device_id": device_id,
                             "power": round(power_watts, 2),
                             "confidence": round(confidence, 3),
+                            "embedding": cluster_mean.tolist() if cluster_mean is not None else [],
                             "message": f"Stable unknown signature on {device_id}. Please label this device.",
                         })
                     else:
-                        logger.debug(f"Transient unknown on {device_id}, assigned {temp_id}")
+                        logger.debug(f"Transient unknown on {device_id} — logged silently")
                         try:
                             await self.db.insert_measurement(current_time, device_id, power_watts)
                         except Exception:
@@ -379,6 +440,10 @@ class EMSOrchestrator:
                 }
 
                 action = self.agent.act(state_dict, pmv_score, confidence, class_name)
+
+                # ── Policy Promotion Gate: shadow mode until 50 twin episodes ──
+                pmv_penalty = self.env.pmv_penalty(pmv_score)
+                self.promo_gate.record_twin_episode(pmv_penalty)
 
                 if action not in ["DEFER"]:
                     logger.info(

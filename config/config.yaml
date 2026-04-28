@@ -13,10 +13,36 @@ mqtt:
 database:
   path: "data/ems_state.db"
 
+# 10 appliance classes used by Phase-1 NILM pipeline
+appliances:
+  - fridge
+  - hvac
+  - kettle
+  - tv
+  - washing_machine
+  - dishwasher
+  - microwave
+  - oven
+  - ev_charger
+  - laptop
+
 system_safety:
   max_aggregate_wattage: 3500.0
   warning_pct: 1.10
   critical_pct: 1.25
+  # Per-appliance watt limits; tier0: true = life-critical (never shed)
+  fridge:          { max_w: 300,  tier0: false }
+  hvac:            { max_w: 2500, tier0: false }
+  kettle:          { max_w: 2500, tier0: false }
+  tv:              { max_w: 300,  tier0: false }
+  washing_machine: { max_w: 2200, tier0: false }
+  dishwasher:      { max_w: 2200, tier0: false }
+  microwave:       { max_w: 1500, tier0: false }
+  oven:            { max_w: 2500, tier0: false }
+  ev_charger:      { max_w: 3800, tier0: false }
+  laptop:          { max_w: 150,  tier0: false }
+  # medical_device, alarm_system → tier0: true (not sheddable — Phase 2)
+  # Legacy per-device ID limits kept for ESP32 simulator compatibility
   device_wattage_limits:
     esp32_fridge: 200.0
     esp32_microwave: 1200.0

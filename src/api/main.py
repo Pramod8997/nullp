@@ -5,7 +5,8 @@ import time
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import numpy as np
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import aiomqtt
@@ -306,6 +307,55 @@ async def submit_label(submission: LabelSubmission):
         "label": submission.label,
     })
     return {"status": "ok", "message": f"Label '{submission.label}' applied to {submission.device_id}"}
+
+
+# ─── GAP 9: Label Device Endpoint (Prototype Registry Update) ──────────────
+# In-memory store populated by the pipeline when stable unknowns are detected.
+pending_unknowns_store: List[Dict] = []
+
+
+class DeviceLabelRequest(BaseModel):
+    class_name: str
+    segments: List[List[float]]   # list of (128,) float arrays
+
+
+@app.post("/api/label_device")
+async def label_device(req: DeviceLabelRequest):
+    """
+    Called by dashboard when user labels an unknown device.
+    Updates the prototype registry without retraining the encoder.
+    The pipeline's PrototypeRegistry is updated in-process via the LABEL_SUBMITTED
+    broadcast which the orchestrator picks up.
+    """
+    segs = np.array(req.segments, dtype=np.float32)  # (K, 128)
+    if segs.shape[-1] != 128:
+        raise HTTPException(status_code=400,
+                            detail="Each segment must be exactly 128 samples")
+
+    # Broadcast to pipeline so it can update PrototypeRegistry
+    await manager.broadcast({
+        "type": "LABEL_SUBMITTED",
+        "class_name": req.class_name,
+        "segments": req.segments,
+    })
+
+    # Remove from pending store if present
+    global pending_unknowns_store
+    pending_unknowns_store = [
+        u for u in pending_unknowns_store if u.get("class_name") != req.class_name
+    ]
+
+    return {
+        "status": "ok",
+        "class_name": req.class_name,
+        "segments_received": len(segs),
+    }
+
+
+@app.get("/api/unknown_devices")
+async def unknown_devices():
+    """Returns list of pending unknown device signatures needing labels."""
+    return {"pending": pending_unknowns_store}
 
 
 # ─── WebSocket Endpoint ─────────────────────────────────────────────
