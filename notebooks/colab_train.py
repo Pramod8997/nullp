@@ -55,29 +55,40 @@ def download_file(url, dest, desc=''):
 
 ukdale_ok = download_file(UKDALE_URL, H5_PATH, 'ukdale.h5')
 
-# ── CELL 3: Inspect UK-DALE HDF5 structure ───────────────────
+# ── CELL 3: Constants & helpers ──────────────────────────────
 import h5py
-
-def inspect_h5(path, max_lines=80):
-    """Print HDF5 tree and return all dataset paths."""
-    paths = []
-    def _visitor(name, obj):
-        if len(paths) < max_lines:
-            print(f'  {name}  [{type(obj).__name__}]', dict(list(obj.attrs.items())[:3]) if obj.attrs else '')
-        if isinstance(obj, h5py.Dataset):
-            paths.append(name)
-    if os.path.exists(path):
-        with h5py.File(path, 'r') as f:
-            f.visititems(_visitor)
-    return paths
-
-print('\n=== UK-DALE HDF5 structure (first 80 nodes) ===')
-all_paths = inspect_h5(H5_PATH)
-
-# ── CELL 4: UK-DALE parser (handles nilmtk HDFStore format) ──
 SEQ_LEN          = 128
-TRANSIENT_THRESH = 50.0   # W — minimum derivative for transient
+TRANSIENT_THRESH = 50.0
 SG_WIN, SG_POLY  = 7, 2
+
+# UK-DALE nilmtk-metadata: meter number → appliance label (buildings 1 & 2)
+# Source: https://github.com/nilmtk/nilm_metadata/tree/master/meter_devices
+UKDALE_METER_LABELS = {
+    'building1': {
+        2: 'fridge', 3: 'freezer', 4: 'fridge freezer',
+        5: 'washing machine', 6: 'dish washer', 7: 'television',
+        8: 'microwave', 9: 'toaster', 10: 'kettle', 11: 'laptop',
+        12: 'computer', 13: 'television', 14: 'hair dryer',
+        15: 'vacuum cleaner', 16: 'breadmaker', 17: 'games console',
+        18: 'hi-fi', 19: 'oven', 20: 'toaster',
+    },
+    'building2': {
+        2: 'washing machine', 3: 'dish washer', 4: 'television',
+        5: 'microwave', 6: 'kettle', 7: 'freezer', 8: 'boiler',
+    },
+    'building3': {
+        2: 'electric space heater', 3: 'washing machine', 4: 'kettle',
+        5: 'microwave', 6: 'laptop', 7: 'television',
+    },
+    'building4': {
+        2: 'fridge', 3: 'television', 4: 'washing machine',
+        5: 'kettle', 6: 'microwave', 7: 'laptop',
+    },
+    'building5': {
+        2: 'washing machine', 3: 'dish washer', 4: 'fridge freezer',
+        5: 'kettle', 6: 'television', 7: 'microwave',
+    },
+}
 
 UKDALE_LABEL_MAP = {
     'fridge':          ['fridge', 'fridge freezer', 'freezer'],
@@ -85,11 +96,11 @@ UKDALE_LABEL_MAP = {
     'dishwasher':      ['dish washer', 'dishwasher'],
     'microwave':       ['microwave'],
     'kettle':          ['kettle'],
-    'tv':              ['television', 'tv', 'monitor'],
-    'hvac':            ['heat pump', 'air conditioner', 'boiler', 'air_conditioner'],
+    'tv':              ['television', 'tv'],
+    'hvac':            ['heat pump', 'boiler', 'air conditioner', 'electric space heater'],
     'oven':            ['oven', 'cooker'],
     'ev_charger':      ['electric vehicle', 'ev charger'],
-    'laptop':          ['laptop', 'computer', 'desktop'],
+    'laptop':          ['laptop', 'computer'],
 }
 
 def label_to_canonical(label):
@@ -100,7 +111,6 @@ def label_to_canonical(label):
     return None
 
 def detect_transients(signal, thresh=TRANSIENT_THRESH):
-    """Return list of 128-sample segments centred on turn-on events."""
     signal = np.asarray(signal, dtype=np.float32)
     if len(signal) < SG_WIN + SEQ_LEN:
         return []
@@ -113,10 +123,29 @@ def detect_transients(signal, thresh=TRANSIENT_THRESH):
             seg   = signal[start:start + SEQ_LEN]
             if len(seg) == SEQ_LEN:
                 segs.append(seg.copy())
-            i += SEQ_LEN        # skip ahead
+            i += SEQ_LEN
         else:
             i += 1
     return segs
+
+def read_meter_power(meter_grp):
+    """Read power from a nilmtk PyTables compound dataset."""
+    tbl = meter_grp.get('table')
+    if tbl is None:
+        return None
+    try:
+        # PyTables stores as structured numpy array — dtype has named fields
+        raw = tbl[()]   # shape (N,), dtype = [('index', i8), ('values_block_0', f4, (1,)), ...]
+        if raw.dtype.names and 'values_block_0' in raw.dtype.names:
+            return raw['values_block_0'].flatten().astype(np.float32)
+        # Fallback: look for any float field
+        for field in raw.dtype.names or []:
+            col = raw[field].flatten()
+            if col.dtype.kind == 'f' and col.max() > 1:
+                return col.astype(np.float32)
+    except Exception:
+        pass
+    return None
 
 def load_ukdale(path=H5_PATH):
     dataset = defaultdict(list)
@@ -125,62 +154,27 @@ def load_ukdale(path=H5_PATH):
 
     with h5py.File(path, 'r') as f:
         buildings = [k for k in f.keys() if k.startswith('building')]
-        for bld in buildings[:2]:          # houses 1 & 2
+        for bld in buildings:
             elec = f.get(f'{bld}/elec')
             if elec is None:
                 continue
+            bld_map = UKDALE_METER_LABELS.get(bld, {})
             for meter_key in elec.keys():
-                meter_grp = elec[meter_key]
+                # Extract meter number
+                try:
+                    meter_num = int(meter_key.replace('meter', ''))
+                except ValueError:
+                    continue
+                if meter_num == 1:
+                    continue  # skip aggregate
 
-                # ── Find appliance label from attributes ──────────────
-                label = ''
-                # nilmtk stores metadata as JSON in 'metadata' key or attrs
-                for attr in ['appliance_type', 'device_name', 'label', 'name']:
-                    v = meter_grp.attrs.get(attr, b'')
-                    if isinstance(v, bytes): v = v.decode()
-                    if v: label = v; break
-
-                # Try metadata subgroup
-                if not label and 'metadata' in meter_grp:
-                    try:
-                        meta = json.loads(bytes(meter_grp['metadata'][()]).decode())
-                        label = meta.get('appliance_type', meta.get('label', ''))
-                    except Exception:
-                        pass
-
+                # Get label from hardcoded map
+                label = bld_map.get(meter_num, '')
                 canonical = label_to_canonical(label)
                 if not canonical:
                     continue
 
-                # ── Read power time-series ────────────────────────────
-                # nilmtk stores as pandas HDFStore: look for 'table' or direct dataset
-                power = None
-                for candidate in ['table', 'data', '0', 'values']:
-                    if candidate in meter_grp:
-                        try:
-                            ds = meter_grp[candidate]
-                            # HDFStore table: columns are in 'axis0', values in 'block0_values'
-                            if 'block0_values' in ds:
-                                power = ds['block0_values'][:, 0].astype(np.float32)
-                            elif 'values_block_0' in ds:
-                                power = ds['values_block_0'][:, 0].astype(np.float32)
-                            elif isinstance(ds, h5py.Dataset):
-                                arr = ds[()]
-                                if arr.ndim == 2: arr = arr[:, 0]
-                                power = arr.astype(np.float32)
-                            if power is not None and len(power) > SEQ_LEN:
-                                break
-                        except Exception:
-                            pass
-
-                if power is None or len(power) < SEQ_LEN:
-                    # Last resort: iterate all sub-datasets
-                    for sub in meter_grp.values():
-                        if isinstance(sub, h5py.Dataset) and sub.size > SEQ_LEN:
-                            arr = sub[()].flatten().astype(np.float32)
-                            if len(arr) > SEQ_LEN:
-                                power = arr; break
-
+                power = read_meter_power(elec[meter_key])
                 if power is None:
                     continue
 
@@ -475,17 +469,24 @@ size_mb = os.path.getsize('ems_weights.zip') / 1e6
 print(f'\n✅ Packaged: ems_weights.zip  ({size_mb:.1f} MB)')
 
 # ── CELL 13: Download from Colab ─────────────────────────────
-# Option A — Copy to /content/ so you can right-click → Download in file panel
-shutil.copy('ems_weights.zip', '/content/ems_weights.zip')
-print('📁 File ready at /content/ems_weights.zip')
-print('   → In Colab sidebar: Files → right-click ems_weights.zip → Download')
-
-# Option B — Mount Google Drive and copy there
+# Primary: Mount Google Drive and copy there (most reliable)
 try:
     from google.colab import drive
     drive.mount('/content/drive', force_remount=False)
     dest = '/content/drive/MyDrive/ems_weights.zip'
     shutil.copy('ems_weights.zip', dest)
-    print(f'✅ Also copied to Google Drive: {dest}')
+    print(f'✅ Saved to Google Drive: {dest}')
+    print('   → Open Google Drive and download ems_weights.zip')
 except Exception as e:
-    print(f'Drive mount skipped ({e}) — use Option A above.')
+    print(f'Drive mount skipped: {e}')
+
+# Fallback: ensure file is at /content/ for sidebar download
+zip_abs = os.path.abspath('ems_weights.zip')
+content_dest = '/content/ems_weights.zip'
+if zip_abs != content_dest:
+    shutil.copy(zip_abs, content_dest)
+    print(f'📁 Also at {content_dest}')
+else:
+    print(f'📁 File already at {content_dest}')
+
+print('   → Colab sidebar (Files panel): right-click ems_weights.zip → Download')
