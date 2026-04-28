@@ -510,6 +510,39 @@ class EMSOrchestrator:
         except Exception as e:
             logger.error(f"Error processing {topic}: {e}", exc_info=True)
 
+    # ─── Label Submitted Handler (P4.5: Prototype Registry Update) ────
+    def handle_label_submitted(self, class_name: str, segments_list: list) -> None:
+        """
+        Called when the dashboard POSTs to /api/label_device.
+        Updates the PrototypeRegistry in-process without retraining the encoder.
+
+        Args:
+            class_name:    user-provided label string
+            segments_list: list of (128,) float arrays from the WebSocket broadcast
+        """
+        try:
+            if self.prototype_registry is None:
+                logger.warning("PrototypeRegistry not loaded — cannot process label")
+                return
+
+            segs = np.array(segments_list, dtype=np.float32)   # (K, 128)
+            if segs.ndim == 1:
+                segs = segs.reshape(1, -1)
+            if segs.shape[-1] != 128:
+                logger.error(f"Label segments wrong shape: {segs.shape}")
+                return
+
+            self.prototype_registry.add_class(class_name, segs)
+            registry_path = 'backend/models/weights/prototype_registry.pt'
+            os.makedirs(os.path.dirname(registry_path), exist_ok=True)
+            self.prototype_registry.save(registry_path)
+            logger.info(
+                f"✅ PrototypeRegistry updated: '{class_name}' added "
+                f"({len(self.prototype_registry.class_names())} classes total)"
+            )
+        except Exception as e:
+            logger.error(f"Label submission processing failed: {e}")
+
     # ─── Main Run Loop ────────────────────────────────────────────────
     async def run(self) -> None:
         self._running = True

@@ -11,15 +11,16 @@ const WS_URL = 'ws://localhost:8000/ws';
 const MAX_RECONNECT_DELAY = 10000;
 
 function App() {
-  const [devices, setDevices] = useState({});
-  const [powerHistory, setPowerHistory] = useState([]);
-  const [alerts, setAlerts] = useState([]);
-  const [twinEvents, setTwinEvents] = useState([]);
-  const [phantomData, setPhantomData] = useState({ loads: {}, total: 0 });
-  const [pmvScore, setPmvScore] = useState(0);
-  const [analytics, setAnalytics] = useState({});
+  const [devices, setDevices]             = useState({});
+  const [powerHistory, setPowerHistory]     = useState([]);
+  const [alerts, setAlerts]                 = useState([]);
+  const [twinEvents, setTwinEvents]         = useState([]);
+  const [phantomData, setPhantomData]       = useState({ loads: {}, total: 0 });
+  const [pmvScore, setPmvScore]             = useState(0);
+  const [analytics, setAnalytics]           = useState({});
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
-  const [pipelineStatus, setPipelineStatus] = useState('initializing');
+  const [pipelineStatus, setPipelineStatus]     = useState('initializing');
+  const [pendingUnknowns, setPendingUnknowns]   = useState([]);  // LABEL_REQUEST events
 
   const wsRef = useRef(null);
   const reconnectDelay = useRef(1000);
@@ -152,8 +153,38 @@ function App() {
 
       case 'RL_ACTION':
       case 'EMPATHY_BLOCK':
+      case 'EMPATHY_ACTION':
       case 'UNKNOWN_DEVICE':
         setTwinEvents(prev => [data, ...prev].slice(0, 30));
+        break;
+
+      // ── Phase-1 new event types ──────────────────────────────────────────
+      case 'LABEL_REQUEST':
+        // Stable unknown device — needs user label (GAP 9)
+        setTwinEvents(prev => [data, ...prev].slice(0, 30));
+        setPendingUnknowns(prev => {
+          // Dedupe by device_id — keep the latest
+          const filtered = prev.filter(u => u.device_id !== data.device_id);
+          return [data, ...filtered].slice(0, 20);
+        });
+        break;
+
+      case 'LOW_CONFIDENCE':
+        // Classification uncertain — show in twin event log
+        setTwinEvents(prev => [data, ...prev].slice(0, 30));
+        break;
+
+      case 'SAFETY_WARNING':
+        setAlerts(prev => [
+          {
+            id: Date.now() + Math.random(),
+            severity: 'warning',
+            device_id: data.device_id || '',
+            message: data.message,
+            timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+          },
+          ...prev,
+        ].slice(0, 50));
         break;
 
       case 'PHANTOM_LOAD':
