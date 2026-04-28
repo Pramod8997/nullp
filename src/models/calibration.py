@@ -70,5 +70,9 @@ class TemperatureScaler(nn.Module):
         torch.save(self.state_dict(), path)
 
     def load(self, path: str):
-        self.load_state_dict(torch.load(path, map_location='cpu'))
+        sd = torch.load(path, map_location='cpu', weights_only=False)
+        # Colab script saved param as 'T'; local model expects 'temperature'
+        if 'T' in sd and 'temperature' not in sd:
+            sd = {'temperature': sd['T']}
+        self.load_state_dict(sd)
         self.eval()
