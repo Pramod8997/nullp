@@ -226,13 +226,9 @@ async def main():
     args = parser.parse_args()
 
     shutdown_event = asyncio.Event()
-    _shutdown_logged = False
 
     def handle_signal():
-        nonlocal _shutdown_logged
-        if not _shutdown_logged:
-            logger.info("Simulator shutting down...")
-            _shutdown_logged = True
+        logger.info("Simulator shutting down...")
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
