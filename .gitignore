@@ -1,4 +1,8 @@
+# ═══════════════════════════════════════════════════════
+# Python
+# ═══════════════════════════════════════════════════════
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -20,6 +24,10 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# ═══════════════════════════════════════════════════════
+# Testing & Linting
+# ═══════════════════════════════════════════════════════
 .pytest_cache/
 .coverage
 htmlcov/
@@ -29,16 +37,14 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
-*.log
 .mypy_cache/
 .dmypy.json
 dmypy.json
-.jupyter
-*.db
-*.sqlite3
-*.db-shm
-*.db-wal
-# Node.js
+.ruff_cache/
+
+# ═══════════════════════════════════════════════════════
+# Node.js / Frontend
+# ═══════════════════════════════════════════════════════
 node_modules/
 npm-debug.log
 yarn-error.log
@@ -46,27 +52,57 @@ yarn-debug.log
 .pnp
 .pnp.js
 
-# OS generated & Local Files
+# ═══════════════════════════════════════════════════════
+# OS & IDE
+# ═══════════════════════════════════════════════════════
 .DS_Store
 .DS_Store?
-.env
-.env.*
 ._*
 .Spotlight-V100
 .Trashes
 ehthumbs.db
 Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# Model Weights & Data
-weights/
-*.pth
+# ═══════════════════════════════════════════════════════
+# Environment & Secrets
+# ═══════════════════════════════════════════════════════
+.env
+.env.*
+
+# ═══════════════════════════════════════════════════════
+# Database Files
+# ═══════════════════════════════════════════════════════
+*.db
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# ═══════════════════════════════════════════════════════
+# Model Weights & Generated Data
+# ═══════════════════════════════════════════════════════
+backend/models/weights/
+backend/data/*.h5
 *.onnx
-*.h5
-*.pkl
 data/raw/
 data/processed/
 
+# ═══════════════════════════════════════════════════════
+# Training Artifacts & Logs
+# ═══════════════════════════════════════════════════════
+rl_action_log.csv
+*.log
+logs/
+training_results/
+scratch/
+
+# ═══════════════════════════════════════════════════════
 # ESP32 / PlatformIO
+# ═══════════════════════════════════════════════════════
 .pio/
 .pioenvs/
 .piolibdeps/
@@ -75,6 +111,8 @@ firmware/**/build/
 *.elf
 *.map
 
-# Logs & Monitoring
-logs/
-*.log
+# ═══════════════════════════════════════════════════════
+# Jupyter
+# ═══════════════════════════════════════════════════════
+.jupyter
+.ipynb_checkpoints/
