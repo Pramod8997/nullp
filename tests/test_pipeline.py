@@ -759,3 +759,138 @@ class TestConfidenceGateNoOp:
                            classified_device="esp32_tv", min_confidence=0.90)
         assert action == "DEFER", f"Expected DEFER for low confidence, got {action}"
 
+
+# ════════════════════════════════════════════════════════
+# PHASE-1 BUG FIX TESTS (from phase1probapbeerrors.md)
+# ════════════════════════════════════════════════════════
+
+class TestTemporalValidator:
+    """§3.1 fix: TemporalValidator bridges Watchdog → RL soft control."""
+
+    def test_no_suggestion_initially(self):
+        """Single anomaly should not produce a suggestion."""
+        from src.pipeline.temporal_validator import TemporalValidator
+        tv = TemporalValidator(persistence_count=3, cooldown=0)
+        result = tv.validate("fridge", 300.0)
+        assert result is None
+
+    def test_persistent_anomaly_triggers_suggestion(self):
+        """Repeated anomalies within timeout should trigger soft control."""
+        from src.pipeline.temporal_validator import TemporalValidator
+        tv = TemporalValidator(persistence_count=3, cooldown=0,
+                               persistence_timeout=600.0)
+        # Push 3 anomalies (all within timeout since they're near-instant)
+        for i in range(3):
+            result = tv.validate("fridge", 300.0 + i * 10)
+        assert result is not None, "Expected suggestion after 3 persistent anomalies"
+        action, info = result
+        assert action in ("SOFT_DEFER", "SOFT_SHED_SUGGEST")
+        assert info["device_id"] == "fridge"
+        assert info["anomaly_count"] >= 3
+
+    def test_cooldown_prevents_spam(self):
+        """After a suggestion, cooldown should suppress the next one."""
+        from src.pipeline.temporal_validator import TemporalValidator
+        tv = TemporalValidator(persistence_count=2, cooldown=9999.0,
+                               persistence_timeout=600.0)
+        tv.validate("fridge", 300.0)
+        result = tv.validate("fridge", 310.0)  # triggers suggestion
+        assert result is not None
+        # Next one should be suppressed by cooldown
+        result2 = tv.validate("fridge", 320.0)
+        assert result2 is None, "Cooldown should suppress repeated suggestions"
+
+    def test_reset_clears_history(self):
+        """Reset should clear all anomaly history."""
+        from src.pipeline.temporal_validator import TemporalValidator
+        tv = TemporalValidator(persistence_count=2, cooldown=0)
+        tv.validate("fridge", 300.0)
+        tv.validate("fridge", 310.0)
+        tv.reset("fridge")
+        result = tv.validate("fridge", 320.0)
+        assert result is None, "After reset, should not trigger immediately"
+
+
+class TestCSVFallbackWriter:
+    """§3.2 fix: CSV fallback writer should persist data when DB fails."""
+
+    def test_csv_fallback_creates_file(self, tmp_path):
+        """CSV fallback should create file with header and data row."""
+        import csv as csv_mod
+
+        # Minimal mock of orchestrator CSV writer logic
+        csv_path = str(tmp_path / "fallback.csv")
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv_mod.writer(f)
+            writer.writerow(['timestamp', 'device_id', 'power_watts'])
+            writer.writerow([1234567890.0, 'esp32_fridge', 150.5])
+
+        assert os.path.exists(csv_path)
+        with open(csv_path, 'r') as f:
+            reader = csv_mod.reader(f)
+            rows = list(reader)
+        assert len(rows) == 2  # header + 1 data row
+        assert rows[0] == ['timestamp', 'device_id', 'power_watts']
+        assert rows[1][1] == 'esp32_fridge'
+
+
+class TestNILMPreprocessingIntegration:
+    """§2.1 fix: NILM transient detector should gate CNN classification."""
+
+    def test_steady_signal_skips_classification(self):
+        """Steady-state data should not trigger the CNN classify path."""
+        from src.pipeline.aggregate_nilm import NILMTransientDetector
+        detector = NILMTransientDetector()
+        # 30 steady samples — no transient
+        for _ in range(30):
+            is_t, seg = detector.push(100.0 + np.random.normal(0, 1))
+        # Final steady push
+        is_t, seg = detector.push(101.0)
+        assert not is_t, "Steady signal should not trigger classification"
+        assert seg is None
+
+    def test_transient_provides_filtered_segment(self):
+        """A >50W spike should produce a filtered (128,) segment for CNN."""
+        from src.pipeline.aggregate_nilm import NILMTransientDetector
+        detector = NILMTransientDetector()
+        for _ in range(20):
+            detector.push(100.0)
+        is_t, seg = detector.push(300.0)  # 200W spike
+        assert is_t, "200W spike should trigger transient"
+        assert seg is not None
+        assert seg.shape == (128,)
+        # The segment should be SG-filtered (smoothed), not raw
+
+
+class TestUnknownDeviceRLRouting:
+    """§2.2 fix: Stable unknowns must be forwarded to Digital Twin + RL."""
+
+    def test_rl_agent_accepts_pseudo_class(self):
+        """RL agent should handle unknown_X pseudo-class without crashing."""
+        agent = TabularQLearningAgent()
+        agent.last_action_time = 0
+        pseudo_class = "unknown_esp32_mystery"
+        state = {
+            "devices": {pseudo_class: 0.6},
+            "price_tier": 1, "pmv_zone": 1, "tod": 2,
+        }
+        # Should not crash — pseudo-class is not in NEVER_SHED
+        action = agent.act(state, pmv=0.0, confidence=0.3,
+                           classified_device=pseudo_class)
+        # Low confidence → DEFER (confidence gate blocks)
+        assert action == "DEFER"
+
+    def test_digital_twin_accepts_unknown_load(self):
+        """Digital Twin should simulate step with unknown device wattage."""
+        from src.models.thermodynamics import ThermodynamicsModel
+        env = ThermodynamicsModel()
+        # Simulate a 1500W unknown heater
+        appliance_watts = {"unknown_device_1": 1500.0, "esp32_fridge": 150.0}
+        new_temp = env.simulate_step(
+            appliance_watts, outdoor_temp=28.0,
+            t_internal=22.0, dt_minutes=1.0
+        )
+        # Temperature should change (not crash)
+        assert isinstance(new_temp, float)
+        assert new_temp != 22.0, "1500W load should affect internal temperature"

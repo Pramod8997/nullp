@@ -77,24 +77,22 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 | Temperature Scaling calibration | ✅ |
 | Full ISO 7730 Fanger PMV (6-input) | ✅ |
 | Q-Learning with ToU pricing & confidence gate | ✅ |
+| Policy Promotion Gate (RL twin validation) | ✅ |
 | Safety monitor (parallel asyncio task) | ✅ |
 | Delta stability for unknown device routing | ✅ |
 | 10-device ESP32 simulator (1Hz) | ✅ |
-| React dashboard with 6 panels | ✅ |
+| React dashboard with Digital Twin label prompts | ✅ |
 | API handling for LABEL_REQUEST / LOW_CONFIDENCE | ✅ |
-| Real UK-DALE dataset (requires nilmtk) | 🔲 Phase 2 |
-| Real REDD dataset | 🔲 Phase 2 |
-| ESP32 hardware deployment | 🔲 Phase 2 |
-| Real CT clamp sensors | 🔲 Phase 2 |
+| Real UK-DALE dataset training (via Colab HDF5 loader) | ✅ |
+| Real REDD dataset training (via Colab) | ✅ |
 
 ### Phase 2 (Planned)
-- ESP32 firmware with Tier-0 hardware relay (125% rated wattage)
-- Real UK-DALE 1Hz data loading via NILMTK
-- Real REDD data loading via NILMTK
-- Live MQTT from physical smart plugs
-- Evaluation on real household data
-| DB failure | Log to fallback, continue safety monitoring |
-| Model drift | Fall back to rule-based thresholds |
+| Feature | Status |
+|---------|--------|
+| ESP32 hardware deployment | 🔲 Phase 2 |
+| Real CT clamp sensors | 🔲 Phase 2 |
+| Live MQTT from physical smart plugs | 🔲 Phase 2 |
+| Evaluation on real household live edge data | 🔲 Phase 2 |
 
 ---
 
@@ -172,7 +170,7 @@ The dashboard displays 6 panels:
 
 ## 🧪 Testing
 
-Run the full test suite (27 tests):
+Run the full test suite (45 tests):
 
 ```bash
 make test
@@ -193,9 +191,9 @@ Tests cover:
 
 ## 🛠 Advanced Usage
 
-### Model Training
+### Model Training (Local Mock)
 
-Train the CNN/ProtoNet and RL agent from scratch:
+Train the CNN/ProtoNet and RL agent from scratch locally using synthetic data:
 
 ```bash
 make train_all
@@ -207,6 +205,19 @@ This runs:
 3. **RL Q-Table** — 1000 episodes of tabular Q-learning
 
 Weights are saved to `backend/models/weights/`.
+
+### Model Training (Google Colab with Real Datasets)
+
+We provide a Colab notebook to train the ProtoNet on real UK-DALE and REDD datasets using an NVIDIA T4 GPU:
+
+1. Open `notebooks/colab_train.py` in Google Colab.
+2. Select **T4 GPU** runtime and run the script.
+3. The script will download datasets, train the model, and package the weights into `ems_weights.zip`.
+4. Run the local import script to load the weights into your project:
+
+```bash
+python3 scripts/import_colab_weights.py path/to/ems_weights.zip
+```
 
 ### Safety Stress Test
 
@@ -262,7 +273,8 @@ mjr/
 │   ├── run_pipeline.py          # Main pipeline orchestrator (9-step architecture)
 │   ├── start_broker.py          # Local amqtt MQTT broker
 │   ├── train_models.py          # Offline CNN/ProtoNet/RL training
-│   └── generate_mock_ukdale.py  # Synthetic UK-DALE HDF5 generator
+│   ├── generate_mock_ukdale.py  # Synthetic UK-DALE HDF5 generator
+│   └── import_colab_weights.py  # Local script to import weights from Colab
 ├── src/
 │   ├── api/
 │   │   └── main.py              # FastAPI + WebSocket bridge (CORS, REST, heartbeat)
@@ -303,12 +315,12 @@ mjr/
 │           ├── PhantomTracker.jsx# Vampire load visualization
 │           └── SystemStatus.jsx  # Pipeline health + analytics display
 ├── tests/
-│   ├── test_pipeline.py         # 22 integration tests
-│   └── test_api.py              # 5 API endpoint tests
+│   ├── test_pipeline.py         # 45 integration tests covering Phase 1
+│   └── test_api.py              # API endpoint tests
 ├── data/
 │   ├── uk_dale.py               # UK-DALE data loader (stub)
 │   ├── redd.py                  # REDD data loader (stub)
-│   └── synd.py                  # Synthetic data loader (stub)
+│   └── synd.py                  # Synthetic data loader with realistic turn-on transients
 ├── Makefile                     # install, train_all, test, run, clean
 ├── requirements.txt             # Python dependencies
 └── README.md

@@ -25,6 +25,7 @@ import logging
 import time
 import json
 import os
+import csv
 import pickle
 from collections import deque
 from datetime import datetime
@@ -51,6 +52,7 @@ from src.pipeline.aggregate_nilm import NILMTransientDetector
 from src.pipeline.delta_stability import DeltaStabilityAnalyzer
 from src.pipeline.phantom_tracker import PhantomTracker
 from src.pipeline.watchdog import SoftAnomalyWatchdog
+from src.pipeline.temporal_validator import TemporalValidator
 from src.pipeline.analytics import AnalyticsEngine
 from src.pipeline.failure_matrix import FailureMatrix
 from src.pipeline.classifier import ModeClassifier
@@ -95,6 +97,7 @@ class EMSOrchestrator:
         )
         self.failure_matrix = FailureMatrix()
         self.mode_classifier = ModeClassifier()
+        self.temporal_validator = TemporalValidator()
 
         # ── ProtoNet / CNN ──
         proto_cfg = self.config.get("protonet", {})
@@ -133,11 +136,19 @@ class EMSOrchestrator:
         # ── Policy Promotion Gate ──
         self.promo_gate = PolicyPromotionGate()
 
-        # Rolling windows for CNN input (per device)
-        self.power_windows: Dict[str, deque] = {}  # legacy rolling window
+        # Per-device NILM transient detectors (§2.1 fix: no shared buffer)
+        self.nilm_detectors: Dict[str, NILMTransientDetector] = {}
+
+        # Rolling windows for CNN input (per device) — legacy fallback
+        self.power_windows: Dict[str, deque] = {}
 
         # ── RL Agent (reads config internally) ──
         self.agent = TabularQLearningAgent()
+
+        # ── CSV Fallback Writer (§3.2 fix) ──
+        self.csv_fallback_path = self.config.get('database', {}).get(
+            'fallback_csv', 'data/fallback_measurements.csv'
+        )
 
         # ── State Memory ──
         self.device_states: Dict[str, int] = {}
@@ -253,25 +264,36 @@ class EMSOrchestrator:
             })
 
     # ─── ProtoNet Classification (with OpenMax + confidence) ──────────
-    def _classify_device(self, device_id: str, power_watts: float):
+    def _classify_device(self, device_id: str, power_watts: float,
+                         filtered_segment: np.ndarray = None):
         """
         Full classification pipeline:
-        1. Rolling window → CNN → embedding
+        1. NILM-filtered segment (or legacy rolling window) → CNN → embedding
         2. Distance to prototypes → softmax → calibrated confidence
         3. Weibull OpenMax → unknown detection
         4. Returns (class_name, confidence, distances) or ("pending", 0, {})
-        """
-        # Maintain rolling window
-        if device_id not in self.power_windows:
-            self.power_windows[device_id] = deque(maxlen=self.window_size)
-        self.power_windows[device_id].append(power_watts)
 
-        window = self.power_windows[device_id]
-        if len(window) < self.window_size or self.encoder is None:
+        Args:
+            filtered_segment: (128,) pre-filtered segment from NILMTransientDetector.
+                              If provided, bypasses the legacy rolling window.
+        """
+        if self.encoder is None:
             return "pending", 0.0, {}
 
-        try:
+        # Use NILM-filtered segment when available (§2.1 fix)
+        if filtered_segment is not None:
+            window_np = filtered_segment
+        else:
+            # Legacy fallback: maintain rolling window
+            if device_id not in self.power_windows:
+                self.power_windows[device_id] = deque(maxlen=self.window_size)
+            self.power_windows[device_id].append(power_watts)
+            window = self.power_windows[device_id]
+            if len(window) < self.window_size:
+                return "pending", 0.0, {}
             window_np = np.array(list(window), dtype=np.float32)
+
+        try:
             class_name, confidence, distances = self.support_manager.classify(
                 window_np, self.encoder, self.weibull, self.temp_scaler,
                 self.confidence_threshold
@@ -293,6 +315,23 @@ class EMSOrchestrator:
         except Exception as e:
             logger.error(f"Failed to broadcast event: {e}")
 
+    # ─── CSV Fallback Writer (§3.2 fix) ───────────────────────────────
+    def _csv_fallback_write(self, timestamp: float, device_id: str,
+                            power_watts: float) -> None:
+        """Write measurement to a local CSV fallback file when DB is unavailable.
+        This prevents data loss during database lock-ups or disk issues."""
+        try:
+            os.makedirs(os.path.dirname(self.csv_fallback_path), exist_ok=True)
+            file_exists = os.path.exists(self.csv_fallback_path)
+            with open(self.csv_fallback_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(['timestamp', 'device_id', 'power_watts'])
+                writer.writerow([timestamp, device_id, power_watts])
+            logger.warning(f"📝 DB fallback: wrote {device_id}={power_watts:.1f}W to {self.csv_fallback_path}")
+        except Exception as fallback_err:
+            logger.critical(f"CSV fallback write ALSO failed: {fallback_err}")
+
     # ─── Main Message Handler (ML Pipeline) ───────────────────────────
     async def _handle_mqtt_message(
         self, topic: str, payload: Union[str, bytes, bytearray, int, float, None]
@@ -312,7 +351,7 @@ class EMSOrchestrator:
             # ══════════════════════════════════════════════════════════
 
             # ══════════════════════════════════════════════════════════
-            # STEP 1: SOFT ANOMALY WATCHDOG
+            # STEP 1: SOFT ANOMALY WATCHDOG + TEMPORAL VALIDATION (§3.1)
             # ══════════════════════════════════════════════════════════
             if self.watchdog.check_reading(device_id, power_watts):
                 logger.warning(f"🔍 WATCHDOG: Soft anomaly on {device_id} ({power_watts:.1f}W)")
@@ -322,11 +361,51 @@ class EMSOrchestrator:
                     "power": round(power_watts, 2),
                     "message": f"Z-score anomaly detected on {device_id}",
                 })
+                # §3.1 fix: Feed anomaly into TemporalValidator for persistence check
+                suggestion = self.temporal_validator.validate(device_id, power_watts)
+                if suggestion:
+                    soft_action, soft_info = suggestion
+                    logger.info(f"🔔 Temporal Validation: {soft_action} for {device_id}")
+                    await self._broadcast_event({
+                        "type": "TEMPORAL_ANOMALY_ACTION",
+                        "device_id": device_id,
+                        "action": soft_action,
+                        "details": soft_info,
+                        "message": soft_info.get("message", ""),
+                    })
 
             # ══════════════════════════════════════════════════════════
-            # STEP 2: CNN / PROTONET + OPENMAX CLASSIFICATION
+            # STEP 1.5: NILM PREPROCESSING (§2.1 fix)
+            # Route raw power through SG-filter + derivative transient
+            # detector. Only trigger CNN classification on valid ±50W
+            # step-change events, not on every 1Hz tick.
             # ══════════════════════════════════════════════════════════
-            class_name, confidence, distances = self._classify_device(device_id, power_watts)
+            if device_id not in self.nilm_detectors:
+                pre_cfg = self.config.get("preprocessing", {})
+                self.nilm_detectors[device_id] = NILMTransientDetector(
+                    sg_window=pre_cfg.get("sg_window", 7),
+                    sg_polyord=pre_cfg.get("sg_poly", 2),
+                    threshold=pre_cfg.get("transient_threshold_w", 50.0),
+                    window_size=pre_cfg.get("transient_window_s", 5),
+                    embed_window=128,
+                )
+
+            is_transient, filtered_segment = self.nilm_detectors[device_id].push(power_watts)
+
+            if not is_transient:
+                # No transient detected — still update device state tracking
+                # and broadcast status, but skip heavy CNN classification
+                self.device_states[device_id] = 1 if power_watts > 10 else 0
+                class_name = self.device_classifications.get(device_id, "pending")
+                confidence = 0.0
+            else:
+                # ══════════════════════════════════════════════════════
+                # STEP 2: CNN / PROTONET + OPENMAX CLASSIFICATION
+                # (only on transient events — §2.1 fix)
+                # ══════════════════════════════════════════════════════
+                class_name, confidence, distances = self._classify_device(
+                    device_id, power_watts, filtered_segment=filtered_segment
+                )
             self.device_classifications[device_id] = class_name
 
             if class_name == "pending" or class_name == "error":
@@ -336,8 +415,15 @@ class EMSOrchestrator:
             elif class_name == "unknown":
                 # ── UNKNOWN DEVICE FLOW ──
                 # Get the last embedding for delta stability check
-                if device_id in self.power_windows and len(self.power_windows[device_id]) >= self.window_size:
+                # Use the NILM-filtered segment if available, otherwise fall back
+                if filtered_segment is not None:
+                    window_np = filtered_segment
+                elif device_id in self.power_windows and len(self.power_windows[device_id]) >= self.window_size:
                     window_np = np.array(list(self.power_windows[device_id]), dtype=np.float32)
+                else:
+                    window_np = None
+
+                if window_np is not None and self.encoder is not None:
                     with torch.no_grad():
                         if isinstance(self.encoder, ProtoNet) and hasattr(self.encoder, 'embed'):
                             x   = torch.tensor(window_np[:128] if len(window_np) >= 128 else np.pad(window_np, (0, 128 - len(window_np))), dtype=torch.float32).unsqueeze(0)
@@ -360,13 +446,46 @@ class EMSOrchestrator:
                             "embedding": cluster_mean.tolist() if cluster_mean is not None else [],
                             "message": f"Stable unknown signature on {device_id}. Please label this device.",
                         })
+
+                        # ═══ §2.2 FIX: Forward stable unknown to Digital Twin + RL ═══
+                        # Assign temporary pseudo-class so RL sees the load
+                        pseudo_class = f"unknown_{device_id}"
+                        self.device_states[device_id] = 1 if power_watts > 10 else 0
+
+                        # Forward to Digital Twin so thermal/energy simulation
+                        # accounts for this unknown load's heat and power draw
+                        appliance_watts = {k: (power_watts if k == device_id else 0)
+                                           for k in self.device_states}
+                        self._internal_temp = self.env.simulate_step(
+                            appliance_watts, outdoor_temp=28.0,
+                            t_internal=self._internal_temp, dt_minutes=1.0/60.0
+                        )
+
+                        # Update RL state space with pseudo-class base-load drain
+                        device_limits = self.config.get("system_safety", {}).get("device_wattage_limits", {})
+                        rated = device_limits.get("default", 1500.0)
+                        pct_of_rated = power_watts / max(rated, 1.0)
+                        pmv_score = self.env.compute_pmv(
+                            t_air=self._internal_temp, t_mrt=self._internal_temp - 0.5,
+                            v_air=0.1, rh=50.0, clo=0.7, met=1.2
+                        )
+                        tou_rate = self.agent.get_tou_rate(current_hour)
+                        state_dict = {
+                            "devices": {pseudo_class: pct_of_rated},
+                            "price_tier": self.agent.get_price_bin(tou_rate),
+                            "pmv_zone": self.agent.get_pmv_zone(pmv_score),
+                            "tod": self.agent.get_time_of_day_bin(current_hour),
+                        }
+                        # Let RL observe the unknown load (DEFER-only, no shed)
+                        self.agent.act(state_dict, pmv_score, confidence, pseudo_class)
+                        logger.debug(f"§2.2: Forwarded {pseudo_class} ({power_watts:.1f}W) to DigitalTwin + RL")
                     else:
                         logger.debug(f"Transient unknown on {device_id} — logged silently")
                         try:
                             await self.db.insert_measurement(current_time, device_id, power_watts)
                         except Exception:
-                            pass
-                # Skip RL for unknown devices
+                            self._csv_fallback_write(current_time, device_id, power_watts)
+                # End unknown device flow
                 
             elif confidence < self.confidence_threshold:
                 # ── LOW CONFIDENCE GATE ──
@@ -397,6 +516,8 @@ class EMSOrchestrator:
                 except Exception as e:
                     logger.error(f"DB write failed: {e}")
                     self.failure_matrix.trigger_failure("sensor_timeout", device_id)
+                    # §3.2 fix: fallback to CSV so data is not lost
+                    self._csv_fallback_write(current_time, device_id, power_watts)
 
                 # Update local device state
                 self.device_states[device_id] = 1 if power_watts > 10 else 0
