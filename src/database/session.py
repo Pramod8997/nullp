@@ -65,29 +65,65 @@ class DatabaseSession:
                     # Wait for 10 seconds for batching, as per INV-6
                     item = await asyncio.wait_for(self._write_queue.get(), timeout=10.0)
                     batch.append(item)
-                    self._write_queue.task_done()
+                    # Bug 4.6 fix: Removed task_done() calls — they can cause
+                    # ValueError if calls get desynchronized without join()
                     
                     while not self._write_queue.empty():
                         batch.append(self._write_queue.get_nowait())
-                        self._write_queue.task_done()
                 except asyncio.TimeoutError:
                     pass
 
                 if batch and self._conn:
-                    for query, params in batch:
-                        await self._conn.execute(query, params)
-                    await self._conn.commit()
-                    logger.debug(f"Flushed {len(batch)} records to database.")
+                    try:
+                        for query, params in batch:
+                            await self._conn.execute(query, params)
+                        await self._conn.commit()
+                        logger.debug(f"Flushed {len(batch)} records to database.")
+                    except Exception as db_err:
+                        # Bug 4.1 fix: When the actual DB write fails, fall back
+                        # to CSV. insert_measurement never throws (it just queues),
+                        # so CSV fallback must happen HERE where the real write is.
+                        logger.error(f"DB write error in flush loop: {db_err}")
+                        self._csv_fallback_batch(batch)
 
             except asyncio.CancelledError:
-                # Flush remaining items before exiting
+                # Bug 4.2 fix: Drain ALL remaining items from the queue
+                # before exiting, so no data is lost on shutdown
+                while not self._write_queue.empty():
+                    try:
+                        batch.append(self._write_queue.get_nowait())
+                    except Exception:
+                        break
                 if batch and self._conn:
-                    for query, params in batch:
-                        await self._conn.execute(query, params)
-                    await self._conn.commit()
+                    try:
+                        for query, params in batch:
+                            await self._conn.execute(query, params)
+                        await self._conn.commit()
+                        logger.info(f"Flushed {len(batch)} records during shutdown.")
+                    except Exception as shutdown_err:
+                        logger.error(f"Shutdown flush failed: {shutdown_err}")
+                        self._csv_fallback_batch(batch)
                 raise
             except Exception as e:
                 logger.error(f"Error in DB flush loop: {e}")
+
+    def _csv_fallback_batch(self, batch: List[Tuple[str, tuple]]) -> None:
+        """Bug 4.1 fix: Write a batch of failed DB records to CSV fallback."""
+        import csv as csv_mod
+        try:
+            directory = os.path.dirname(self.fallback_csv)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            file_exists = os.path.exists(self.fallback_csv)
+            with open(self.fallback_csv, 'a', newline='') as f:
+                writer = csv_mod.writer(f)
+                if not file_exists:
+                    writer.writerow(['timestamp', 'device_id', 'power_watts'])
+                for query, params in batch:
+                    writer.writerow(list(params))
+            logger.warning(f"📝 CSV fallback: wrote {len(batch)} records to {self.fallback_csv}")
+        except Exception as e:
+            logger.critical(f"CSV fallback write ALSO failed: {e}")
 
     async def _retention_loop(self) -> None:
         """Phase 2 (WS-6.1): Delete measurements older than retention_days every 24h."""

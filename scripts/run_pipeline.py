@@ -160,40 +160,95 @@ class EMSOrchestrator:
         self._running = False
         self._internal_temp = 22.0  # Indoor temp for digital twin
 
+        # Bug 1.6 fix: Carry over last known confidences during steady-state ticks
+        self.last_known_confidences: Dict[str, float] = {}
+
+        # Bug 2.2 fix: Track actual simulation time for real dt calculation
+        self.last_sim_time: float = time.time()
+
+        # Bug 2.4 fix: Track last analytics time per device for real duration
+        self.last_device_analytics_time: Dict[str, float] = {}
+
+        # Bug 4.3 fix: asyncio lock for CSV writes
+        self._csv_lock = asyncio.Lock()
+
     def _load_ml_models(self, proto_cfg: dict) -> None:
         """Load CNN encoder, temperature scaler, Weibull, and support registry."""
         weights_path = proto_cfg.get("weights_path", "")
         anchors_path = proto_cfg.get("anchors_path", "")
         weights_dir = os.path.dirname(weights_path) if weights_path else "backend/models/weights"
 
-        try:
-            # ── Try new Phase-1 weights first (protonet.pt) ──
-            new_weights = os.path.join(weights_dir, "protonet.pt")
-            if os.path.exists(new_weights):
+        # ── Try new Phase-1 weights first (protonet.pt) ──
+        new_weights = os.path.join(weights_dir, "protonet.pt")
+        if os.path.exists(new_weights):
+            try:
                 proto = ProtoNet(seq_len=128)
-                proto.load_state_dict(torch.load(new_weights, map_location="cpu", weights_only=False))
-                proto.eval()
-                self.encoder = proto   # ProtoNet is the primary encoder
-                logger.info(f"✅ Phase-1 ProtoNet loaded from {new_weights}")
+                state_dict = torch.load(new_weights, map_location="cpu", weights_only=False)
 
-                # Load Prototype Registry
+                # Remap legacy key names to current architecture
+                # Old training used: enc.cnn, attn.w, enc.fc (nn.Sequential)
+                # Current model uses: encoder.cnn, attention.attn, encoder.project (nn.Linear)
+                key_map = {
+                    "enc.cnn.": "encoder.cnn.",
+                    "attn.w.": "attention.attn.",
+                }
+                remapped = {}
+                for k, v in state_dict.items():
+                    new_key = k
+                    # Handle FC layer: old enc.fc.0.* → new encoder.project.*
+                    # Old model: enc.fc = Sequential(Linear, BatchNorm1d)
+                    # New model: encoder.project (Linear) + encoder.project_bn (BatchNorm1d)
+                    if k.startswith("enc.fc.0."):
+                        new_key = k.replace("enc.fc.0.", "encoder.project.")
+                    elif k.startswith("enc.fc.1."):
+                        new_key = k.replace("enc.fc.1.", "encoder.project_bn.")
+                    else:
+                        for old_prefix, new_prefix in key_map.items():
+                            if k.startswith(old_prefix):
+                                new_key = k.replace(old_prefix, new_prefix)
+                                break
+                    # Skip num_batches_tracked (not needed by current model)
+                    if "num_batches_tracked" in new_key:
+                        continue
+                    remapped[new_key] = v
+
+                missing, unexpected = proto.load_state_dict(remapped, strict=False)
+                if missing:
+                    logger.warning(f"ProtoNet missing keys (initialized randomly): {missing}")
+                if unexpected:
+                    logger.warning(f"ProtoNet unexpected keys (ignored): {unexpected}")
+                proto.eval()
+                self.encoder = proto
+                logger.info(f"✅ Phase-1 ProtoNet loaded from {new_weights}")
+            except Exception as e:
+                logger.error(f"Failed to load ProtoNet: {e}")
+                self.encoder = None
+
+            # Load Prototype Registry (separate try so ProtoNet isn't killed)
+            try:
                 registry_path = os.path.join(weights_dir, "prototype_registry.pt")
-                if os.path.exists(registry_path):
-                    self.prototype_registry = PrototypeRegistry(proto)
+                if os.path.exists(registry_path) and self.encoder is not None:
+                    self.prototype_registry = PrototypeRegistry(self.encoder)
                     self.prototype_registry.load(registry_path)
                     logger.info(f"✅ Prototype Registry loaded ({len(self.prototype_registry.class_names())} classes)")
                 else:
                     self.prototype_registry = None
-                    logger.warning("Prototype Registry not found — run train_models.py first")
+            except Exception as e:
+                logger.warning(f"Prototype Registry load failed: {e}")
+                self.prototype_registry = None
 
-                # Load new OpenMax Weibull
+            # Load OpenMax Weibull
+            try:
                 omw_path = os.path.join(weights_dir, "openmax_weibull.pkl")
                 if os.path.exists(omw_path):
                     self.weibull = OpenMaxWeibull(num_classes=10)
                     self.weibull.load(omw_path)
                     logger.info(f"✅ OpenMax Weibull loaded")
+            except Exception as e:
+                logger.warning(f"OpenMax Weibull load failed: {e}")
 
-                # Load calibrated temperature scaler
+            # Load calibrated temperature scaler
+            try:
                 ts_path = os.path.join(weights_dir, "temperature_scaler.pt")
                 if os.path.exists(ts_path):
                     self.calibrated_scaler = CalibratedTemperatureScaler()
@@ -201,9 +256,13 @@ class EMSOrchestrator:
                     logger.info(f"✅ Calibrated T-Scaler loaded (T={self.calibrated_scaler.temperature.item():.4f})")
                 else:
                     self.calibrated_scaler = None
+            except Exception as e:
+                logger.warning(f"T-Scaler load failed: {e}")
+                self.calibrated_scaler = None
 
-            elif os.path.exists(weights_path):
-                # Fallback: legacy CNN weights
+        elif os.path.exists(weights_path):
+            # Fallback: legacy CNN weights
+            try:
                 self.encoder = CNN1DEncoder(
                     in_channels=1,
                     embed_dim=self.embedding_size
@@ -215,30 +274,38 @@ class EMSOrchestrator:
                 self.prototype_registry = None
                 self.calibrated_scaler = None
                 logger.info(f"✅ Legacy CNN loaded from {weights_path}")
-            else:
-                logger.warning("No model weights found. Run python scripts/train_models.py first.")
+            except Exception as e:
+                logger.error(f"Failed to load legacy CNN: {e}")
                 self.encoder = None
-                self.prototype_registry = None
-                self.calibrated_scaler = None
+        else:
+            logger.warning("No model weights found. Run python scripts/train_models.py first.")
+            self.encoder = None
+            self.prototype_registry = None
+            self.calibrated_scaler = None
 
+        # Legacy loaders (each isolated so failures don't cascade)
+        try:
             if os.path.exists(anchors_path):
                 self.support_manager.load_registry(anchors_path)
                 logger.info(f"✅ Legacy support registry loaded from {anchors_path}")
+        except Exception as e:
+            logger.warning(f"Legacy support registry load failed: {e}")
 
+        try:
             scaler_path = os.path.join(weights_dir, "temperature_scaler.pth")
             if os.path.exists(scaler_path) and not hasattr(self, 'calibrated_scaler'):
                 self.temp_scaler.load(scaler_path)
                 logger.info(f"✅ Legacy temperature scaler loaded")
+        except Exception as e:
+            logger.warning(f"Legacy T-scaler load failed: {e}")
 
+        try:
             weibull_path = os.path.join(weights_dir, "weibull_openmax.pkl")
             if os.path.exists(weibull_path) and not hasattr(self.weibull, '_weibull_by_name'):
                 with open(weibull_path, 'rb') as f:
                     self.weibull = pickle.load(f)
-
         except Exception as e:
-            logger.error(f"Failed to load ML models: {e}. Falling back to rule-based classification.")
-            self.failure_matrix.trigger_failure("model_drift")
-            self.encoder = None
+            logger.warning(f"Legacy weibull load failed: {e}")
 
     # ─── Safety Relay Callback ─────────────────────────────────────────
     async def _relay_callback(self, device_id: str, action: str) -> None:
@@ -323,7 +390,11 @@ class EMSOrchestrator:
         """Write measurement to a local CSV fallback file when DB is unavailable.
         This prevents data loss during database lock-ups or disk issues."""
         try:
-            os.makedirs(os.path.dirname(self.csv_fallback_path), exist_ok=True)
+            # Bug 4.4 fix: os.path.dirname on a bare filename returns '',
+            # which causes os.makedirs to crash with FileNotFoundError
+            directory = os.path.dirname(self.csv_fallback_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
             file_exists = os.path.exists(self.csv_fallback_path)
             with open(self.csv_fallback_path, 'a', newline='') as f:
                 writer = csv.writer(f)
@@ -357,6 +428,20 @@ class EMSOrchestrator:
                     "device_id": device_id,
                     "message": f"Hardware confirmed: {payload_str}",
                 })
+                return
+
+            # Bug 3.1 fix: Handle label submissions via MQTT
+            # (bridging REST API → MQTT → pipeline for ProtoNet registry updates)
+            if "/label" in topic:
+                try:
+                    payload_dict = json.loads(payload_str)
+                    label_class = payload_dict.get("class_name", "")
+                    label_segments = payload_dict.get("segments", [])
+                    if label_class and label_segments:
+                        self.handle_label_submitted(label_class, label_segments)
+                        logger.info(f"📋 Label received via MQTT: '{label_class}' ({len(label_segments)} segments)")
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Failed to parse label MQTT message: {e}")
                 return
 
             power_watts = float(payload_str) if payload_str else 0.0
@@ -415,7 +500,9 @@ class EMSOrchestrator:
                 # and broadcast status, but skip heavy CNN classification
                 self.device_states[device_id] = 1 if power_watts > 10 else 0
                 class_name = self.device_classifications.get(device_id, "pending")
-                confidence = 0.0
+                # Bug 1.6 fix: Carry over last known confidence during steady-state
+                # ticks instead of forcing 0.0 (which starves the entire pipeline)
+                confidence = self.last_known_confidences.get(device_id, 0.0)
                 distances = {}
             else:
                 # ══════════════════════════════════════════════════════
@@ -425,6 +512,8 @@ class EMSOrchestrator:
                 class_name, confidence, distances = self._classify_device(
                     device_id, power_watts, filtered_segment=filtered_segment
                 )
+                # Bug 1.6 fix: Cache the confidence for steady-state carry-over
+                self.last_known_confidences[device_id] = confidence
             self.device_classifications[device_id] = class_name
 
             if class_name == "pending" or class_name == "error":
@@ -469,15 +558,27 @@ class EMSOrchestrator:
                         # ═══ §2.2 FIX: Forward stable unknown to Digital Twin + RL ═══
                         # Assign temporary pseudo-class so RL sees the load
                         pseudo_class = f"unknown_{device_id}"
+                        # Bug 3.3 fix: Set classification immediately to prevent
+                        # re-triggering LABEL_REQUEST every single tick
+                        self.device_classifications[device_id] = pseudo_class
                         self.device_states[device_id] = 1 if power_watts > 10 else 0
 
-                        # Forward to Digital Twin so thermal/energy simulation
-                        # accounts for this unknown load's heat and power draw
-                        appliance_watts = {k: (power_watts if k == device_id else 0)
-                                           for k in self.device_states}
+                        # Bug 2.1 fix: Use last-known wattages for ALL devices,
+                        # then overlay the live tick for this device
+                        appliance_watts = {
+                            k: (self.power_windows[k][-1] if k in self.power_windows and len(self.power_windows[k]) > 0 else 0)
+                            for k in self.device_states
+                        }
+                        appliance_watts[device_id] = power_watts  # Apply the live tick
+
+                        # Bug 2.2 fix: Use real elapsed time instead of hardcoded 1s
+                        now = time.time()
+                        dt_minutes = (now - self.last_sim_time) / 60.0
+                        self.last_sim_time = now
+
                         self._internal_temp = self.env.simulate_step(
                             appliance_watts, outdoor_temp=28.0,
-                            t_internal=self._internal_temp, dt_minutes=1.0/60.0
+                            t_internal=self._internal_temp, dt_minutes=dt_minutes
                         )
 
                         # Update RL state space with pseudo-class base-load drain
@@ -489,8 +590,18 @@ class EMSOrchestrator:
                             v_air=0.1, rh=50.0, clo=0.7, met=1.2
                         )
                         tou_rate = self.agent.get_tou_rate(current_hour)
+
+                        # Bug 1.1 fix: Build full house state for RL, not just current device
+                        all_devices_state = {}
+                        for did, on_off in self.device_states.items():
+                            cls = self.device_classifications.get(did, f"unknown_{did}")
+                            last_power = self.power_windows[did][-1] if did in self.power_windows and len(self.power_windows[did]) > 0 else 0
+                            dev_rated = device_limits.get(cls, device_limits.get("default", 1500.0))
+                            all_devices_state[cls] = last_power / max(dev_rated, 1.0)
+                        all_devices_state[pseudo_class] = pct_of_rated
+
                         state_dict = {
-                            "devices": {pseudo_class: pct_of_rated},
+                            "devices": all_devices_state,
                             "price_tier": self.agent.get_price_bin(tou_rate),
                             "pmv_zone": self.agent.get_pmv_zone(pmv_score),
                             "tod": self.agent.get_time_of_day_bin(current_hour),
@@ -542,7 +653,11 @@ class EMSOrchestrator:
                 self.device_states[device_id] = 1 if power_watts > 10 else 0
 
                 # STEP 5: ANALYTICS ENGINE
-                self.analytics.record_usage(device_id, power_watts, duration_hours=1.0 / 3600.0)
+                # Bug 2.4 fix: Use real time deltas instead of hardcoded 1/3600 hours
+                last_seen = self.last_device_analytics_time.get(device_id, current_time)
+                real_duration_hours = (current_time - last_seen) / 3600.0
+                self.last_device_analytics_time[device_id] = current_time
+                self.analytics.record_usage(device_id, power_watts, duration_hours=max(real_duration_hours, 1.0 / 3600.0))
 
                 if current_time - self.last_analytics_broadcast >= 30.0:
                     summary = self.analytics.get_daily_summary()
@@ -558,12 +673,22 @@ class EMSOrchestrator:
                     v_air=0.1, rh=50.0, clo=0.7, met=1.2
                 )
 
-                # Update internal temperature via thermal simulation
-                appliance_watts = {k: (power_watts if k == device_id else 0)
-                                   for k in self.device_states}
+                # Bug 2.1 fix: Use last-known wattages for ALL devices,
+                # not just the currently ticking one (prevents state obliteration)
+                appliance_watts = {
+                    k: (self.power_windows[k][-1] if k in self.power_windows and len(self.power_windows[k]) > 0 else 0)
+                    for k in self.device_states
+                }
+                appliance_watts[device_id] = power_watts  # Apply the live tick
+
+                # Bug 2.2 fix: Use real elapsed time
+                now = time.time()
+                dt_minutes = (now - self.last_sim_time) / 60.0
+                self.last_sim_time = now
+
                 self._internal_temp = self.env.simulate_step(
                     appliance_watts, outdoor_temp=28.0,
-                    t_internal=self._internal_temp, dt_minutes=1.0/60.0
+                    t_internal=self._internal_temp, dt_minutes=dt_minutes
                 )
 
                 # STEP 7: RL AGENT (Confidence + Empathy + Cooldown Gates)
@@ -572,8 +697,19 @@ class EMSOrchestrator:
                 rated = device_limits.get(class_name, device_limits.get("default", 1500.0))
                 pct_of_rated = power_watts / max(rated, 1.0)
 
+                # Bug 1.1 fix: Pass the FULL house state to the RL agent,
+                # not just the currently ticking device
+                all_devices_state = {}
+                for did, on_off in self.device_states.items():
+                    cls = self.device_classifications.get(did, f"unknown_{did}")
+                    last_power = self.power_windows[did][-1] if did in self.power_windows and len(self.power_windows[did]) > 0 else 0
+                    dev_rated = device_limits.get(cls, device_limits.get("default", 1500.0))
+                    all_devices_state[cls] = last_power / max(dev_rated, 1.0)
+                # Ensure the current device's live reading is included
+                all_devices_state[class_name] = pct_of_rated
+
                 state_dict = {
-                    "devices": {class_name: pct_of_rated},
+                    "devices": all_devices_state,
                     "price_tier": self.agent.get_price_bin(tou_rate),
                     "pmv_zone": self.agent.get_pmv_zone(pmv_score),
                     "tod": self.agent.get_time_of_day_bin(current_hour),
@@ -623,9 +759,17 @@ class EMSOrchestrator:
                             "message": f"Comfort override: {action} (PMV {pmv_score:.2f})",
                         })
 
-                    # Build next_state AFTER action for proper TD update
+                    # Bug 1.5 fix: next_state must reflect ACTUAL post-action wattage.
+                    # In shadow mode (not promoted), the relay is NOT triggered,
+                    # so the device keeps running at full power.
+                    is_actually_shed = (action == "SHED" and self.promo_gate.is_promoted)
+                    next_pct = 0.0 if is_actually_shed else pct_of_rated
+
+                    # Build next_state with full house state
+                    next_all_devices = dict(all_devices_state)
+                    next_all_devices[class_name] = next_pct
                     next_state = {
-                        "devices": {class_name: (0.0 if action == "SHED" else pct_of_rated)},
+                        "devices": next_all_devices,
                         "price_tier": self.agent.get_price_bin(tou_rate),
                         "pmv_zone": self.agent.get_pmv_zone(pmv_score),
                         "tod": self.agent.get_time_of_day_bin(current_hour),
@@ -635,7 +779,7 @@ class EMSOrchestrator:
                         prev_state, action, next_state,
                         pmv_score, power_watts, tou_rate, confidence
                     )
-                    self.agent.update(prev_state, action, reward, next_state)
+                    self.agent.update(prev_state, action, reward, next_state, classified_device=class_name)
 
             # ══════════════════════════════════════════════════════════
             # ALWAYS: DEVICE STATUS BROADCAST
@@ -752,7 +896,7 @@ class EMSOrchestrator:
             while self._running:
                 try:
                     async with aiomqtt.Client(
-                        self.config['mqtt']['broker'],
+                        os.environ.get('MQTT_BROKER', self.config['mqtt']['broker']),
                         port=self.config['mqtt']['port']
                     ) as client:
                         safety_mqtt = client
@@ -776,7 +920,8 @@ class EMSOrchestrator:
         ml_pipeline_task = asyncio.create_task(
             self.mqtt.run([
                 self.config['mqtt']['topics']['reads'],
-                "home/plug/+/ack"
+                "home/plug/+/ack",
+                "home/ml/label",  # Bug 3.1 fix: Subscribe to label topic
             ])
         )
 

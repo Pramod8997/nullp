@@ -96,7 +96,7 @@ rl:
   q_table_path: "backend/models/weights/q_table.pkl"
   epsilon_start: 0.3
   epsilon_end: 0.01
-  epsilon_decay: 0.999
+  epsilon_decay: 0.999995
   promotion_episodes: 50
 
 preprocessing:

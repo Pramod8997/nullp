@@ -377,9 +377,10 @@ class TestToURewardShaping:
         assert peak_rate > offpeak_rate, f"Peak rate ({peak_rate}) should exceed off-peak ({offpeak_rate})"
 
         # Same 1000W device: reward at peak should be more negative
-        reward_peak = agent.compute_reward(state, "SHED", state, pmv=0.0, current_watts=1000.0,
+        # Bug 1.2 fix: SHED action zeros out watts, so use DEFER to test rate differentiation
+        reward_peak = agent.compute_reward(state, "DEFER", state, pmv=0.0, current_watts=1000.0,
                                            tou_rate=peak_rate, confidence=0.95)
-        reward_offpeak = agent.compute_reward(state, "SHED", state, pmv=0.0, current_watts=1000.0,
+        reward_offpeak = agent.compute_reward(state, "DEFER", state, pmv=0.0, current_watts=1000.0,
                                               tou_rate=offpeak_rate, confidence=0.95)
 
         assert reward_peak < reward_offpeak, (
@@ -964,8 +965,9 @@ class TestRLActionExecutionChain:
         agent.epsilon = 0.0  # Force exploitation
 
         # Pre-populate Q-table to prefer SHED for this state
+        # Bug 1.3 fix: _discretize now includes classified_device in the key
         state = {"devices": {"esp32_tv": 0.9}, "price_tier": 2, "pmv_zone": 1, "tod": 3}
-        state_key = agent._discretize(state)
+        state_key = agent._discretize(state, classified_device="esp32_tv")
         agent.q_table[state_key]["SHED"] = 10.0
         agent.q_table[state_key]["DEFER"] = -1.0
         agent.q_table[state_key]["SCHEDULE"] = 0.0
@@ -1120,8 +1122,13 @@ class TestEpsilonDecay:
         for _ in range(5000):
             agent.update(state, "SHED", -0.1, next_state)
 
-        assert agent.epsilon < 0.02, \
-            f"After 5000 updates, epsilon should be near minimum, got {agent.epsilon}"
+        # Bug 1.4 fix: decay rate is now 0.999995 (from config), so 5000 updates
+        # only reduces epsilon slightly. Adjust threshold accordingly.
+        # 0.3 * 0.999995^5000 ≈ 0.293
+        assert agent.epsilon < agent.epsilon_start, \
+            f"After 5000 updates, epsilon should have decreased from {agent.epsilon_start}, got {agent.epsilon}"
+        assert agent.epsilon >= agent.epsilon_end, \
+            f"Epsilon should not go below minimum: {agent.epsilon} < {agent.epsilon_end}"
 
 
 class TestStateSpaceSize:

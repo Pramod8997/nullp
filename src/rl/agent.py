@@ -91,7 +91,7 @@ class TabularQLearningAgent:
         """0: NIGHT (0-5), 1: MORNING (6-11), 2: DAY (12-17), 3: EVENING (18-23)"""
         return hour // 6
 
-    def _discretize(self, state_dict: Dict[str, Any]) -> str:
+    def _discretize(self, state_dict: Dict[str, Any], classified_device: str = "") -> str:
         """
         Aggregate state space (Phase 2 fix — WS-3.3):
         - Total load bin: 4 bins (OFF=0, LOW=1, MED=2, HIGH=3)
@@ -99,7 +99,7 @@ class TabularQLearningAgent:
         - Price tier: 3 bins
         - PMV zone: 3 bins
         - Time of day: 4 bins
-        Total: 4 × 4 × 3 × 3 × 4 = 576 states (tractable for tabular Q)
+        - Target appliance class (Bug 1.3 fix: prevents cross-device policy bleed)
         """
         devices = state_dict.get("devices", {})
 
@@ -114,10 +114,13 @@ class TabularQLearningAgent:
         active_count = sum(1 for v in devices.values() if v > 0.05)
         active_bin = min(3, active_count // 3)
 
+        # Bug 1.3 fix: Include target appliance in state hash so the agent
+        # doesn't blindly apply an HVAC policy to a fridge (or vice versa)
         return (f"load:{total_bin}::active:{active_bin}"
                 f"::price:{state_dict.get('price_tier', 1)}"
                 f"::pmv:{state_dict.get('pmv_zone', 1)}"
-                f"::tod:{state_dict.get('tod', 2)}")
+                f"::tod:{state_dict.get('tod', 2)}"
+                f"::dev:{classified_device}")
 
     def act(self, state_dict: Dict[str, Any], pmv: float, confidence: float,
             classified_device: str, min_confidence: float = None) -> str:
@@ -128,17 +131,20 @@ class TabularQLearningAgent:
             return "DEFER"  # no_op when uncertain
             
         # Gate 2: PMV empathy gate (Category A bounds: -0.5 to 0.5)
-        if pmv < self.pmv_min or pmv > self.pmv_max:
-            if pmv < self.pmv_min:
-                return "SCHEDULE_HVAC"  # force heating
-            else:
-                return "SHED_HVAC"      # force cooling
+        # Bug 2.3 fix: Only apply empathy gate when the ticking device is HVAC,
+        # otherwise a TV or Kettle tick would spam HVAC commands every second
+        if classified_device and "hvac" in classified_device.lower():
+            if pmv < self.pmv_min or pmv > self.pmv_max:
+                if pmv < self.pmv_min:
+                    return "SCHEDULE_HVAC"  # force heating
+                else:
+                    return "SHED_HVAC"      # force cooling
                 
         # Gate 3: check cooldown
         if time.time() - self.last_action_time < self.cooldown:
             return "DEFER"
 
-        state_key = self._discretize(state_dict)
+        state_key = self._discretize(state_dict, classified_device)
         
         # Valid actions for this device
         valid_actions = ["DEFER"]
@@ -168,14 +174,18 @@ class TabularQLearningAgent:
 
     def compute_reward(self, prev_state: Dict[str, Any], action: str, next_state: Dict[str, Any], 
                        pmv: float, current_watts: float, tou_rate: float, confidence: float) -> float:
-        energy_reward = -current_watts * tou_rate / 1000.0  # cost in kWh
+        # Bug 1.2 fix: Use projected wattage based on action taken.
+        # If agent chose SHED, the device is off → 0W cost. Otherwise use actual watts.
+        projected_watts = 0.0 if action == "SHED" else current_watts
+        energy_reward = -projected_watts * tou_rate / 1000.0  # cost in kWh
         pmv_penalty = -5.0 * self.twin.pmv_penalty(pmv)     # heavy comfort penalty
         safety_bonus = 0.0 if current_watts < self.max_watts else -10.0
         return energy_reward + pmv_penalty + safety_bonus
 
-    def update(self, state_dict: Dict[str, Any], action: str, reward: float, next_state_dict: Dict[str, Any]) -> None:
-        state_key = self._discretize(state_dict)
-        next_state_key = self._discretize(next_state_dict)
+    def update(self, state_dict: Dict[str, Any], action: str, reward: float,
+               next_state_dict: Dict[str, Any], classified_device: str = "") -> None:
+        state_key = self._discretize(state_dict, classified_device)
+        next_state_key = self._discretize(next_state_dict, classified_device)
         
         best_next_q = max(self.q_table[next_state_key].values()) if self.q_table[next_state_key] else 0.0
         

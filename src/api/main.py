@@ -2,6 +2,7 @@ import json
 import asyncio
 import logging
 import time
+import os
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -46,11 +47,13 @@ class ConnectionManager:
         logger.info(f"WebSocket client disconnected. Total: {len(self.active_connections)}")
 
     async def broadcast(self, message: dict):
+        """Bug 3.6 fix: Use asyncio.wait_for with timeout to prevent dead
+        TCP connections from stalling the entire MQTT listener task."""
         disconnected = []
         for ws in self.active_connections:
             try:
-                await ws.send_json(message)
-            except Exception:
+                await asyncio.wait_for(ws.send_json(message), timeout=0.5)
+            except (asyncio.TimeoutError, Exception):
                 disconnected.append(ws)
         for ws in disconnected:
             self.disconnect(ws)
@@ -67,7 +70,10 @@ async def mqtt_listener_task():
     """
     while True:
         try:
-            async with aiomqtt.Client("localhost", port=1883) as client:
+            # Bug 4.5 fix: Use MQTT_BROKER env var instead of hardcoded localhost
+            async with aiomqtt.Client(
+                os.environ.get("MQTT_BROKER", "localhost"), port=1883
+            ) as client:
                 logger.info("FastAPI MQTT bridge connected.")
                 system_state["pipeline_status"] = "connected"
 
@@ -110,6 +116,9 @@ async def mqtt_listener_task():
                                     "device_id": event_data.get("device_id", ""),
                                     "power": event_data.get("power", 0),
                                     "confidence": event_data.get("confidence", 0),
+                                    # Bug 3.2 fix: Preserve the 128D embedding so the
+                                    # UI can send it back for ProtoNet learning
+                                    "embedding": event_data.get("embedding", []),
                                     "message": event_data.get("message", ""),
                                     "timestamp": time.time(),
                                 }
@@ -293,9 +302,11 @@ async def get_safety_warnings():
     return {"safety_warnings": system_state["safety_warnings"]}
 
 
+# Bug 3.5 fix: Accept segments in LabelSubmission for ProtoNet registry update
 class LabelSubmission(BaseModel):
     device_id: str
     label: str
+    segments: List[List[float]] = []  # Bug 3.5: 128D embeddings for ProtoNet
 
 
 @app.post("/api/submit-label")
@@ -306,7 +317,21 @@ async def submit_label(submission: LabelSubmission):
         p for p in system_state["pending_labels"] if p["device_id"] != submission.device_id
     ]
     logger.info(f"Label submitted: {submission.device_id} → {submission.label}")
-    # Broadcast label event for pipeline to pick up
+
+    # Bug 3.1 fix: Publish to MQTT so the orchestrator (which only listens
+    # to MQTT, not WebSocket) can update the ProtoNet registry
+    try:
+        async with aiomqtt.Client(
+            os.environ.get("MQTT_BROKER", "localhost"), port=1883
+        ) as client:
+            await client.publish("home/ml/label", json.dumps({
+                "class_name": submission.label,
+                "segments": submission.segments,
+            }))
+    except Exception as e:
+        logger.error(f"Failed to publish label to MQTT: {e}")
+
+    # Also broadcast via WebSocket for real-time UI updates
     await manager.broadcast({
         "type": "LABEL_SUBMITTED",
         "device_id": submission.device_id,
@@ -315,53 +340,9 @@ async def submit_label(submission: LabelSubmission):
     return {"status": "ok", "message": f"Label '{submission.label}' applied to {submission.device_id}"}
 
 
-# ─── GAP 9: Label Device Endpoint (Prototype Registry Update) ──────────────
-# In-memory store populated by the pipeline when stable unknowns are detected.
-pending_unknowns_store: List[Dict] = []
-
-
-class DeviceLabelRequest(BaseModel):
-    class_name: str
-    segments: List[List[float]]   # list of (128,) float arrays
-
-
-@app.post("/api/label_device")
-async def label_device(req: DeviceLabelRequest):
-    """
-    Called by dashboard when user labels an unknown device.
-    Updates the prototype registry without retraining the encoder.
-    The pipeline's PrototypeRegistry is updated in-process via the LABEL_SUBMITTED
-    broadcast which the orchestrator picks up.
-    """
-    segs = np.array(req.segments, dtype=np.float32)  # (K, 128)
-    if segs.shape[-1] != 128:
-        raise HTTPException(status_code=400,
-                            detail="Each segment must be exactly 128 samples")
-
-    # Broadcast to pipeline so it can update PrototypeRegistry
-    await manager.broadcast({
-        "type": "LABEL_SUBMITTED",
-        "class_name": req.class_name,
-        "segments": req.segments,
-    })
-
-    # Remove from pending store if present
-    global pending_unknowns_store
-    pending_unknowns_store = [
-        u for u in pending_unknowns_store if u.get("class_name") != req.class_name
-    ]
-
-    return {
-        "status": "ok",
-        "class_name": req.class_name,
-        "segments_received": len(segs),
-    }
-
-
-@app.get("/api/unknown_devices")
-async def unknown_devices():
-    """Returns list of pending unknown device signatures needing labels."""
-    return {"pending": pending_unknowns_store}
+# Bug 3.4 fix: Removed /api/unknown_devices and pending_unknowns_store.
+# The never-populated pending_unknowns_store was always returning empty arrays.
+# Use /api/pending-labels exclusively for unknown device management.
 
 
 # ─── WebSocket Endpoint ─────────────────────────────────────────────

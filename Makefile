@@ -26,7 +26,14 @@ test:
 run:
 	@echo "Starting Confidence-Aware Digital Twin EMS..."
 	@bash -c 'trap "kill 0" SIGINT SIGTERM EXIT; \
-	docker-compose up -d mosquitto; \
+	if ss -tlnp 2>/dev/null | grep -q ":1883 "; then \
+		echo "✅ Mosquitto broker already running on port 1883"; \
+	elif command -v mosquitto >/dev/null 2>&1; then \
+		mosquitto -c mosquitto/config/mosquitto.conf -d; \
+		echo "✅ Mosquitto broker started"; \
+	else \
+		echo "⚠️  mosquitto not found — install with: sudo apt-get install -y mosquitto"; \
+	fi; \
 	sleep 2; \
 	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/run_pipeline.py & \
 	export PYTHONPATH=$(PWD) && $(PYTHON) -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 & \

@@ -22,8 +22,8 @@ from scipy.stats import exponweib
 
 # ── Constants ───────────────────────────────────────────────────────────────
 EMBED_DIM     = 128
-CNN_CHANNELS  = [32, 64, 128, 128, 128]   # 5 conv layers
-KERNEL_SIZE   = 3
+CNN_CHANNELS  = [32, 64, 128, 128]     # 4 conv layers (matches trained weights)
+KERNEL_SIZE   = 5
 DROPOUT       = 0.1
 WEIBULL_TAIL  = 20      # top-k distances used to fit Weibull tail
 OPENMAX_ALPHA = 10      # number of top classes revised by OpenMax
@@ -54,7 +54,7 @@ class CNN1DEncoder(nn.Module):
         ch_in  = in_channels
         for ch_out in CNN_CHANNELS:
             layers += [
-                nn.Conv1d(ch_in, ch_out, KERNEL_SIZE, padding=1),
+                nn.Conv1d(ch_in, ch_out, KERNEL_SIZE, padding=KERNEL_SIZE // 2),
                 nn.BatchNorm1d(ch_out),
                 nn.ReLU(),
                 nn.MaxPool1d(2),
@@ -63,7 +63,9 @@ class CNN1DEncoder(nn.Module):
             ch_in = ch_out
         self.cnn     = nn.Sequential(*layers)
         self.pool    = nn.AdaptiveAvgPool1d(1)
+        # FC block: Linear + BatchNorm (matches trained weights structure)
         self.project = nn.Linear(CNN_CHANNELS[-1], embed_dim)
+        self.project_bn = nn.BatchNorm1d(embed_dim)
 
         # Legacy attention (kept for backward compat with old test that uses encoder directly)
         self._legacy_attention = _LegacyTemporalAttention(hidden_size=CNN_CHANNELS[-1])
