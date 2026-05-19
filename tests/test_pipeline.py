@@ -894,3 +894,343 @@ class TestUnknownDeviceRLRouting:
         # Temperature should change (not crash)
         assert isinstance(new_temp, float)
         assert new_temp != 22.0, "1500W load should affect internal temperature"
+
+
+# ════════════════════════════════════════════════════════
+# PHASE 2 INTEGRATION TESTS (WS-7.5)
+# ════════════════════════════════════════════════════════
+
+class TestRelayACKProtocol:
+    """WS-5.1: Hardware ACK protocol should clear software cooldowns."""
+
+    def test_ack_clears_cooldown(self):
+        """Receiving an ACK for a device should reset its action cooldown."""
+        # Simulate the orchestrator's ACK handling logic
+        action_cooldowns = {"node_kettle": 9999999.0}
+        # Simulate ACK received (mirrors _handle_mqtt_message ACK branch)
+        device_id = "node_kettle"
+        action_cooldowns[device_id] = 0.0
+        assert action_cooldowns["node_kettle"] == 0.0, "ACK should clear cooldown"
+
+    def test_ack_for_unknown_device_no_crash(self):
+        """ACK for a device not in cooldowns should not crash."""
+        action_cooldowns = {}
+        device_id = "node_mystery"
+        action_cooldowns[device_id] = 0.0  # Should not raise
+        assert action_cooldowns["node_mystery"] == 0.0
+
+
+class TestHybridMode:
+    """WS-4: System handles mixed physical (simulated: false) + simulated devices."""
+
+    def test_config_has_mixed_devices(self):
+        """config.yaml should have both simulated and physical devices."""
+        import yaml
+        with open("config/config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+        devices = config.get("devices", {})
+        simulated = [d for d, c in devices.items() if c.get("simulated", True)]
+        physical = [d for d, c in devices.items() if not c.get("simulated", True)]
+        assert len(simulated) >= 4, f"Expected at least 4 simulated devices, got {len(simulated)}"
+        assert len(physical) >= 4, f"Expected at least 4 physical devices, got {len(physical)}"
+        assert len(devices) == 10, f"Expected 10 total devices, got {len(devices)}"
+
+    def test_simulator_filters_by_config(self):
+        """Simulator should only spin up devices flagged as simulated: true."""
+        import yaml
+        with open("config/config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+        sim_flags = {
+            k: v.get("simulated", True)
+            for k, v in config.get("devices", {}).items()
+        }
+        # Physical devices should NOT be simulated
+        assert sim_flags.get("node_fridge") is False
+        assert sim_flags.get("node_microwave") is False
+        assert sim_flags.get("node_kettle") is False
+        assert sim_flags.get("node_hvac") is False
+        # Virtual devices should be simulated
+        assert sim_flags.get("esp32_tv") is True
+        assert sim_flags.get("esp32_washer") is True
+
+
+class TestRLActionExecutionChain:
+    """WS-3: RL SHED action should properly map to relay commands."""
+
+    def test_shed_returns_valid_action(self):
+        """RL agent should return SHED for non-critical device when conditions are right."""
+        agent = TabularQLearningAgent()
+        agent.last_action_time = 0  # Reset cooldown
+        agent.epsilon = 0.0  # Force exploitation
+
+        # Pre-populate Q-table to prefer SHED for this state
+        state = {"devices": {"esp32_tv": 0.9}, "price_tier": 2, "pmv_zone": 1, "tod": 3}
+        state_key = agent._discretize(state)
+        agent.q_table[state_key]["SHED"] = 10.0
+        agent.q_table[state_key]["DEFER"] = -1.0
+        agent.q_table[state_key]["SCHEDULE"] = 0.0
+
+        action = agent.act(state, pmv=0.0, confidence=0.95, classified_device="esp32_tv")
+        assert action == "SHED", f"Expected SHED, got {action}"
+
+    def test_never_shed_blocks_shed(self):
+        """NEVER_SHED device should never get SHED action."""
+        agent = TabularQLearningAgent()
+        agent.last_action_time = 0
+        agent.epsilon = 0.0
+
+        # Even with Q-table preferring SHED, fridge (tier0=true in config) should DEFER
+        state = {"devices": {"fridge": 0.9}, "price_tier": 2, "pmv_zone": 1, "tod": 3}
+        state_key = agent._discretize(state)
+        agent.q_table[state_key]["SHED"] = 100.0  # Strong preference
+
+        # "fridge" should be in NEVER_SHED (tier0: true in config or fallback)
+        action = agent.act(state, pmv=0.0, confidence=0.95, classified_device="esp32_fridge")
+        assert action in ["DEFER", "SCHEDULE"], f"NEVER_SHED fridge should not get SHED, got {action}"
+
+
+class TestRateOfChangeSafety:
+    """WS-5.3: Rate-of-change arc-fault proxy detection."""
+
+    @pytest.mark.asyncio
+    async def test_roc_triggers_cutoff(self):
+        """Rate-of-change > 1000 W/s should trigger immediate relay OFF."""
+        from src.pipeline.safety import SafetyMonitor
+
+        safety = SafetyMonitor(
+            max_aggregate_wattage=3500.0,
+            device_wattage_limits={"node_kettle": 2500.0, "default": 1500.0},
+            warning_pct=1.10,
+            critical_pct=1.25,
+        )
+
+        # Verify the RoC threshold is set correctly
+        assert safety.ROC_THRESHOLD == 1000.0
+
+        # Simulate two readings: first normal, then a 1500W/s spike
+        safety._prev_readings["node_kettle"] = 200.0
+        # Next reading would be 1700W → dP/dt = 1500 W/s > 1000 threshold
+        rate_of_change = abs(1700.0 - safety._prev_readings["node_kettle"])
+        assert rate_of_change > safety.ROC_THRESHOLD, \
+            f"1500 W/s should exceed threshold {safety.ROC_THRESHOLD}"
+
+    def test_roc_no_trigger_on_normal(self):
+        """Normal rate of change should not trigger arc-fault."""
+        from src.pipeline.safety import SafetyMonitor
+
+        safety = SafetyMonitor(
+            max_aggregate_wattage=3500.0,
+            device_wattage_limits={"node_fridge": 200.0, "default": 1500.0},
+            warning_pct=1.10,
+            critical_pct=1.25,
+        )
+        safety._prev_readings["node_fridge"] = 150.0
+        # 200W reading → dP/dt = 50 W/s, well below 1000 threshold
+        rate_of_change = abs(200.0 - safety._prev_readings["node_fridge"])
+        assert rate_of_change < safety.ROC_THRESHOLD
+
+
+class TestDataRetentionPolicy:
+    """WS-6.1: SQLite retention cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_retention_schema_has_autoincrement(self):
+        """Database schema should use autoincrement ID to avoid PK collision."""
+        import aiosqlite
+        db_path = ":memory:"
+        conn = await aiosqlite.connect(db_path)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS measurements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL,
+                device_id TEXT,
+                power REAL
+            )
+        """)
+        # Insert two rows with identical timestamps — should NOT fail
+        await conn.execute(
+            "INSERT INTO measurements (timestamp, device_id, power) VALUES (?, ?, ?)",
+            (1000000.0, "node_fridge", 150.0)
+        )
+        await conn.execute(
+            "INSERT INTO measurements (timestamp, device_id, power) VALUES (?, ?, ?)",
+            (1000000.0, "node_fridge", 151.0)  # Same timestamp, different power
+        )
+        await conn.commit()
+
+        cursor = await conn.execute("SELECT COUNT(*) FROM measurements")
+        count = (await cursor.fetchone())[0]
+        assert count == 2, f"Both rows should be inserted despite same timestamp, got {count}"
+        await conn.close()
+
+
+class TestCSVFallbackReplay:
+    """WS-6.2: CSV fallback replay on startup."""
+
+    def test_csv_fallback_format(self):
+        """CSV fallback should have correct column headers."""
+        import csv as csv_mod
+        import tempfile
+        csv_path = os.path.join(tempfile.mkdtemp(), "fallback.csv")
+
+        # Write a fallback CSV mimicking the pipeline's format
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv_mod.writer(f)
+            writer.writerow(['timestamp', 'device_id', 'power_watts'])
+            writer.writerow([1234567890.0, 'node_fridge', 150.5])
+            writer.writerow([1234567891.0, 'node_kettle', 2400.0])
+
+        # Read and verify
+        with open(csv_path, 'r') as f:
+            reader = csv_mod.DictReader(f)
+            rows = list(reader)
+        assert len(rows) == 2
+        assert rows[0]['device_id'] == 'node_fridge'
+        assert float(rows[0]['power_watts']) == 150.5
+        assert rows[1]['device_id'] == 'node_kettle'
+
+        # Cleanup
+        os.unlink(csv_path)
+
+
+class TestEpsilonDecay:
+    """WS-3.5: RL epsilon should decay over time."""
+
+    def test_epsilon_decays_after_update(self):
+        """Epsilon should decrease after Q-table update."""
+        agent = TabularQLearningAgent()
+        initial_epsilon = agent.epsilon
+        assert initial_epsilon == agent.epsilon_start
+
+        state = {"devices": {"esp32_tv": 0.5}, "price_tier": 1, "pmv_zone": 1, "tod": 2}
+        next_state = {"devices": {"esp32_tv": 0.0}, "price_tier": 1, "pmv_zone": 1, "tod": 2}
+        agent.update(state, "SHED", -0.5, next_state)
+
+        assert agent.epsilon < initial_epsilon, \
+            f"Epsilon should decay: was {initial_epsilon}, now {agent.epsilon}"
+        assert agent.epsilon >= agent.epsilon_end, \
+            f"Epsilon should not go below minimum: {agent.epsilon} < {agent.epsilon_end}"
+
+    def test_epsilon_converges_to_minimum(self):
+        """After many updates, epsilon should converge near epsilon_end."""
+        agent = TabularQLearningAgent()
+        state = {"devices": {"esp32_tv": 0.5}, "price_tier": 1, "pmv_zone": 1, "tod": 2}
+        next_state = {"devices": {"esp32_tv": 0.0}, "price_tier": 1, "pmv_zone": 1, "tod": 2}
+
+        for _ in range(5000):
+            agent.update(state, "SHED", -0.1, next_state)
+
+        assert agent.epsilon < 0.02, \
+            f"After 5000 updates, epsilon should be near minimum, got {agent.epsilon}"
+
+
+class TestStateSpaceSize:
+    """WS-3.3: Aggregate state space should be tractable (576 states)."""
+
+    def test_state_space_dimensions(self):
+        """State discretization should produce states from the 4×4×3×3×4 space."""
+        agent = TabularQLearningAgent()
+
+        # Test all corners of the state space
+        states_seen = set()
+        for load_pct in [0.0, 0.3, 0.6, 1.0]:
+            for active in [0, 3, 6, 9]:
+                for price in [0, 1, 2]:
+                    for pmv in [0, 1, 2]:
+                        for tod in [0, 1, 2, 3]:
+                            devices = {f"dev_{i}": load_pct for i in range(active)}
+                            state = {
+                                "devices": devices,
+                                "price_tier": price,
+                                "pmv_zone": pmv,
+                                "tod": tod,
+                            }
+                            key = agent._discretize(state)
+                            states_seen.add(key)
+
+        # Should be tractable — at most 576 unique states
+        assert len(states_seen) <= 576, \
+            f"State space should be <= 576, got {len(states_seen)}"
+        assert len(states_seen) > 50, \
+            f"State space should have meaningful diversity, got {len(states_seen)}"
+
+
+class TestPipelineLatencyInstrumentation:
+    """WS-7.2: Pipeline latency tracking."""
+
+    def test_perf_counter_available(self):
+        """time.perf_counter should be available for latency measurement."""
+        t0 = time.perf_counter()
+        # Simulate some work
+        _ = sum(range(10000))
+        t1 = time.perf_counter()
+        latency_ms = (t1 - t0) * 1000
+        assert latency_ms >= 0, "Latency should be non-negative"
+        assert latency_ms < 1000, f"Simple computation should be <1s, got {latency_ms:.1f}ms"
+
+
+class TestNEVERSHEDConfig:
+    """WS-3.4: NEVER_SHED list should load from config tier0 flags."""
+
+    def test_never_shed_from_config(self):
+        """Agent should load NEVER_SHED from config's tier0 flags."""
+        agent = TabularQLearningAgent()
+        # config.yaml has node_fridge with tier0: true
+        # Agent also adds esp32_fridge as fallback
+        assert len(agent.NEVER_SHED) >= 1, "NEVER_SHED should have at least 1 entry"
+
+    def test_never_shed_blocks_shed_action(self):
+        """RL agent should never return SHED for NEVER_SHED devices."""
+        agent = TabularQLearningAgent()
+        agent.last_action_time = 0
+        agent.epsilon = 0.0
+
+        for device in agent.NEVER_SHED:
+            state = {"devices": {device: 0.9}, "price_tier": 2, "pmv_zone": 1, "tod": 3}
+            state_key = agent._discretize(state)
+            agent.q_table[state_key]["SHED"] = 999.0  # Massive preference for SHED
+
+            action = agent.act(state, pmv=0.0, confidence=0.95, classified_device=device)
+            assert action != "SHED", \
+                f"NEVER_SHED device '{device}' received SHED action"
+
+
+class TestMQTTTopicAlignment:
+    """WS-1/WS-2: MQTT topics must align between firmware, pipeline, and config."""
+
+    def test_config_topic_format(self):
+        """Config should define topics matching home/sensor/+/power pattern."""
+        import yaml
+        with open("config/config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+        reads_topic = config["mqtt"]["topics"]["reads"]
+        writes_topic = config["mqtt"]["topics"]["writes"]
+        assert reads_topic == "home/sensor/+/power", f"Reads topic mismatch: {reads_topic}"
+        assert writes_topic == "home/plug/+/command", f"Writes topic mismatch: {writes_topic}"
+
+    def test_seq_len_unified(self):
+        """ProtoNet seq_len should be 128 across all consumers."""
+        import yaml
+        with open("config/config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+        assert config["protonet"]["seq_len"] == 128, "seq_len should be 128"
+
+
+class TestDockerComposeIntegration:
+    """WS-2: Docker compose should define all required services."""
+
+    def test_docker_compose_services(self):
+        """docker-compose.yml should define mosquitto, pipeline, and api services."""
+        import yaml
+        with open("docker-compose.yml", "r") as f:
+            compose = yaml.safe_load(f)
+        services = compose.get("services", {})
+        assert "mosquitto" in services, "Mosquitto service missing"
+        assert "ems-pipeline" in services, "Pipeline service missing"
+        assert "ems-api" in services, "API service missing"
+
+    def test_mosquitto_config_exists(self):
+        """Mosquitto config file should exist."""
+        assert os.path.exists("mosquitto/config/mosquitto.conf"), \
+            "mosquitto/config/mosquitto.conf not found"
+

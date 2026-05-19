@@ -24,14 +24,16 @@ async def start_broker():
     try:
         await broker.start()
         logger.info("MQTT Broker started on 0.0.0.0:1883")
+        # Keep running until cancelled
+        stop_event = asyncio.Event()
+        await stop_event.wait()
+    except asyncio.CancelledError:
+        logger.info("Broker shutting down...")
     except Exception as e:
         logger.error(f"Failed to start MQTT Broker: {e}")
 
 if __name__ == '__main__':
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(start_broker())
-        loop.run_forever()
+        asyncio.run(start_broker())
     except KeyboardInterrupt:
         logger.info("Stopping MQTT Broker...")

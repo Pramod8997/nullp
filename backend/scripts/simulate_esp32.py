@@ -9,6 +9,8 @@ import logging
 import argparse
 import signal
 import math
+import yaml
+import os
 
 import aiomqtt
 
@@ -18,27 +20,27 @@ logger = logging.getLogger(__name__)
 # All 10 device profiles matching config.yaml
 DEVICES = [
     {
-        "id": "esp32_fridge", "rated": 200.0, "var": 6.0,
+        "id": "node_fridge", "rated": 200.0, "var": 6.0,
         "spike_prob": 0.005, "cutoff": 3500.0,
         "cycle": True, "cycle_on": 600, "cycle_off": 900,
         "phantom": 3.0,
     },
     {
-        "id": "esp32_microwave", "rated": 1200.0, "var": 15.0,
+        "id": "node_microwave", "rated": 1200.0, "var": 15.0,
         "spike_prob": 0.0, "cutoff": 3500.0,
         "cycle": False, "burst": True,
         "burst_power": 1200.0, "burst_prob": 0.015, "burst_duration": 45,
         "phantom": 2.0,
     },
     {
-        "id": "esp32_kettle", "rated": 2500.0, "var": 20.0,
+        "id": "node_kettle", "rated": 2500.0, "var": 20.0,
         "spike_prob": 0.0, "cutoff": 3500.0,
         "cycle": False, "burst": True,
         "burst_power": 2500.0, "burst_prob": 0.01, "burst_duration": 60,
         "phantom": 1.0,
     },
     {
-        "id": "esp32_hvac", "rated": 2000.0, "var": 50.0,
+        "id": "node_hvac", "rated": 2000.0, "var": 50.0,
         "spike_prob": 0.003, "cutoff": 3500.0,
         "cycle": True, "cycle_on": 1800, "cycle_off": 600,
         "phantom": 10.0,
@@ -228,6 +230,8 @@ async def main():
     shutdown_event = asyncio.Event()
 
     def handle_signal():
+        if shutdown_event.is_set():
+            return  # Already shutting down
         logger.info("Simulator shutting down...")
         shutdown_event.set()
 
@@ -241,18 +245,41 @@ async def main():
     while not shutdown_event.is_set():
         try:
             async with aiomqtt.Client(args.broker, port=args.port) as client:
+                # WS-1/2: Only simulate devices marked as simulated in config
+                try:
+                    with open("config/config.yaml", "r") as f:
+                        sys_config = yaml.safe_load(f)
+                        sim_flags = {
+                            k: v.get("simulated", True) 
+                            for k, v in sys_config.get("devices", {}).items()
+                        }
+                except Exception as e:
+                    logger.warning(f"Could not load config.yaml ({e}), simulating all devices.")
+                    sim_flags = {}
+
+                active_devices = [d for d in DEVICES if sim_flags.get(d['id'], True)]
+
                 logger.info(f"✅ Simulator connected to {args.broker}:{args.port}")
-                logger.info(f"   Devices ({len(DEVICES)}): {[d['id'] for d in DEVICES]}")
+                logger.info(f"   Simulating Devices ({len(active_devices)}): {[d['id'] for d in active_devices]}")
 
-                tasks = [asyncio.create_task(simulate_device(client, cfg)) for cfg in DEVICES]
+                tasks = [asyncio.create_task(simulate_device(client, cfg)) for cfg in active_devices]
+                shutdown_waiter = asyncio.create_task(shutdown_event.wait())
 
-                # Wait until shutdown or connection error
-                done, pending = await asyncio.wait(
-                    [asyncio.create_task(shutdown_event.wait()), *tasks],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
+                try:
+                    # Wait until shutdown signal or a device task crashes
+                    done, pending = await asyncio.wait(
+                        [shutdown_waiter, *tasks],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    # Always cancel all pending tasks to avoid leaks
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    if not shutdown_waiter.done():
+                        shutdown_waiter.cancel()
+                    # Wait for cancellation to complete
+                    await asyncio.gather(*tasks, shutdown_waiter, return_exceptions=True)
                 break
 
         except aiomqtt.MqttError as e:

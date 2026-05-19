@@ -7,15 +7,25 @@ from tqdm import tqdm
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+import yaml
+
 DATA_DIR = "backend/data"
-WINDOW_SIZE = 60
+
+# Read seq_len from config
+try:
+    with open("config/config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+        WINDOW_SIZE = config.get("protonet", {}).get("seq_len", 128)
+except Exception:
+    WINDOW_SIZE = 128
+
 NUM_WINDOWS = 500  # 500 episodes worth of windows per class
 
 CLASSES = {
-    "esp32_fridge": {"rated": 200.0, "tau": 2.0},
-    "esp32_microwave": {"rated": 1200.0, "tau": 0.5},
-    "esp32_kettle": {"rated": 2500.0, "tau": 1.0},
-    "esp32_hvac": {"rated": 2000.0, "tau": 5.0},
+    "node_fridge": {"rated": 200.0, "tau": 2.0},
+    "node_microwave": {"rated": 1200.0, "tau": 0.5},
+    "node_kettle": {"rated": 2500.0, "tau": 1.0},
+    "node_hvac": {"rated": 2000.0, "tau": 5.0},
     "esp32_tv": {"rated": 150.0, "tau": 1.0},
     "esp32_washer": {"rated": 1800.0, "tau": 3.0},
     "esp32_dryer": {"rated": 2000.0, "tau": 4.0},
@@ -31,18 +41,18 @@ def generate_window(class_name, config):
     
     window = np.zeros(WINDOW_SIZE)
     
-    # Class-specific signatures (simplified representations within a 60s window)
-    if class_name == "esp32_fridge":
+    # Class-specific signatures (simplified representations within a window)
+    if class_name == "node_fridge":
         # Compressor kick-in
         t = np.arange(WINDOW_SIZE)
         window = rated * (1 - np.exp(-t / tau))
-    elif class_name == "esp32_microwave":
+    elif class_name == "node_microwave":
         # Instant ON, pulse
         window[5:55] = rated
-    elif class_name == "esp32_kettle":
+    elif class_name == "node_kettle":
         # Steady
         window[10:] = rated
-    elif class_name == "esp32_hvac":
+    elif class_name == "node_hvac":
         # Variable with startup peak
         window[5:] = rated + 500 * np.exp(-np.arange(WINDOW_SIZE - 5) / (tau / 2))
     elif class_name == "esp32_tv":

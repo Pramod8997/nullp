@@ -15,15 +15,17 @@ class MQTTClientManager:
     def set_read_callback(self, callback: Callable[[str, Union[str, bytes, bytearray, int, float, None]], Awaitable[None]]) -> None:
         self._read_callback = callback
 
-    async def run(self, read_topic: str) -> None:
+    async def run(self, read_topic: Union[str, list]) -> None:
         # Reconnect loop
         while True:
             try:
                 async with aiomqtt.Client(self.broker, port=self.port) as client:
                     self.client = client
                     logger.info(f"Connected to MQTT broker at {self.broker}:{self.port}")
-                    await client.subscribe(read_topic)
-                    logger.info(f"Subscribed to reads on {read_topic}")
+                    topics = [read_topic] if isinstance(read_topic, str) else read_topic
+                    for t in topics:
+                        await client.subscribe(t)
+                        logger.info(f"Subscribed to reads on {t}")
                     async for message in client.messages:
                         if self._read_callback and message.topic:
                             try:

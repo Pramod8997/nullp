@@ -21,6 +21,7 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [pipelineStatus, setPipelineStatus]     = useState('initializing');
   const [pendingUnknowns, setPendingUnknowns]   = useState([]);  // LABEL_REQUEST events
+  const [latencyStats, setLatencyStats]           = useState({ avg_ms: 0, max_ms: 0, p95_ms: 0 });
 
   const wsRef = useRef(null);
   const reconnectDelay = useRef(1000);
@@ -203,6 +204,14 @@ function App() {
         setPmvScore(data.pmv || 0);
         break;
 
+      case 'LATENCY_STATS':
+        setLatencyStats({
+          avg_ms: data.avg_ms || 0,
+          max_ms: data.max_ms || 0,
+          p95_ms: data.p95_ms || 0,
+        });
+        break;
+
       default:
         break;
     }
@@ -263,6 +272,7 @@ function App() {
             pipelineStatus={pipelineStatus}
             analytics={analytics}
             deviceCount={Object.keys(devices).length}
+            latencyStats={latencyStats}
           />
         </div>
       </div>

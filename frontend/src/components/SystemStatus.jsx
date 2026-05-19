@@ -1,7 +1,7 @@
 import React from 'react';
-import { Activity, Wifi, WifiOff, Database, Brain, DollarSign } from 'lucide-react';
+import { Activity, Wifi, WifiOff, Database, Brain, DollarSign, Clock } from 'lucide-react';
 
-const SystemStatus = ({ connectionStatus, pipelineStatus, analytics, deviceCount }) => {
+const SystemStatus = ({ connectionStatus, pipelineStatus, analytics, deviceCount, latencyStats }) => {
   const wsStatus = connectionStatus === 'connected' ? 'ok' : connectionStatus === 'reconnecting' ? 'warn' : 'error';
   const pipeStatus = pipelineStatus === 'connected' ? 'ok' : pipelineStatus === 'mqtt_reconnecting' ? 'warn' : 'error';
 
@@ -60,9 +60,33 @@ const SystemStatus = ({ connectionStatus, pipelineStatus, analytics, deviceCount
             </div>
           </>
         )}
+
+        {latencyStats && latencyStats.avg_ms > 0 && (
+          <>
+            <div className="status-row" style={{ marginTop: '0.5rem', borderTop: '1px solid var(--border-subtle)', paddingTop: '0.75rem' }}>
+              <span className="status-row__label">
+                <Clock size={14} style={{ marginRight: 6 }} />
+                Avg Latency
+              </span>
+              <span className={`status-row__value ${latencyStats.avg_ms < 200 ? 'ok' : 'warn'}`}>
+                {latencyStats.avg_ms.toFixed(1)} ms
+              </span>
+            </div>
+            <div className="status-row">
+              <span className="status-row__label">
+                <Clock size={14} style={{ marginRight: 6 }} />
+                P95 / Max
+              </span>
+              <span className={`status-row__value ${latencyStats.p95_ms < 200 ? 'ok' : 'warn'}`}>
+                {latencyStats.p95_ms.toFixed(1)} / {latencyStats.max_ms.toFixed(1)} ms
+              </span>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
 };
 
 export default SystemStatus;
+

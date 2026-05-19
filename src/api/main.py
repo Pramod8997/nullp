@@ -162,16 +162,22 @@ async def mqtt_listener_task():
                         device_id = topic.split("/")[-2]
                         try:
                             power_watts = float(payload)
-                            # Update shared state
+                            # Update shared state (always — no throttle)
                             if device_id not in system_state["devices"]:
                                 system_state["devices"][device_id] = {}
                             system_state["devices"][device_id]["power"] = power_watts
 
-                            await manager.broadcast({
-                                "type": "power_reading",
-                                "device_id": device_id,
-                                "power": power_watts,
-                            })
+                            # Throttle WebSocket broadcasts to max 2/sec per device
+                            # to prevent backpressure on slow clients
+                            last_key = f"_ws_last_{device_id}"
+                            now = time.time()
+                            if now - system_state.get(last_key, 0) >= 0.5:
+                                system_state[last_key] = now
+                                await manager.broadcast({
+                                    "type": "power_reading",
+                                    "device_id": device_id,
+                                    "power": power_watts,
+                                })
                         except ValueError:
                             pass
 

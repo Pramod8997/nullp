@@ -1,26 +1,44 @@
 version: '3.8'
 
 services:
-  ems-api:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./src:/app/src
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./scripts:/app/scripts
-    environment:
-      - MQTT_BROKER=mosquitto
-    depends_on:
-      - mosquitto
-
   mosquitto:
     image: eclipse-mosquitto:2
     ports:
       - "1883:1883"
-      - "9001:9001"
     volumes:
-      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
+    restart: always
+
+  ems-pipeline:
+    build: .
+    command: python scripts/run_pipeline.py
+    environment:
+      - MQTT_BROKER=mosquitto
+      - PYTHONPATH=/app
+    depends_on:
+      - mosquitto
+    restart: always
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./backend/models/weights:/app/backend/models/weights
+
+  ems-api:
+    build: .
+    command: python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - MQTT_BROKER=mosquitto
+      - PYTHONPATH=/app
+    depends_on:
+      - mosquitto
+    restart: always
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./src:/app/src

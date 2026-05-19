@@ -74,8 +74,10 @@ class EMSOrchestrator:
 
         # ── Infrastructure ──
         self.db = DatabaseSession(self.config['database']['path'])
+        # Allow MQTT_BROKER env var to override config (for Docker deployments)
+        mqtt_broker = os.environ.get('MQTT_BROKER', self.config['mqtt']['broker'])
         self.mqtt = MQTTClientManager(
-            self.config['mqtt']['broker'],
+            mqtt_broker,
             self.config['mqtt']['port']
         )
 
@@ -101,7 +103,7 @@ class EMSOrchestrator:
 
         # ── ProtoNet / CNN ──
         proto_cfg = self.config.get("protonet", {})
-        self.window_size = proto_cfg.get("window_size", 60)
+        self.seq_len = proto_cfg.get("seq_len", 128)
         self.embedding_size = proto_cfg.get("embedding_size", 128)
         self.distance_threshold = proto_cfg.get("distance_threshold", 15.0)
         self.confidence_threshold = proto_cfg.get("confidence_threshold", 0.90)
@@ -203,8 +205,8 @@ class EMSOrchestrator:
             elif os.path.exists(weights_path):
                 # Fallback: legacy CNN weights
                 self.encoder = CNN1DEncoder(
-                    input_size=self.window_size,
-                    embedding_size=self.embedding_size
+                    in_channels=1,
+                    embed_dim=self.embedding_size
                 )
                 self.encoder.load_state_dict(
                     torch.load(weights_path, map_location="cpu", weights_only=False)
@@ -286,10 +288,10 @@ class EMSOrchestrator:
         else:
             # Legacy fallback: maintain rolling window
             if device_id not in self.power_windows:
-                self.power_windows[device_id] = deque(maxlen=self.window_size)
+                self.power_windows[device_id] = deque(maxlen=self.seq_len)
             self.power_windows[device_id].append(power_watts)
             window = self.power_windows[device_id]
-            if len(window) < self.window_size:
+            if len(window) < self.seq_len:
                 return "pending", 0.0, {}
             window_np = np.array(list(window), dtype=np.float32)
 
@@ -336,12 +338,28 @@ class EMSOrchestrator:
     async def _handle_mqtt_message(
         self, topic: str, payload: Union[str, bytes, bytearray, int, float, None]
     ) -> None:
+        # ══ WS-7.2: Pipeline Latency Measurement ══
+        t0 = time.perf_counter()
         try:
             device_id = topic.split("/")[-2]
             # Robust payload decoding
             if isinstance(payload, (bytes, bytearray)):
                 payload = payload.decode("utf-8", errors="replace")
-            power_watts = float(payload) if payload else 0.0
+            payload_str = str(payload) if payload else ""
+
+            # Phase 2 (WS-5.1): Hardware ACK processing
+            if topic.endswith("/ack"):
+                logger.info(f"✅ Hardware ACK received for {device_id}: {payload_str}")
+                # Clear software cooldown / update state
+                self.action_cooldowns[device_id] = 0.0
+                await self._broadcast_event({
+                    "type": "HARDWARE_ACK",
+                    "device_id": device_id,
+                    "message": f"Hardware confirmed: {payload_str}",
+                })
+                return
+
+            power_watts = float(payload_str) if payload_str else 0.0
             current_time = time.time()
             current_hour = datetime.now().hour
 
@@ -398,6 +416,7 @@ class EMSOrchestrator:
                 self.device_states[device_id] = 1 if power_watts > 10 else 0
                 class_name = self.device_classifications.get(device_id, "pending")
                 confidence = 0.0
+                distances = {}
             else:
                 # ══════════════════════════════════════════════════════
                 # STEP 2: CNN / PROTONET + OPENMAX CLASSIFICATION
@@ -418,7 +437,7 @@ class EMSOrchestrator:
                 # Use the NILM-filtered segment if available, otherwise fall back
                 if filtered_segment is not None:
                     window_np = filtered_segment
-                elif device_id in self.power_windows and len(self.power_windows[device_id]) >= self.window_size:
+                elif device_id in self.power_windows and len(self.power_windows[device_id]) >= self.seq_len:
                     window_np = np.array(list(self.power_windows[device_id]), dtype=np.float32)
                 else:
                     window_np = None
@@ -560,6 +579,9 @@ class EMSOrchestrator:
                     "tod": self.agent.get_time_of_day_bin(current_hour),
                 }
 
+                # Snapshot prev state BEFORE action for proper TD update
+                prev_state = dict(state_dict)
+
                 action = self.agent.act(state_dict, pmv_score, confidence, class_name)
 
                 # ── Policy Promotion Gate: shadow mode until 50 twin episodes ──
@@ -570,12 +592,17 @@ class EMSOrchestrator:
                     logger.info(
                         f"🤖 RL Agent: {action} on {device_id} ({class_name}). "
                         f"PMV={pmv_score:.2f} | Conf={confidence:.3f} | ToU=${tou_rate:.2f}"
+                        f" | Promoted={'YES' if self.promo_gate.is_promoted else 'SHADOW'}"
                     )
 
                     if action == "SHED" and class_name not in self.agent.NEVER_SHED:
-                        await self.mqtt.publish_command(
-                            f"home/plug/{device_id}/command", "OFF"
-                        )
+                        if self.promo_gate.is_promoted:
+                            # LIVE MODE: Actually send relay command
+                            await self.mqtt.publish_command(
+                                f"home/plug/{device_id}/command", "OFF"
+                            )
+                        else:
+                            logger.info(f"  ↳ Shadow mode: SHED logged but NOT executed")
                         await self._broadcast_event({
                             "type": "RL_ACTION",
                             "device_id": device_id,
@@ -584,7 +611,8 @@ class EMSOrchestrator:
                             "pmv": round(pmv_score, 2),
                             "confidence": round(confidence, 3),
                             "tou_rate": tou_rate,
-                            "message": f"RL optimized: {class_name} OFF (PMV {pmv_score:.2f})",
+                            "promoted": self.promo_gate.is_promoted,
+                            "message": f"RL optimized: {class_name} {'OFF' if self.promo_gate.is_promoted else 'SHADOW'} (PMV {pmv_score:.2f})",
                         })
 
                     elif action in ["SCHEDULE_HVAC", "SHED_HVAC"]:
@@ -595,12 +623,19 @@ class EMSOrchestrator:
                             "message": f"Comfort override: {action} (PMV {pmv_score:.2f})",
                         })
 
-                    # Q-learning update
+                    # Build next_state AFTER action for proper TD update
+                    next_state = {
+                        "devices": {class_name: (0.0 if action == "SHED" else pct_of_rated)},
+                        "price_tier": self.agent.get_price_bin(tou_rate),
+                        "pmv_zone": self.agent.get_pmv_zone(pmv_score),
+                        "tod": self.agent.get_time_of_day_bin(current_hour),
+                    }
+
                     reward = self.agent.compute_reward(
-                        state_dict, action, state_dict,
+                        prev_state, action, next_state,
                         pmv_score, power_watts, tou_rate, confidence
                     )
-                    self.agent.update(state_dict, action, reward, state_dict)
+                    self.agent.update(prev_state, action, reward, next_state)
 
             # ══════════════════════════════════════════════════════════
             # ALWAYS: DEVICE STATUS BROADCAST
@@ -619,13 +654,45 @@ class EMSOrchestrator:
                 "timestamp": time.strftime("%H:%M:%S"),
             })
 
-            # Broadcast phantom loads every 10 seconds
-            if int(current_time) % 10 == 0:
+            # Broadcast phantom loads every 10 seconds (interval-based, not modulo)
+            if current_time - getattr(self, '_last_phantom_broadcast', 0) >= 10.0:
+                self._last_phantom_broadcast = current_time
                 await self._broadcast_event({
                     "type": "PHANTOM_LOAD",
                     "loads": {k: round(v, 3) for k, v in self.phantom_tracker.phantom_loads.items()},
                     "total": round(self.phantom_tracker.get_total_phantom_load(), 3),
                     "offenders": self.phantom_tracker.get_worst_offenders(3),
+                })
+
+            # ══ WS-7.2: Log pipeline latency ══
+            t1 = time.perf_counter()
+            latency_ms = (t1 - t0) * 1000
+            if not hasattr(self, '_latency_samples'):
+                self._latency_samples = []
+                self._last_latency_broadcast = 0.0
+            self._latency_samples.append(latency_ms)
+            # Keep last 100 samples
+            if len(self._latency_samples) > 100:
+                self._latency_samples = self._latency_samples[-100:]
+
+            if latency_ms > 200:
+                logger.warning(f"⏱️ Pipeline latency: {latency_ms:.1f}ms (ABOVE 200ms target)")
+            else:
+                logger.debug(f"⏱️ Pipeline latency: {latency_ms:.1f}ms")
+
+            # Broadcast latency stats every 30 seconds
+            if current_time - self._last_latency_broadcast >= 30.0:
+                self._last_latency_broadcast = current_time
+                avg_latency = sum(self._latency_samples) / len(self._latency_samples)
+                max_latency = max(self._latency_samples)
+                p95_latency = sorted(self._latency_samples)[int(len(self._latency_samples) * 0.95)]
+                await self._broadcast_event({
+                    "type": "LATENCY_STATS",
+                    "avg_ms": round(avg_latency, 1),
+                    "max_ms": round(max_latency, 1),
+                    "p95_ms": round(p95_latency, 1),
+                    "samples": len(self._latency_samples),
+                    "target_ms": 200,
                 })
 
         except Exception as e:
@@ -707,14 +774,17 @@ class EMSOrchestrator:
         # ML Pipeline runs via MQTT callback
         self.mqtt.set_read_callback(self._handle_mqtt_message)
         ml_pipeline_task = asyncio.create_task(
-            self.mqtt.run(self.config['mqtt']['topics']['reads'])
+            self.mqtt.run([
+                self.config['mqtt']['topics']['reads'],
+                "home/plug/+/ack"
+            ])
         )
 
         logger.info("═══════════════════════════════════════════")
         logger.info("  🏠 EMS Pipeline Orchestrator ONLINE")
         logger.info(f"  Safety Layer: ✅ (parallel task)")
         logger.info(f"  ProtoNet: " + ("✅" if self.encoder else "⚠️ (disabled)"))
-        logger.info(f"  OpenMax: " + ("✅" if self.weibull.weibull_models else "⚠️"))
+        logger.info(f"  OpenMax: " + ("✅" if self.weibull._weibull else "⚠️"))
         logger.info(f"  Temp Scaler: T={self.temp_scaler.temperature.item():.4f}")
         logger.info(f"  Confidence Gate: {self.confidence_threshold}")
         logger.info(f"  Delta Stability: ✅")
@@ -733,6 +803,8 @@ class EMSOrchestrator:
             await self.db.close()
 
     def shutdown(self) -> None:
+        if not self._running:
+            return  # Already shutting down — idempotent guard
         logger.info("Initiating graceful shutdown...")
         self._running = False
 
@@ -740,12 +812,32 @@ class EMSOrchestrator:
 async def main() -> None:
     orchestrator = EMSOrchestrator()
     loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    _shutting_down = False
+
+    def _signal_handler():
+        nonlocal _shutting_down
+        if _shutting_down:
+            return  # Idempotent: ignore repeated signals from shell's `kill 0`
+        _shutting_down = True
+        orchestrator.shutdown()
+        # Remove handlers so subsequent signals use default behavior (fast exit)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.remove_signal_handler(sig)
+            except Exception:
+                pass
+        if main_task and not main_task.done():
+            main_task.cancel()
 
     if sys.platform != 'win32':
-        loop.add_signal_handler(signal.SIGINT, lambda: orchestrator.shutdown())
-        loop.add_signal_handler(signal.SIGTERM, lambda: orchestrator.shutdown())
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _signal_handler)
 
-    await orchestrator.run()
+    try:
+        await orchestrator.run()
+    except asyncio.CancelledError:
+        pass
 
 
 if __name__ == "__main__":

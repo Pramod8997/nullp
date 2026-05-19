@@ -49,10 +49,11 @@ class PMVThermodynamics:
         pa = rh * 10 * math.exp(16.6536 - 4030.183 / (ta + 235.0))
 
         # Clothing surface temperature — iterative (ISO 7730:2005 Annex D)
-        # Better initial guess avoids divergence
-        t_cl = 35.7 - 0.028 * m - i_cl * (
-            3.96e-8 * f_cl * ((ta + 273.0) ** 4 - (tr + 273.0) ** 4) +
-            f_cl * 2.38 * (abs(ta - ta) ** 0.25) * (ta - ta)
+        # Initial guess: skin temp ~35.7°C minus metabolic offset
+        t_cl_init = 35.7 - 0.028 * m
+        t_cl = t_cl_init - i_cl * (
+            3.96e-8 * f_cl * ((t_cl_init + 273.0) ** 4 - (tr + 273.0) ** 4) +
+            f_cl * 2.38 * (abs(t_cl_init - ta) ** 0.25) * (t_cl_init - ta)
         )
         t_cl = float(np.clip(t_cl, ta - 5, ta + 30))  # physically reasonable
 

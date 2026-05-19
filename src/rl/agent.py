@@ -33,10 +33,23 @@ class TabularQLearningAgent:
         
         self.alpha = 0.1
         self.gamma = 0.99
-        self.epsilon = 0.1
+
+        # Epsilon decay: explore aggressively at start, converge over time
+        self.epsilon_start = rl_cfg.get("epsilon_start", 0.3)
+        self.epsilon_end = rl_cfg.get("epsilon_end", 0.01)
+        self.epsilon_decay = rl_cfg.get("epsilon_decay", 0.999)
+        self.epsilon = self.epsilon_start
         
         self.MAX_RL_DEVICES = 10
-        self.NEVER_SHED = ["esp32_fridge"]  # Hardcoded life-critical devices
+
+        # Load NEVER_SHED from config: any device with tier0: true is unshedable
+        self.NEVER_SHED = [
+            name for name, cfg in safety_cfg.items()
+            if isinstance(cfg, dict) and cfg.get("tier0", False)
+        ]
+        # Always protect fridge as a fallback even if config doesn't set tier0
+        if not any("fridge" in d for d in self.NEVER_SHED):
+            self.NEVER_SHED.append("esp32_fridge")
         
         # Q-table: state_hash -> {action_hash -> q_value}
         self.q_table = defaultdict(lambda: defaultdict(float))
@@ -80,33 +93,31 @@ class TabularQLearningAgent:
 
     def _discretize(self, state_dict: Dict[str, Any]) -> str:
         """
-        State space:
-        - Per-device: 4 bins (OFF=0, LOW=1, MED=2, HIGH=3)
+        Aggregate state space (Phase 2 fix — WS-3.3):
+        - Total load bin: 4 bins (OFF=0, LOW=1, MED=2, HIGH=3)
+        - Active device count bin: 4 bins
         - Price tier: 3 bins
         - PMV zone: 3 bins
         - Time of day: 4 bins
+        Total: 4 × 4 × 3 × 3 × 4 = 576 states (tractable for tabular Q)
         """
-        device_states = []
-        # Sort devices to ensure consistent state hashing
-        for dev_id in sorted(state_dict.get("devices", {}).keys()):
-            pct = state_dict["devices"][dev_id]  # Expected to be percentage of rated
-            if pct <= 0.05:
-                bin_val = 0
-            elif pct <= 0.33:
-                bin_val = 1
-            elif pct <= 0.66:
-                bin_val = 2
-            else:
-                bin_val = 3
-            device_states.append(f"{dev_id}:{bin_val}")
-            
-        parts = [
-            f"price:{state_dict.get('price_tier', 1)}",
-            f"pmv:{state_dict.get('pmv_zone', 1)}",
-            f"tod:{state_dict.get('tod', 2)}",
-            "|".join(device_states)
-        ]
-        return "::".join(parts)
+        devices = state_dict.get("devices", {})
+
+        # Aggregate load: average pct-of-rated across all devices
+        if devices:
+            total_pct = sum(devices.values()) / len(devices)
+        else:
+            total_pct = 0.0
+        total_bin = min(3, int(total_pct * 4))
+
+        # Active device count (those above 5% of rated)
+        active_count = sum(1 for v in devices.values() if v > 0.05)
+        active_bin = min(3, active_count // 3)
+
+        return (f"load:{total_bin}::active:{active_bin}"
+                f"::price:{state_dict.get('price_tier', 1)}"
+                f"::pmv:{state_dict.get('pmv_zone', 1)}"
+                f"::tod:{state_dict.get('tod', 2)}")
 
     def act(self, state_dict: Dict[str, Any], pmv: float, confidence: float,
             classified_device: str, min_confidence: float = None) -> str:
@@ -171,14 +182,29 @@ class TabularQLearningAgent:
         td_target = reward + self.gamma * best_next_q
         td_error = td_target - self.q_table[state_key][action]
         self.q_table[state_key][action] += self.alpha * td_error
+
+        # Epsilon decay after each update
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
         
         # Log to CSV
         self.log_action(state_key, action, reward, next_state_key)
 
     def log_action(self, state: str, action: str, reward: float, next_state: str) -> None:
         try:
+            import fcntl
             with open("rl_action_log.csv", "a") as f:
-                f.write(f"{time.time()},{state},{action},{reward},{next_state}\n")
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    f.write(f"{time.time()},{state},{action},{reward},{next_state}\n")
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+        except ImportError:
+            # fcntl not available (Windows) — fall back to unprotected write
+            try:
+                with open("rl_action_log.csv", "a") as f:
+                    f.write(f"{time.time()},{state},{action},{reward},{next_state}\n")
+            except Exception as e:
+                logger.error(f"Failed to log RL action: {e}")
         except Exception as e:
             logger.error(f"Failed to log RL action: {e}")
 

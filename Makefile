@@ -26,11 +26,12 @@ test:
 run:
 	@echo "Starting Confidence-Aware Digital Twin EMS..."
 	@bash -c 'trap "kill 0" SIGINT SIGTERM EXIT; \
-	$(PYTHON) scripts/start_broker.py & \
+	docker-compose up -d mosquitto; \
 	sleep 2; \
 	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/run_pipeline.py & \
 	export PYTHONPATH=$(PWD) && $(PYTHON) -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 & \
 	(cd frontend && npm run dev) & \
+	sleep 3; \
 	export PYTHONPATH=$(PWD) && $(PYTHON) backend/scripts/simulate_esp32.py & \
 	wait'
 

@@ -5,6 +5,8 @@ app:
 mqtt:
   broker: "localhost"
   port: 1883
+  qos_safety: 1
+  qos_telemetry: 0
   topics:
     reads: "home/sensor/+/power"
     writes: "home/plug/+/command"
@@ -12,6 +14,21 @@ mqtt:
 
 database:
   path: "data/ems_state.db"
+  fallback_csv: "data/fallback_measurements.csv"
+  retention_days: 30
+
+# Phase 2: Explicit device configuration
+devices:
+  node_fridge:      { simulated: false, rated: 200,  tier0: true }
+  node_microwave:   { simulated: false, rated: 1200, tier0: false }
+  node_kettle:      { simulated: false, rated: 2500, tier0: false }
+  node_hvac:        { simulated: false, rated: 2000, tier0: false }
+  esp32_tv:         { simulated: true,  rated: 150,  tier0: false }
+  esp32_washer:     { simulated: true,  rated: 1800, tier0: false }
+  esp32_dryer:      { simulated: true,  rated: 2000, tier0: false }
+  esp32_dishwasher: { simulated: true,  rated: 1500, tier0: false }
+  esp32_oven:       { simulated: true,  rated: 3000, tier0: false }
+  esp32_lighting:   { simulated: true,  rated: 100,  tier0: false }
 
 # 10 appliance classes used by Phase-1 NILM pipeline
 appliances:
@@ -44,10 +61,10 @@ system_safety:
   # medical_device, alarm_system → tier0: true (not sheddable — Phase 2)
   # Legacy per-device ID limits kept for ESP32 simulator compatibility
   device_wattage_limits:
-    esp32_fridge: 200.0
-    esp32_microwave: 1200.0
-    esp32_kettle: 2500.0
-    esp32_hvac: 2000.0
+    node_fridge: 200.0
+    node_microwave: 1200.0
+    node_kettle: 2500.0
+    node_hvac: 2000.0
     esp32_tv: 150.0
     esp32_washer: 1800.0
     esp32_dryer: 2000.0
@@ -59,7 +76,7 @@ system_safety:
 protonet:
   weights_path: "backend/models/weights/cnn_weights.pth"
   anchors_path: "backend/models/weights/protonet_anchors.pt"
-  window_size: 60
+  seq_len: 128
   embedding_size: 128
   distance_threshold: 15.0
   confidence_threshold: 0.90
@@ -77,6 +94,10 @@ rl:
   empathy_pmv_min: -0.5
   empathy_pmv_max: 0.5
   q_table_path: "backend/models/weights/q_table.pkl"
+  epsilon_start: 0.3
+  epsilon_end: 0.01
+  epsilon_decay: 0.999
+  promotion_episodes: 50
 
 preprocessing:
   sg_window: 11
