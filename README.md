@@ -4,7 +4,7 @@
 ![Tests](https://img.shields.io/badge/tests-79%20passed-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Node](https://img.shields.io/badge/node-18%2B-green)
-![Docker](https://img.shields.io/badge/docker-compose-2496ED)
+![Mosquitto](https://img.shields.io/badge/mosquitto-2.0%2B-purple)
 ![License](https://img.shields.io/badge/license-Academic-orange)
 
 A production-grade Smart Home Energy Management System integrating **CNN/ProtoNet open-set device classification**, **Reinforcement Learning (Q-Learning)**, **real-time safety monitoring**, and a **premium React dashboard** — all orchestrated over MQTT with support for both **physical ESP32 hardware** and **simulated devices** in hybrid mode.
@@ -16,7 +16,7 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │              MQTT Broker (Eclipse Mosquitto :1883)               │
-│              Docker container · QoS 1 · Persistence             │
+│              Native/systemd · QoS 1 · Persistence               │
 └──────┬───────────┬──────────────┬──────────────┬────────────────┘
        │           │              │              │
   ┌────▼────┐ ┌────▼─────┐  ┌────▼────┐   ┌────▼──────────┐
@@ -51,7 +51,7 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 | 0 | **Safety Monitor** | **Parallel asyncio.Task** — independent MQTT subscription, 110% warning / 125% cutoff |
 | 0b | **RoC Arc-Fault Proxy** | Rate-of-change detection (> 1000 W/s → immediate relay OFF) |
 | 1 | **Watchdog** | Rolling z-score anomaly detection for sensor drift |
-| 2 | **ProtoNet CNN** | 5-layer 1D CNN + Temporal Attention → 128D embedding → prototypical distance |
+| 2 | **ProtoNet CNN** | 4-layer 1D CNN + Temporal Attention → 128D embedding → prototypical distance |
 | 2b | **OpenMax** | Weibull EVT on tail distances → open-set unknown rejection |
 | 2c | **Temp Scaling** | Learned temperature T for calibrated softmax confidence |
 | 3 | **Confidence Gate** | If confidence < 0.90 → skip RL, emit `LOW_CONFIDENCE` event |
@@ -100,7 +100,7 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 | Feature | Status |
 |---------|--------|
 | Firmware rewrite (true RMS, non-blocking cutoff, heartbeat watchdog) | ✅ |
-| Infrastructure hardening (Docker Mosquitto, docker-compose) | ✅ |
+| Infrastructure hardening (Mosquitto native/systemd, docker-compose fallback) | ✅ |
 | RL agent fix (state-space 3.9M → 576, epsilon decay, NEVER_SHED) | ✅ |
 | Real data integration (NILMTK replay from HDF5 traces) | ✅ |
 | Hardware ACK protocol (OFF_CONFIRMED relay feedback) | ✅ |
@@ -112,6 +112,25 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 | 79-test integration suite (100% pass) | ✅ |
 | Dashboard latency panel | ✅ |
 
+### Phase 1 Bug Remediation ✅
+| Fix | Scope |
+|-----|-------|
+| RL reward logic (projected watts on SHED) | `agent.py` |
+| Cross-device policy bleed (device-aware state hash) | `agent.py` |
+| Epsilon burnout (0.999 → 0.999995 decay) | `agent.py`, `config.yaml` |
+| PMV empathy spam (HVAC-only gate) | `agent.py` |
+| RL state blindness (full house state) | `run_pipeline.py` |
+| Shadow mode delusion (accurate next_state) | `run_pipeline.py` |
+| Transient gating data starvation (confidence carry-over) | `run_pipeline.py` |
+| Digital Twin physics reset (all-device wattage) | `run_pipeline.py` |
+| Time dilation (real dt calculation) | `run_pipeline.py` |
+| Analytics clock drift (per-device timestamps) | `run_pipeline.py` |
+| Label submission MQTT bridge (REST → MQTT → pipeline) | `main.py`, `run_pipeline.py` |
+| Dead WebSocket leak (timeout + gather) | `main.py` |
+| DB data loss on shutdown (queue drain) | `session.py` |
+| CSV path crash (directory guard) | `run_pipeline.py`, `session.py` |
+| ProtoNet weight key remapping (legacy → current arch) | `run_pipeline.py` |
+
 ---
 
 ## 🚀 Getting Started
@@ -122,7 +141,7 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 |------|---------|---------|
 | Python | 3.10+ | Backend pipeline, ML, API |
 | Node.js | 18+ | React frontend |
-| Docker | 20+ | Mosquitto MQTT broker |
+| Mosquitto | 2.0+ | MQTT broker (`sudo apt-get install mosquitto`) |
 | npm | 9+ | Frontend dependency management |
 | Git | any | Version control |
 
@@ -155,7 +174,7 @@ This single command starts **5 services** with proper process management:
 
 | # | Service | Port | Description |
 |---|---------|------|-------------|
-| 1 | Mosquitto MQTT Broker | `:1883` | Docker container (eclipse-mosquitto:2) |
+| 1 | Mosquitto MQTT Broker | `:1883` | Native/systemd (auto-detected) |
 | 2 | Pipeline Orchestrator | — | `scripts/run_pipeline.py` |
 | 3 | FastAPI Backend | `:8000` | `uvicorn src.api.main:app` |
 | 4 | React Dashboard | `:5173` | `frontend/` via Vite |
@@ -298,8 +317,9 @@ make clean
 Run each service individually (useful for debugging):
 
 ```bash
-# Terminal 1: MQTT Broker (Docker)
-docker-compose up -d mosquitto
+# Terminal 1: MQTT Broker (if not running via systemd)
+sudo systemctl start mosquitto
+# or: mosquitto -c mosquitto/config/mosquitto.conf -d
 
 # Terminal 2: Pipeline
 export PYTHONPATH=$(pwd)
@@ -411,7 +431,7 @@ All system parameters are defined in [`config/config.yaml`](config/config.yaml):
 | `system_safety` | per-device wattage limits, max aggregate (3500 W), warning/critical percentages |
 | `protonet` | CNN weights path, distance threshold (15.0), confidence threshold (0.90) |
 | `analytics` | ToU pricing: peak ($0.28), mid ($0.18), off-peak ($0.09) |
-| `rl` | cooldown (15s), PMV empathy bounds (±0.5), epsilon decay (0.999), promotion episodes (50) |
+| `rl` | cooldown (15s), PMV empathy bounds (±0.5), epsilon decay (0.999995), promotion episodes (50) |
 | `preprocessing` | Savitzky-Golay filter, transient detection threshold (50 W) |
 | `delta_stability` | buffer size (10), stability threshold (3.0), min occurrences (3) |
 | `database` | SQLite path, CSV fallback path, retention days (30) |
@@ -492,8 +512,8 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
 
 | Problem | Solution |
 |---------|----------|
-| Port 1883 in use | Stop local Mosquitto: `sudo service mosquitto stop` |
-| `Connection refused` on simulator | Ensure Mosquitto is running: `docker-compose up -d mosquitto` |
+| Port 1883 in use | Stop system Mosquitto: `sudo systemctl stop mosquitto` |
+| `Connection refused` on simulator | Ensure Mosquitto is running: `sudo systemctl start mosquitto` |
 | `ModuleNotFoundError: No module named 'src'` | Run from project root with `PYTHONPATH=$(pwd)` or use `make run` |
 | Frontend shows "Disconnected" | Ensure the FastAPI backend is running on port 8000 |
 | ProtoNet shows ⚠️ disabled | Run `make train_all` to generate model weights |
@@ -502,6 +522,7 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
 | Latency panel shows > 200ms (red) | Check system load; reduce logging verbosity in `config.yaml` |
 | ESP32 enters safe mode | Server heartbeat lost — verify pipeline and Mosquitto connectivity |
 | CT clamp readings off by > 5% | Re-run `python scripts/calibrate_ct.py <DEVICE_ID>` with known 100W load |
+| `OSError: Bad file descriptor` on shutdown | Harmless asyncio cleanup noise on Ctrl+C — does not affect data integrity |
 
 ---
 

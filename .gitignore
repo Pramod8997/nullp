@@ -95,10 +95,19 @@ data/processed/
 # Training Artifacts & Logs
 # ═══════════════════════════════════════════════════════
 rl_action_log.csv
+safety_events.log
 *.log
 logs/
 training_results/
 scratch/
+
+# ═══════════════════════════════════════════════════════
+# Runtime Data & Fallback
+# ═══════════════════════════════════════════════════════
+data/fallback_measurements.csv
+data/ems_state.db*
+mosquitto/data/
+mosquitto/log/
 
 # ═══════════════════════════════════════════════════════
 # ESP32 / PlatformIO
@@ -116,3 +125,9 @@ firmware/**/build/
 # ═══════════════════════════════════════════════════════
 .jupyter
 .ipynb_checkpoints/
+
+# ═══════════════════════════════════════════════════════
+# AI Tools
+# ═══════════════════════════════════════════════════════
+.gemini/
+.antigravity/
