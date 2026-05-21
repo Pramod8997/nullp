@@ -84,7 +84,7 @@ class DatabaseSession:
                         # to CSV. insert_measurement never throws (it just queues),
                         # so CSV fallback must happen HERE where the real write is.
                         logger.error(f"DB write error in flush loop: {db_err}")
-                        self._csv_fallback_batch(batch)
+                        await self._csv_fallback_batch_async(batch)
 
             except asyncio.CancelledError:
                 # Bug 4.2 fix: Drain ALL remaining items from the queue
@@ -102,13 +102,13 @@ class DatabaseSession:
                         logger.info(f"Flushed {len(batch)} records during shutdown.")
                     except Exception as shutdown_err:
                         logger.error(f"Shutdown flush failed: {shutdown_err}")
-                        self._csv_fallback_batch(batch)
+                        await self._csv_fallback_batch_async(batch)
                 raise
             except Exception as e:
                 logger.error(f"Error in DB flush loop: {e}")
 
-    def _csv_fallback_batch(self, batch: List[Tuple[str, tuple]]) -> None:
-        """Bug 4.1 fix: Write a batch of failed DB records to CSV fallback."""
+    def _csv_fallback_batch_sync(self, batch: List[Tuple[str, tuple]]) -> None:
+        """Synchronous CSV write — safe to call from sync context or via asyncio.to_thread."""
         import csv as csv_mod
         try:
             directory = os.path.dirname(self.fallback_csv)
@@ -124,6 +124,13 @@ class DatabaseSession:
             logger.warning(f"📝 CSV fallback: wrote {len(batch)} records to {self.fallback_csv}")
         except Exception as e:
             logger.critical(f"CSV fallback write ALSO failed: {e}")
+
+    async def _csv_fallback_batch_async(self, batch: List[Tuple[str, tuple]]) -> None:
+        """Non-blocking CSV fallback — runs sync file I/O in thread to avoid stalling event loop."""
+        await asyncio.to_thread(self._csv_fallback_batch_sync, batch)
+
+    # Keep legacy name as alias for backward compat
+    _csv_fallback_batch = _csv_fallback_batch_sync
 
     async def _retention_loop(self) -> None:
         """Phase 2 (WS-6.1): Delete measurements older than retention_days every 24h."""

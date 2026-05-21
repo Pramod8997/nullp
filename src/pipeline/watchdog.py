@@ -47,6 +47,14 @@ class SoftAnomalyWatchdog:
         # Avoid division by zero in perfect stable state
         if stdev < 1e-6:
             stdev = 1e-6
+
+        # Audit fix 4.2: Detect normal ON/OFF state transitions and reset baseline.
+        # If the reading deviates massively from a low baseline (e.g., 1.5W → 1500W),
+        # this is a normal appliance start, not a soft anomaly.
+        if abs(reading - mean) > 100.0 and mean < 10.0:
+            history.clear()
+            history.append(reading)
+            return False
             
         z_score = abs(reading - mean) / stdev
         

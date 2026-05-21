@@ -160,6 +160,9 @@ class EMSOrchestrator:
         self._running = False
         self._internal_temp = 22.0  # Indoor temp for digital twin
 
+        # Audit fix 2.1/3.1: Track last-known power per device for RL state + twin
+        self.last_device_power: Dict[str, float] = {}
+
         # Bug 1.6 fix: Carry over last known confidences during steady-state ticks
         self.last_known_confidences: Dict[str, float] = {}
 
@@ -449,6 +452,9 @@ class EMSOrchestrator:
             current_time = time.time()
             current_hour = datetime.now().hour
 
+            # Audit fix 2.1: Always track latest power per device for RL state + twin
+            self.last_device_power[device_id] = power_watts
+
             # ══════════════════════════════════════════════════════════
             # NOTE: Safety monitor runs as SEPARATE parallel task.
             # This handler only processes ML pipeline steps.
@@ -592,11 +598,11 @@ class EMSOrchestrator:
                         )
                         tou_rate = self.agent.get_tou_rate(current_hour)
 
-                        # Bug 1.1 fix: Build full house state for RL, not just current device
+                        # Audit fix 2.1: Use last_device_power for full house state
                         all_devices_state = {}
                         for did, on_off in self.device_states.items():
                             cls = self.device_classifications.get(did, f"unknown_{did}")
-                            last_power = self.power_windows[did][-1] if did in self.power_windows and len(self.power_windows[did]) > 0 else 0
+                            last_power = self.last_device_power.get(did, 0.0)
                             dev_rated = device_limits.get(cls, device_limits.get("default", 1500.0))
                             all_devices_state[cls] = last_power / max(dev_rated, 1.0)
                         all_devices_state[pseudo_class] = pct_of_rated
@@ -658,7 +664,8 @@ class EMSOrchestrator:
                 last_seen = self.last_device_analytics_time.get(device_id, current_time)
                 real_duration_hours = (current_time - last_seen) / 3600.0
                 self.last_device_analytics_time[device_id] = current_time
-                self.analytics.record_usage(device_id, power_watts, duration_hours=max(real_duration_hours, 1.0 / 3600.0))
+                # Audit fix 3.2: Remove min-clamp to prevent energy overestimation
+                self.analytics.record_usage(device_id, power_watts, duration_hours=max(real_duration_hours, 0.0))
 
                 if current_time - self.last_analytics_broadcast >= 30.0:
                     summary = self.analytics.get_daily_summary()
@@ -674,10 +681,9 @@ class EMSOrchestrator:
                     v_air=0.1, rh=50.0, clo=0.7, met=1.2
                 )
 
-                # Bug 2.1 fix: Use last-known wattages for ALL devices,
-                # not just the currently ticking one (prevents state obliteration)
+                # Audit fix 3.1: Use last_device_power for ALL devices (accurate twin state)
                 appliance_watts = {
-                    k: (self.power_windows[k][-1] if k in self.power_windows and len(self.power_windows[k]) > 0 else 0)
+                    k: self.last_device_power.get(k, 0.0)
                     for k in self.device_states
                 }
                 appliance_watts[device_id] = power_watts  # Apply the live tick
@@ -698,12 +704,11 @@ class EMSOrchestrator:
                 rated = device_limits.get(class_name, device_limits.get("default", 1500.0))
                 pct_of_rated = power_watts / max(rated, 1.0)
 
-                # Bug 1.1 fix: Pass the FULL house state to the RL agent,
-                # not just the currently ticking device
+                # Audit fix 2.1: Use last_device_power for full house state
                 all_devices_state = {}
                 for did, on_off in self.device_states.items():
                     cls = self.device_classifications.get(did, f"unknown_{did}")
-                    last_power = self.power_windows[did][-1] if did in self.power_windows and len(self.power_windows[did]) > 0 else 0
+                    last_power = self.last_device_power.get(did, 0.0)
                     dev_rated = device_limits.get(cls, device_limits.get("default", 1500.0))
                     all_devices_state[cls] = last_power / max(dev_rated, 1.0)
                 # Ensure the current device's live reading is included
@@ -776,9 +781,13 @@ class EMSOrchestrator:
                         "tod": self.agent.get_time_of_day_bin(current_hour),
                     }
 
+                    # Audit fix 2.2: Compute aggregate house load for safety penalty
+                    aggregate_watts = sum(self.last_device_power.values())
+
                     reward = self.agent.compute_reward(
                         prev_state, action, next_state,
-                        pmv_score, power_watts, tou_rate, confidence
+                        pmv_score, power_watts, tou_rate, confidence,
+                        aggregate_watts=aggregate_watts
                     )
                     self.agent.update(prev_state, action, reward, next_state, classified_device=class_name)
 

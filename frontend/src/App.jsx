@@ -7,7 +7,7 @@ import PhantomTracker from './components/PhantomTracker';
 import SystemStatus from './components/SystemStatus';
 import './App.css';
 
-const WS_URL = 'ws://localhost:8000/ws';
+const WS_URL = `ws://${window.location.hostname}:8000/ws`;
 const MAX_RECONNECT_DELAY = 10000;
 
 function App() {

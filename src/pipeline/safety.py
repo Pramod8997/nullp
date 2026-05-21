@@ -44,7 +44,12 @@ class SafetyMonitor:
                             rate_of_change = abs(watts - prev_watts)  # W/s at 1Hz
                             self._prev_readings[device_id] = watts
 
-                            if rate_of_change > self.ROC_THRESHOLD:
+                            # Audit fix 4.1: Ignore step-change during normal ON transition.
+                            # If previous reading was low (< 50W), this is an appliance turning on,
+                            # not an arc fault. 1Hz dP/dt is invalid for true arc detection.
+                            is_normal_inrush = prev_watts < 50.0
+
+                            if rate_of_change > self.ROC_THRESHOLD and not is_normal_inrush:
                                 logger.critical(
                                     f"⚡ ARC FAULT PROXY: {device_id} dP/dt={rate_of_change:.0f} W/s "
                                     f"(threshold: {self.ROC_THRESHOLD} W/s)!"

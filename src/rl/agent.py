@@ -174,13 +174,15 @@ class TabularQLearningAgent:
         return action
 
     def compute_reward(self, prev_state: Dict[str, Any], action: str, next_state: Dict[str, Any], 
-                       pmv: float, current_watts: float, tou_rate: float, confidence: float) -> float:
+                       pmv: float, current_watts: float, tou_rate: float, confidence: float,
+                       aggregate_watts: float = 0.0) -> float:
         # Bug 1.2 fix: Use projected wattage based on action taken.
         # If agent chose SHED, the device is off → 0W cost. Otherwise use actual watts.
         projected_watts = 0.0 if action == "SHED" else current_watts
         energy_reward = -projected_watts * tou_rate / 1000.0  # cost in kWh
         pmv_penalty = -5.0 * self.twin.pmv_penalty(pmv)     # heavy comfort penalty
-        safety_bonus = 0.0 if current_watts < self.max_watts else -10.0
+        # Audit fix 2.2: Use aggregate house load for safety penalty, not single device
+        safety_bonus = 0.0 if aggregate_watts < self.max_watts else -10.0
         return energy_reward + pmv_penalty + safety_bonus
 
     def update(self, state_dict: Dict[str, Any], action: str, reward: float,
@@ -197,10 +199,11 @@ class TabularQLearningAgent:
         # Epsilon decay after each update
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
         
-        # Log to CSV
-        self.log_action(state_key, action, reward, next_state_key)
+        # Log to CSV (synchronous — caller should use log_action_async from async context)
+        self._log_action_sync(state_key, action, reward, next_state_key)
 
-    def log_action(self, state: str, action: str, reward: float, next_state: str) -> None:
+    def _log_action_sync(self, state: str, action: str, reward: float, next_state: str) -> None:
+        """Synchronous file write — safe to call from sync context or via asyncio.to_thread."""
         try:
             import fcntl
             with open("rl_action_log.csv", "a") as f:
@@ -218,6 +221,11 @@ class TabularQLearningAgent:
                 logger.error(f"Failed to log RL action: {e}")
         except Exception as e:
             logger.error(f"Failed to log RL action: {e}")
+
+    async def log_action_async(self, state: str, action: str, reward: float, next_state: str) -> None:
+        """Non-blocking RL log — runs sync file I/O in a thread to avoid stalling the event loop."""
+        import asyncio
+        await asyncio.to_thread(self._log_action_sync, state, action, reward, next_state)
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.q_table_path), exist_ok=True)
