@@ -80,7 +80,8 @@ class CNN1DEncoder(nn.Module):
             x = x.unsqueeze(1)   # (batch, 1, seq_len)
         h = self.cnn(x)                  # (batch, 128, L')
         h = self.pool(h).squeeze(-1)     # (batch, 128)
-        return self.project(h)           # (batch, EMBED_DIM)
+        h = self.project(h)              # (batch, EMBED_DIM)
+        return self.project_bn(h)        # BatchNorm (matches trained weights)
 
 
 class _LegacyTemporalAttention(nn.Module):

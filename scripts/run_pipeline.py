@@ -207,9 +207,7 @@ class EMSOrchestrator:
                             if k.startswith(old_prefix):
                                 new_key = k.replace(old_prefix, new_prefix)
                                 break
-                    # Skip num_batches_tracked (not needed by current model)
-                    if "num_batches_tracked" in new_key:
-                        continue
+                    # num_batches_tracked is needed by BatchNorm — don't skip
                     remapped[new_key] = v
 
                 missing, unexpected = proto.load_state_dict(remapped, strict=False)
@@ -385,13 +383,10 @@ class EMSOrchestrator:
             logger.error(f"Failed to broadcast event: {e}")
 
     # ─── CSV Fallback Writer (§3.2 fix) ───────────────────────────────
-    def _csv_fallback_write(self, timestamp: float, device_id: str,
-                            power_watts: float) -> None:
-        """Write measurement to a local CSV fallback file when DB is unavailable.
-        This prevents data loss during database lock-ups or disk issues."""
+    def _csv_fallback_write_sync(self, timestamp: float, device_id: str,
+                                 power_watts: float) -> None:
+        """Synchronous CSV write — called via asyncio.to_thread to avoid blocking."""
         try:
-            # Bug 4.4 fix: os.path.dirname on a bare filename returns '',
-            # which causes os.makedirs to crash with FileNotFoundError
             directory = os.path.dirname(self.csv_fallback_path)
             if directory:
                 os.makedirs(directory, exist_ok=True)
@@ -404,6 +399,12 @@ class EMSOrchestrator:
             logger.warning(f"📝 DB fallback: wrote {device_id}={power_watts:.1f}W to {self.csv_fallback_path}")
         except Exception as fallback_err:
             logger.critical(f"CSV fallback write ALSO failed: {fallback_err}")
+
+    async def _csv_fallback_write(self, timestamp: float, device_id: str,
+                                  power_watts: float) -> None:
+        """Non-blocking CSV fallback — runs sync I/O in a thread to avoid stalling the event loop."""
+        async with self._csv_lock:
+            await asyncio.to_thread(self._csv_fallback_write_sync, timestamp, device_id, power_watts)
 
     # ─── Main Message Handler (ML Pipeline) ───────────────────────────
     async def _handle_mqtt_message(
@@ -614,7 +615,7 @@ class EMSOrchestrator:
                         try:
                             await self.db.insert_measurement(current_time, device_id, power_watts)
                         except Exception:
-                            self._csv_fallback_write(current_time, device_id, power_watts)
+                            await self._csv_fallback_write(current_time, device_id, power_watts)
                 # End unknown device flow
                 
             elif confidence < self.confidence_threshold:
@@ -647,7 +648,7 @@ class EMSOrchestrator:
                     logger.error(f"DB write failed: {e}")
                     self.failure_matrix.trigger_failure("sensor_timeout", device_id)
                     # §3.2 fix: fallback to CSV so data is not lost
-                    self._csv_fallback_write(current_time, device_id, power_watts)
+                    await self._csv_fallback_write(current_time, device_id, power_watts)
 
                 # Update local device state
                 self.device_states[device_id] = 1 if power_watts > 10 else 0
@@ -929,7 +930,7 @@ class EMSOrchestrator:
         logger.info("  🏠 EMS Pipeline Orchestrator ONLINE")
         logger.info(f"  Safety Layer: ✅ (parallel task)")
         logger.info(f"  ProtoNet: " + ("✅" if self.encoder else "⚠️ (disabled)"))
-        logger.info(f"  OpenMax: " + ("✅" if self.weibull._weibull else "⚠️"))
+        logger.info(f"  OpenMax: " + ("✅" if getattr(self.weibull, '_weibull', None) else "⚠️"))
         logger.info(f"  Temp Scaler: T={self.temp_scaler.temperature.item():.4f}")
         logger.info(f"  Confidence Gate: {self.confidence_threshold}")
         logger.info(f"  Delta Stability: ✅")

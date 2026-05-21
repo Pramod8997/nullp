@@ -43,8 +43,9 @@ class TabularQLearningAgent:
         self.MAX_RL_DEVICES = 10
 
         # Load NEVER_SHED from config: any device with tier0: true is unshedable
+        devices_cfg = self.config.get("devices", {})
         self.NEVER_SHED = [
-            name for name, cfg in safety_cfg.items()
+            name for name, cfg in devices_cfg.items()
             if isinstance(cfg, dict) and cfg.get("tier0", False)
         ]
         # Always protect fridge as a fallback even if config doesn't set tier0

@@ -7,6 +7,9 @@ phase-1results.md
 Phase2_Implementation_Plan.md
 Phase2plan.md
 Phase2\ Progress\ Log.md
+Project_Overview.pdf
+make_pdf.py
+make_detailed_pdf.py
 
 # ═══════════════════════════════════════════════════════
 # Python
@@ -141,3 +144,10 @@ firmware/**/build/
 # ═══════════════════════════════════════════════════════
 .gemini/
 .antigravity/
+
+
+
+#===========================================================
+#Other unwanted files
+#=============================================================
+./
