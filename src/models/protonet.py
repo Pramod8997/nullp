@@ -407,7 +407,10 @@ class SupportSetManager:
         with torch.no_grad():
             for cls, windows in self.raw_windows.items():
                 t   = torch.tensor(np.array(windows), dtype=torch.float32).unsqueeze(1).to(device)
-                emb = encoder(t)
+                if hasattr(encoder, 'embed'):
+                    emb = encoder.embed(t.squeeze(1))
+                else:
+                    emb = encoder(t)
                 prototypes[cls] = emb.mean(dim=0).cpu().numpy()
         return prototypes
 
@@ -418,7 +421,10 @@ class SupportSetManager:
         with torch.no_grad():
             for cls, windows in self.raw_windows.items():
                 t   = torch.tensor(np.array(windows), dtype=torch.float32).unsqueeze(1).to(device)
-                embs_per_cls[cls] = encoder(t).cpu().numpy()
+                if hasattr(encoder, 'embed'):
+                    embs_per_cls[cls] = encoder.embed(t.squeeze(1)).cpu().numpy()
+                else:
+                    embs_per_cls[cls] = encoder(t).cpu().numpy()
         weibull_model.fit(embs_per_cls)
 
     def classify(self, window: np.ndarray, encoder: nn.Module,
@@ -429,7 +435,11 @@ class SupportSetManager:
         scaler.eval()
         x = torch.tensor(window, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
         with torch.no_grad():
-            embedding = encoder(x).squeeze(0)
+            # ProtoNet has .embed() for single-input; bare CNN1DEncoder uses __call__
+            if hasattr(encoder, 'embed'):
+                embedding = encoder.embed(x.squeeze(1)).squeeze(0)
+            else:
+                embedding = encoder(x).squeeze(0)
             prototypes = self.compute_prototypes(encoder, device)
             if not prototypes:
                 return "unknown", 0.0, {}
