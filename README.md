@@ -75,6 +75,27 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 
 ---
 
+## 🖥️ Live Telemetry Dashboard
+
+The system features a real-time responsive dashboard providing insights into current device classifications, power usage, safety alerts, virtual/physical twin state, vampire loads, and pipeline latency metrics.
+
+<details>
+<summary>📸 Click to expand system dashboard screenshots</summary>
+
+### System Dashboard (Top Half)
+*Real-time power monitoring chart, live device status cards, and the safety event feed.*
+
+![EMS Dashboard Top](docs/screenshots/dashboard_top.png)
+
+### System Dashboard (Bottom Half)
+*Digital twin metrics (PMV thermal comfort index), RL optimization log, phantom load visualization, and system latency metrics.*
+
+![EMS Dashboard Bottom](docs/screenshots/dashboard_bottom.png)
+
+</details>
+
+---
+
 ## 📊 Implementation Status
 
 ### Phase 1 — Simulation ✅
