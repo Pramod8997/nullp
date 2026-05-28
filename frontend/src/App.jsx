@@ -22,10 +22,13 @@ function App() {
   const [pipelineStatus, setPipelineStatus]     = useState('initializing');
   const [pendingUnknowns, setPendingUnknowns]   = useState([]);  // LABEL_REQUEST events
   const [latencyStats, setLatencyStats]           = useState({ avg_ms: 0, max_ms: 0, p95_ms: 0 });
+  const [latencyHistory, setLatencyHistory]       = useState([]);
+  const [isArcFaultActive, setIsArcFaultActive]   = useState(false);
 
   const wsRef = useRef(null);
   const reconnectDelay = useRef(1000);
   const reconnectTimer = useRef(null);
+  const arcFaultTimer = useRef(null);
 
   // ── WebSocket with auto-reconnect ──
   const connect = useCallback(() => {
@@ -73,9 +76,17 @@ function App() {
     connect();
     return () => {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (arcFaultTimer.current) clearTimeout(arcFaultTimer.current);
       if (wsRef.current) wsRef.current.close();
     };
   }, [connect]);
+
+  // ── Arc-Fault trigger helper ──
+  const triggerArcFault = useCallback(() => {
+    setIsArcFaultActive(true);
+    if (arcFaultTimer.current) clearTimeout(arcFaultTimer.current);
+    arcFaultTimer.current = setTimeout(() => setIsArcFaultActive(false), 4000);
+  }, []);
 
   // ── Message Router ──
   const handleMessage = useCallback((data) => {
@@ -137,6 +148,10 @@ function App() {
           },
           ...prev,
         ].slice(0, 50));
+        // Trigger arc-fault overlay for critical safety events
+        if (data.message && (data.message.includes('ARC') || data.message.includes('RoC') || data.message.includes('OVERCURRENT'))) {
+          triggerArcFault();
+        }
         break;
 
       case 'SOFT_ANOMALY':
@@ -186,6 +201,10 @@ function App() {
           },
           ...prev,
         ].slice(0, 50));
+        // Trigger arc-fault overlay for Rate-of-Change warnings
+        if (data.message && (data.message.includes('ARC') || data.message.includes('RoC'))) {
+          triggerArcFault();
+        }
         break;
 
       case 'PHANTOM_LOAD':
@@ -210,15 +229,35 @@ function App() {
           max_ms: data.max_ms || 0,
           p95_ms: data.p95_ms || 0,
         });
+        // Append to rolling latency history (last 20 data points = ~10 min at 30s intervals)
+        setLatencyHistory(prev => {
+          const next = [...prev, {
+            time: new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            avg: data.avg_ms || 0,
+            p95: data.p95_ms || 0,
+            max: data.max_ms || 0,
+          }];
+          return next.length > 20 ? next.slice(-20) : next;
+        });
         break;
 
       default:
         break;
     }
-  }, []);
+  }, [triggerArcFault]);
 
   return (
-    <div className="dashboard">
+    <div className={`dashboard ${isArcFaultActive ? 'arc-fault-active' : ''}`}>
+      {/* ── Arc-Fault Emergency Overlay ── */}
+      {isArcFaultActive && (
+        <div className="arc-fault-overlay" id="arc-fault-overlay">
+          <div className="arc-fault-overlay__inner">
+            <span className="arc-fault-overlay__icon">⚡</span>
+            <span className="arc-fault-overlay__text">ARC FAULT DETECTED — RELAY CUTOFF ACTIVE</span>
+          </div>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <header className="dashboard-header">
         <div className="dashboard-header__title">
@@ -273,6 +312,7 @@ function App() {
             analytics={analytics}
             deviceCount={Object.keys(devices).length}
             latencyStats={latencyStats}
+            latencyHistory={latencyHistory}
           />
         </div>
       </div>

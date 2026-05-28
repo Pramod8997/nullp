@@ -34,9 +34,11 @@ class Calibrator:
 
     def _on_message(self, client, userdata, msg):
         try:
-            payload = json.loads(msg.payload.decode())
-            self.reading = payload.get("rms_power")
-        except Exception:
+            raw = msg.payload.decode().strip()
+            # Production firmware publishes plain float string (e.g. "150.25")
+            self.reading = float(raw)
+        except (ValueError, UnicodeDecodeError) as e:
+            print(f"⚠️  Could not parse power reading: {e}")
             pass
 
     def request_calibration(self):

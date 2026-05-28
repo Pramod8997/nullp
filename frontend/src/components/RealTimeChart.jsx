@@ -2,11 +2,22 @@ import React, { useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 const DEVICE_COLORS = {
-  esp32_fridge:  '#3b82f6',
-  esp32_hvac:    '#8b5cf6',
-  esp32_kettle:  '#f59e0b',
-  esp32_tv:      '#06b6d4',
-  default:       '#ec4899',
+  // Physical nodes
+  node_fridge:       '#06d6a0',  // Emerald
+  node_microwave:    '#ef476f',  // Rose
+  node_kettle:       '#ffd166',  // Gold
+  node_hvac:         '#118ab2',  // Teal
+  // Simulated devices
+  esp32_fridge:      '#3b82f6',  // Blue
+  esp32_hvac:        '#8b5cf6',  // Violet
+  esp32_kettle:      '#f59e0b',  // Amber
+  esp32_tv:          '#06b6d4',  // Cyan
+  esp32_washer:      '#a78bfa',  // Lavender
+  esp32_dryer:       '#f472b6',  // Pink
+  esp32_dishwasher:  '#34d399',  // Mint
+  esp32_oven:        '#fb923c',  // Orange
+  esp32_lighting:    '#facc15',  // Yellow
+  default:           '#94a3b8',  // Slate
 };
 
 const CustomTooltip = ({ active, payload, label }) => {

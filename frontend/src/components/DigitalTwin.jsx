@@ -43,10 +43,10 @@ const LabelRequestCard = ({ event, onLabeled }) => {
         return;
       }
 
-      const res = await fetch(`${API_BASE}/api/label_device`, {
+      const res = await fetch(`${API_BASE}/api/submit-label`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ class_name: trimmed, segments }),
+        body: JSON.stringify({ device_id: event.device_id, label: trimmed, segments }),
       });
 
       if (!res.ok) {

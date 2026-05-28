@@ -3,12 +3,16 @@ import asyncio
 import logging
 import time
 import os
+import io
+import csv
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
 
 import numpy as np
+import aiosqlite
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import aiomqtt
 
@@ -343,6 +347,50 @@ async def submit_label(submission: LabelSubmission):
 # Bug 3.4 fix: Removed /api/unknown_devices and pending_unknowns_store.
 # The never-populated pending_unknowns_store was always returning empty arrays.
 # Use /api/pending-labels exclusively for unknown device management.
+
+
+@app.get("/api/export-csv")
+async def export_csv():
+    """Stream the last 24 hours of power measurements as a downloadable CSV."""
+    db_path = os.path.join(os.getcwd(), "data", "ems_state.db")
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail="Database file not found")
+
+    cutoff = time.time() - 86400  # 24 hours ago
+
+    async def _generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["timestamp", "datetime", "device_id", "power_watts"])
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+
+        try:
+            async with aiosqlite.connect(db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
+                    "SELECT timestamp, device_id, power FROM measurements "
+                    "WHERE timestamp >= ? ORDER BY timestamp ASC",
+                    (cutoff,),
+                ) as cursor:
+                    async for row in cursor:
+                        ts = row["timestamp"]
+                        dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+                        writer.writerow([f"{ts:.3f}", dt_str, row["device_id"], f"{row['power']:.2f}"])
+                        yield buf.getvalue()
+                        buf.seek(0)
+                        buf.truncate(0)
+        except Exception as e:
+            logger.error(f"CSV export error: {e}")
+            writer.writerow(["ERROR", str(e), "", ""])
+            yield buf.getvalue()
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=ems_24h_export.csv"},
+    )
 
 
 # ─── WebSocket Endpoint ─────────────────────────────────────────────

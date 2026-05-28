@@ -2,7 +2,7 @@ import React from 'react';
 import { Cpu, Power, PowerOff } from 'lucide-react';
 
 const formatDeviceName = (id) => {
-  return id.replace('esp32_', '').replace(/_/g, ' ').toUpperCase();
+  return id.replace('esp32_', '').replace('node_', '').replace(/_/g, ' ').toUpperCase();
 };
 
 const DeviceCards = ({ devices }) => {
