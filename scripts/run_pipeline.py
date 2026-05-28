@@ -310,27 +310,57 @@ class EMSOrchestrator:
 
     # ─── Safety Relay Callback ─────────────────────────────────────────
     async def _relay_callback(self, device_id: str, action: str) -> None:
-        """Callback for safety monitor to trigger relay actions."""
-        if action == "OFF":
-            logger.warning(f"⚡ Safety Cutoff: Forcing {device_id} OFF.")
-            try:
-                await self.mqtt.publish_command(f"home/plug/{device_id}/command", "OFF")
-            except Exception as e:
-                logger.critical(f"CUTOFF PUBLISH FAILED for {device_id}: {e}")
-                self.failure_matrix.trigger_failure("mqtt_disconnect", device_id)
+        """
+        Callback for the fleet diagnostics monitor (formerly SafetyMonitor).
 
+        Production architecture: Physical relay cutoffs are handled at the edge
+        (ESP32 Core 0). This callback dispatches structured alerts to the
+        dashboard UI pipeline — it does NOT issue MQTT relay commands.
+        """
+        if action == "ALERT_CRITICAL":
+            logger.warning(
+                f"⚡ CRITICAL ALERT: {device_id} exceeds threshold — "
+                f"edge node handles physical cutoff"
+            )
             await self._broadcast_event({
                 "type": "SAFETY_CUTOFF",
                 "device_id": device_id,
                 "severity": "critical",
-                "message": f"Safety threshold breached — {device_id} relay forced OFF",
+                "message": (f"Critical power threshold breached on {device_id} — "
+                            f"edge relay has been activated"),
             })
-        elif action == "WARNING":
+        elif action == "ALERT_ARC_FAULT":
+            logger.critical(
+                f"⚡ ARC FAULT ALERT: {device_id} — "
+                f"edge node handles physical cutoff"
+            )
+            await self._broadcast_event({
+                "type": "SAFETY_CUTOFF",
+                "device_id": device_id,
+                "severity": "critical",
+                "message": (f"Arc-fault proxy detected on {device_id} — "
+                            f"edge relay has been activated"),
+            })
+        elif action in ("WARNING", "ALERT_WARNING"):
             await self._broadcast_event({
                 "type": "SAFETY_WARNING",
                 "device_id": device_id,
                 "severity": "warning",
                 "message": f"Power draw approaching limit on {device_id}",
+            })
+        elif action == "OFF":
+            # Legacy fallback — should not be called in production
+            logger.warning(f"⚡ Legacy OFF command for {device_id} — forwarding to MQTT")
+            try:
+                await self.mqtt.publish_command(f"home/plug/{device_id}/command", "OFF")
+            except Exception as e:
+                logger.critical(f"CUTOFF PUBLISH FAILED for {device_id}: {e}")
+                self.failure_matrix.trigger_failure("mqtt_disconnect", device_id)
+            await self._broadcast_event({
+                "type": "SAFETY_CUTOFF",
+                "device_id": device_id,
+                "severity": "critical",
+                "message": f"Safety threshold breached — {device_id} relay forced OFF",
             })
 
     # ─── ProtoNet Classification (with OpenMax + confidence) ──────────
@@ -561,6 +591,19 @@ class EMSOrchestrator:
                             "embedding": cluster_mean.tolist() if cluster_mean is not None else [],
                             "message": f"Stable unknown signature on {device_id}. Please label this device.",
                         })
+
+                        # ── Task 5: Background pseudo-labeling ──
+                        # Silently persist the stable cluster to the database.
+                        # Uses quantized spatial hashing to dedup — identical appliances
+                        # with sensor drift will match the same cluster_hash row.
+                        # Does NOT block the pipeline waiting for user response.
+                        if cluster_mean is not None and self.db:
+                            try:
+                                await self.db.save_unmapped_cluster_signature(
+                                    device_id, cluster_mean, time.time()
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to persist unmapped cluster: {e}")
 
                         # ═══ §2.2 FIX: Forward stable unknown to Digital Twin + RL ═══
                         # Assign temporary pseudo-class so RL sees the load

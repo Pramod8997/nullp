@@ -10,27 +10,39 @@ from src.models.thermodynamics import pmv_model
 
 logger = logging.getLogger(__name__)
 
+# ── Production Constants ──
+DEVICE_LOCKOUT_SECONDS = 300.0  # 5-minute per-device anti-thrashing window
+
+# Safety-critical appliance identifiers that must never be shed,
+# regardless of config. Both esp32_ and node_ prefixes are covered.
+_HARDCODED_SAFETY_CRITICAL = [
+    "esp32_fridge", "node_fridge",
+    "esp32_freezer", "node_freezer",
+    "esp32_pc", "node_pc",
+]
+
+
 class TabularQLearningAgent:
     def __init__(self, config_path: str = "config/config.yaml"):
         with open(config_path, "r") as f:
             self.config = yaml.safe_load(f)
-            
+
         rl_cfg = self.config.get("rl", {})
         self.cooldown = rl_cfg.get("cooldown_seconds", 15.0)
         self.pmv_min = rl_cfg.get("empathy_pmv_min", -0.5)
         self.pmv_max = rl_cfg.get("empathy_pmv_max", 0.5)
         self.q_table_path = rl_cfg.get("q_table_path", "backend/models/weights/q_table.pkl")
-        
+
         self.tou_pricing = self.config.get("analytics", {}).get("tou_pricing", {})
-        
+
         protonet_cfg = self.config.get("protonet", {})
         self.confidence_threshold = protonet_cfg.get("confidence_threshold", 0.90)
-        
+
         safety_cfg = self.config.get("system_safety", {})
         self.max_watts = safety_cfg.get("max_aggregate_wattage", 3500.0)
         self.critical_pct = safety_cfg.get("critical_pct", 1.25)
         self.device_limits = safety_cfg.get("device_wattage_limits", {})
-        
+
         self.alpha = 0.1
         self.gamma = 0.99
 
@@ -39,23 +51,37 @@ class TabularQLearningAgent:
         self.epsilon_end = rl_cfg.get("epsilon_end", 0.01)
         self.epsilon_decay = rl_cfg.get("epsilon_decay", 0.999)
         self.epsilon = self.epsilon_start
-        
+
         self.MAX_RL_DEVICES = 10
 
-        # Load NEVER_SHED from config: any device with tier0: true is unshedable
+        # ── Appliance Blacklist (NEVER_SHED) ──
+        # Load from config: any device with tier0: true is unshedable
         devices_cfg = self.config.get("devices", {})
         self.NEVER_SHED = [
             name for name, cfg in devices_cfg.items()
             if isinstance(cfg, dict) and cfg.get("tier0", False)
         ]
-        # Always protect fridge as a fallback even if config doesn't set tier0
+        # Merge hardcoded safety-critical fallbacks (deduped)
+        for device in _HARDCODED_SAFETY_CRITICAL:
+            if device not in self.NEVER_SHED:
+                self.NEVER_SHED.append(device)
+        # Legacy fallback: always protect fridge
         if not any("fridge" in d for d in self.NEVER_SHED):
             self.NEVER_SHED.append("esp32_fridge")
-        
+
         # Q-table: state_hash -> {action_hash -> q_value}
         self.q_table = defaultdict(lambda: defaultdict(float))
+
+        # ── NTP-Resilient Per-Device Anti-Thrashing Lockout ──
+        # Uses time.monotonic() to be immune to NTP clock adjustments.
+        # Tracks per-device last-action timestamps independently.
+        self._device_lockout: Dict[str, float] = {}
+        self.lockout_duration = DEVICE_LOCKOUT_SECONDS
+
+        # Legacy global cooldown retained for backward compat with tests
+        # that set agent.last_action_time = 0
         self.last_action_time = 0.0
-        
+
         self.twin = pmv_model
 
         if os.path.exists(self.q_table_path):
@@ -123,6 +149,35 @@ class TabularQLearningAgent:
                 f"::tod:{state_dict.get('tod', 2)}"
                 f"::dev:{classified_device}")
 
+    def _is_device_locked(self, device_id: str) -> bool:
+        """
+        Check if a device is within its per-device anti-thrashing lockout window.
+        Uses time.monotonic() for NTP-resilient clock comparisons.
+        """
+        if device_id not in self._device_lockout:
+            return False
+        elapsed = time.monotonic() - self._device_lockout[device_id]
+        return elapsed < self.lockout_duration
+
+    def _record_device_action(self, device_id: str) -> None:
+        """Record a device action timestamp using monotonic clock."""
+        self._device_lockout[device_id] = time.monotonic()
+
+    def clear_device_lockout(self, device_id: str) -> None:
+        """
+        Clear a specific device's lockout (e.g., after receiving relay ACK).
+        Called by the orchestrator when a relay ACK is received.
+        """
+        self._device_lockout.pop(device_id, None)
+
+    def _is_blacklisted(self, device_id: str) -> bool:
+        """
+        Check if a device is in the safety-critical blacklist.
+        Matches against NEVER_SHED list using substring matching
+        to handle both esp32_ and node_ prefix variants.
+        """
+        return device_id in self.NEVER_SHED
+
     def act(self, state_dict: Dict[str, Any], pmv: float, confidence: float,
             classified_device: str, min_confidence: float = None) -> str:
         """Act based on current state. Returns action string."""
@@ -130,7 +185,7 @@ class TabularQLearningAgent:
         threshold = min_confidence if min_confidence is not None else self.confidence_threshold
         if confidence < threshold:
             return "DEFER"  # no_op when uncertain
-            
+
         # Gate 2: PMV empathy gate (Category A bounds: -0.5 to 0.5)
         # Bug 2.3 fix: Only apply empathy gate when the ticking device is HVAC,
         # otherwise a TV or Kettle tick would spam HVAC commands every second
@@ -140,16 +195,20 @@ class TabularQLearningAgent:
                     return "SCHEDULE_HVAC"  # force heating
                 else:
                     return "SHED_HVAC"      # force cooling
-                
-        # Gate 3: check cooldown
+
+        # Gate 3: Global cooldown (legacy compat — tests set last_action_time=0)
         if time.time() - self.last_action_time < self.cooldown:
             return "DEFER"
 
+        # Gate 4: Per-device anti-thrashing lockout (NTP-resilient)
+        if self._is_device_locked(classified_device):
+            return "DEFER"
+
         state_key = self._discretize(state_dict, classified_device)
-        
+
         # Valid actions for this device
         valid_actions = ["DEFER"]
-        if classified_device not in self.NEVER_SHED:
+        if not self._is_blacklisted(classified_device):
             valid_actions.append("SHED")
             valid_actions.append("SCHEDULE")
 
@@ -167,13 +226,25 @@ class TabularQLearningAgent:
                     best_action = a
             action = best_action
 
-        # Update last action time if we took a real action
+        # ── Blacklist Interceptor ──
+        # If the agent selected SHED for a blacklisted device (shouldn't happen
+        # since SHED is excluded from valid_actions, but defense-in-depth),
+        # convert to a passive scheduling recommendation for the dashboard.
+        if action == "SHED" and self._is_blacklisted(classified_device):
+            logger.info(
+                f"[RL INTERCEPTOR] Blocked SHED for blacklisted device "
+                f"'{classified_device}' → RECOMMEND_SCHEDULE"
+            )
+            return "RECOMMEND_SCHEDULE"
+
+        # Update timestamps if we took a real action
         if action != "DEFER":
             self.last_action_time = time.time()
-            
+            self._record_device_action(classified_device)
+
         return action
 
-    def compute_reward(self, prev_state: Dict[str, Any], action: str, next_state: Dict[str, Any], 
+    def compute_reward(self, prev_state: Dict[str, Any], action: str, next_state: Dict[str, Any],
                        pmv: float, current_watts: float, tou_rate: float, confidence: float,
                        aggregate_watts: float = 0.0) -> float:
         # Bug 1.2 fix: Use projected wattage based on action taken.
@@ -189,16 +260,16 @@ class TabularQLearningAgent:
                next_state_dict: Dict[str, Any], classified_device: str = "") -> None:
         state_key = self._discretize(state_dict, classified_device)
         next_state_key = self._discretize(next_state_dict, classified_device)
-        
+
         best_next_q = max(self.q_table[next_state_key].values()) if self.q_table[next_state_key] else 0.0
-        
+
         td_target = reward + self.gamma * best_next_q
         td_error = td_target - self.q_table[state_key][action]
         self.q_table[state_key][action] += self.alpha * td_error
 
         # Epsilon decay after each update
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
-        
+
         # Log to CSV (synchronous — caller should use log_action_async from async context)
         self._log_action_sync(state_key, action, reward, next_state_key)
 

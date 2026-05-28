@@ -1,9 +1,11 @@
 import aiosqlite
 import asyncio
 import csv
+import hashlib
 import logging
 import os
-from typing import Optional, List, Tuple
+import numpy as np
+from typing import Optional, List, Tuple, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,25 @@ class DatabaseSession:
         )
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ts_dev ON measurements(timestamp, device_id)"
+        )
+        # Task 5: Unmapped cluster signatures for background pseudo-labeling.
+        # Quantized spatial hashing prevents duplicate rows from sensor drift.
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS unmapped_clusters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_hash TEXT UNIQUE,
+                mean_embedding BLOB,
+                hit_count INTEGER DEFAULT 1,
+                first_seen REAL,
+                last_seen REAL,
+                device_id TEXT,
+                labeled INTEGER DEFAULT 0
+            )
+            """
+        )
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cluster_hash ON unmapped_clusters(cluster_hash)"
         )
         await self._conn.commit()
         self._running = True
@@ -175,6 +196,122 @@ class DatabaseSession:
             logger.info(f"📥 Replayed {count} CSV fallback records into database (archived to {archived})")
         except Exception as e:
             logger.error(f"CSV fallback replay failed: {e}")
+
+    @staticmethod
+    def _quantized_cluster_hash(mean_embedding: np.ndarray,
+                                decimals: int = 3) -> str:
+        """
+        Generate a deterministic hash from a mean embedding vector,
+        quantized to `decimals` decimal places to prevent sensor drift
+        and line noise from creating duplicate database rows.
+        """
+        quantized = np.round(mean_embedding, decimals).astype(np.float32)
+        return hashlib.sha256(quantized.tobytes()).hexdigest()[:16]
+
+    async def save_unmapped_cluster_signature(
+        self, device_id: str, mean_embedding: np.ndarray,
+        timestamp: float
+    ) -> None:
+        """
+        Persist a stable unknown cluster signature for background pseudo-labeling.
+        Uses quantized spatial hashing to dedup — identical appliances with minor
+        sensor drift will match the same cluster_hash row.
+
+        Upserts: if the cluster_hash already exists, increments hit_count and
+        updates last_seen. Otherwise inserts a new row.
+        """
+        if not self._conn:
+            logger.warning("DB not connected — cannot save unmapped cluster")
+            return
+
+        cluster_hash = self._quantized_cluster_hash(mean_embedding)
+        embedding_blob = mean_embedding.astype(np.float32).tobytes()
+
+        try:
+            cursor = await self._conn.execute(
+                "SELECT id, hit_count FROM unmapped_clusters WHERE cluster_hash = ?",
+                (cluster_hash,)
+            )
+            row = await cursor.fetchone()
+
+            if row:
+                # Existing cluster — increment hit_count, update last_seen
+                await self._conn.execute(
+                    """
+                    UPDATE unmapped_clusters
+                    SET hit_count = hit_count + 1,
+                        last_seen = ?,
+                        device_id = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, device_id, row[0])
+                )
+                logger.debug(
+                    f"Cluster {cluster_hash[:8]}… hit_count → {row[1] + 1} "
+                    f"for {device_id}"
+                )
+            else:
+                # New cluster — insert
+                await self._conn.execute(
+                    """
+                    INSERT INTO unmapped_clusters
+                        (cluster_hash, mean_embedding, hit_count,
+                         first_seen, last_seen, device_id, labeled)
+                    VALUES (?, ?, 1, ?, ?, ?, 0)
+                    """,
+                    (cluster_hash, embedding_blob, timestamp,
+                     timestamp, device_id)
+                )
+                logger.info(
+                    f"New unmapped cluster {cluster_hash[:8]}… "
+                    f"for {device_id}"
+                )
+
+            await self._conn.commit()
+
+        except Exception as e:
+            logger.error(f"Failed to save unmapped cluster: {e}")
+
+    async def get_pending_clusters(
+        self, min_hits: int = 5
+    ) -> List[Dict[str, any]]:
+        """
+        Retrieve unmapped clusters with >= min_hits occurrences that have
+        not yet been labeled. Used for weekly dashboard roll-up prompts.
+
+        Returns:
+            List of dicts with keys: id, cluster_hash, hit_count,
+            first_seen, last_seen, device_id.
+        """
+        if not self._conn:
+            return []
+
+        try:
+            cursor = await self._conn.execute(
+                """
+                SELECT id, cluster_hash, hit_count, first_seen,
+                       last_seen, device_id
+                FROM unmapped_clusters
+                WHERE hit_count >= ? AND labeled = 0
+                ORDER BY hit_count DESC
+                """,
+                (min_hits,)
+            )
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "cluster_hash": r[1],
+                    "hit_count": r[2],
+                    "first_seen": r[3],
+                    "last_seen": r[4],
+                    "device_id": r[5],
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            logger.error(f"Failed to query pending clusters: {e}")
+            return []
 
     async def close(self) -> None:
         self._running = False

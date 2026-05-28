@@ -1,22 +1,40 @@
 /**
- * Module 7: Phase 2 ESP32 C++ Firmware (FIXED)
- * 
- * Hardware integration layer for the Smart Home EMS.
- * - Publishes real-time RMS power readings at 1Hz to MQTT
- * - Subscribes to relay commands from the RL agent
- * - Hardware-level Tier-0 safety cutoff (independent of MQTT/server)
- * - Non-blocking cooldown after overcurrent events
- * - Server heartbeat watchdog
- * 
- * MQTT Topics (must match pipeline's config.yaml):
- *   Publish:   home/sensor/{DEVICE_ID}/power  (plain float string)
- *   Subscribe: home/plug/{DEVICE_ID}/command   (ON/OFF/WARNING)
+ * Module 7: Production ESP32 Firmware — Dual-Core FreeRTOS
+ *
+ * Edge-hybrid safety architecture for the Smart Home EMS.
+ *
+ * CORE 0 (High Priority — SafetySamplingTask):
+ *   - Continuous ADC sampling at ~500µs intervals
+ *   - True RMS computed on 20ms AC wave-cycle boundaries (50Hz India grid)
+ *   - 100ms windows (5 full cycles) for published power value
+ *   - Edge-local arc-fault proxy (dP/dt > 800 W/cycle)
+ *   - Dynamic inrush suppression via 5-sample sliding baseline
+ *   - Immediate relay cutoff — zero network dependency
+ *
+ * CORE 1 (Standard Priority — Arduino loop):
+ *   - Non-blocking MQTT client.loop()
+ *   - 1Hz telemetry broadcast (plain float)
+ *   - Incoming relay command handler (ON/OFF/WARNING)
+ *   - Best-effort EDGE_ARC_FAULT alert publishing
+ *
+ * Shared Memory:
+ *   portMUX_TYPE spinlock protects volatile float sharedPowerWatts.
+ *   32-bit aligned float on Xtensa is atomic — spinlock avoids
+ *   scheduler overhead and priority inversion of heavy semaphores.
+ *
+ * MQTT Topics (must match pipeline config.yaml):
+ *   Publish:   home/sensor/{DEVICE_ID}/power   (plain float string)
+ *   Subscribe: home/plug/{DEVICE_ID}/command    (ON/OFF/WARNING)
+ *   Publish:   home/sensor/{DEVICE_ID}/status   (alerts)
+ *   Publish:   home/plug/{DEVICE_ID}/ack        (relay confirmations)
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <math.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // ═══════════════════════════════════════════════════════
 //  CONFIGURATION — CHANGE THESE PER NODE
@@ -40,47 +58,164 @@ const float ADC_VREF   = 3.3;      // ESP32 ADC reference voltage
 const int   ADC_MAX    = 4095;     // 12-bit ADC
 const float CRITICAL_PCT = 1.25;   // 125% of rated → hardware cutoff
 
+// ── Edge Arc-Fault Detection Constants ──
+const float EDGE_ROC_THRESHOLD = 800.0;  // W/cycle — rapid dP/dt trip
+const int   BASELINE_WINDOW    = 5;      // Sliding baseline sample count
+const float BASELINE_INRUSH_CEIL = 50.0; // Baseline avg must be below this for inrush suppression
+const float INRUSH_HEADROOM    = 100.0;  // Extra W above baseline avg to tolerate during inrush
+
+// ── Anti-Thrashing Constants ──
+const unsigned long SAFETY_LOCKOUT_MS = 300000;  // 5-minute relay lockout after safety trip
+
 // ═══════════════════════════════════════════════════════
-//  STATE VARIABLES
+//  SHARED STATE (Core 0 ↔ Core 1)
+//  portMUX spinlock: lightweight, no scheduler overhead.
+//  volatile ensures compiler doesn't optimize away reads.
+// ═══════════════════════════════════════════════════════
+portMUX_TYPE sharedMux = portMUX_INITIALIZER_UNLOCKED;
+
+volatile float sharedPowerWatts  = 0.0;
+volatile bool  sharedArcFault    = false;   // Flag from Core 0 → Core 1 for alert publishing
+volatile float sharedArcFaultRoC = 0.0;     // The dP/dt value that triggered the trip
+
+// ═══════════════════════════════════════════════════════
+//  CORE 1 STATE (Arduino loop — not shared)
 // ═══════════════════════════════════════════════════════
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-bool relayLocked         = false;
-unsigned long lockStartMs = 0;
-unsigned long lastMsgMs   = 0;
-unsigned long lastServerHB = 0;    // Last message from server
+bool relayLocked           = false;
+unsigned long lockStartMs  = 0;
+unsigned long lastMsgMs    = 0;
+unsigned long lastServerHB = 0;
 
-// Build MQTT topic strings at compile time
 char topicPower[64];
 char topicCommand[64];
 char topicStatus[64];
 
 // ═══════════════════════════════════════════════════════
-//  RMS CURRENT MEASUREMENT (WS-1.3)
-//  Samples ADC over ~100ms (5 full cycles at 50Hz)
-//  to get true RMS, not instantaneous peak.
+//  CORE 0: HIGH-PRIORITY SAFETY SAMPLING TASK
+//
+//  Runs pinned to Core 0 at priority 2.
+//  Continuously samples ADC, computes true RMS on 20ms
+//  AC wave-cycle boundaries (50Hz), and evaluates
+//  edge-local arc-fault proxy with dynamic inrush
+//  suppression via a sliding baseline average.
 // ═══════════════════════════════════════════════════════
-float readRMSCurrent() {
-    float sumSq = 0.0;
-    const int SAMPLES = 200;  // ~100ms at 500µs per sample
+void SafetySamplingTask(void* pvParameters) {
+    // ── Per-cycle accumulation state ──
+    float sumSqCycle     = 0.0;
+    int   samplesCycle   = 0;
+    unsigned long cycleStartUs = micros();
 
-    for (int i = 0; i < SAMPLES; i++) {
+    // ── Multi-cycle RMS accumulation (5 cycles = 100ms) ──
+    float sumSqWindow    = 0.0;
+    int   samplesWindow  = 0;
+    int   completedCycles = 0;
+    const int CYCLES_PER_WINDOW = 5;  // 5 × 20ms = 100ms
+
+    // ── Arc-fault state ──
+    float lastWatts = 0.0;
+    float baselineRing[BASELINE_WINDOW];
+    int   baselineIdx   = 0;
+    int   baselineFill  = 0;
+    for (int i = 0; i < BASELINE_WINDOW; i++) baselineRing[i] = 0.0;
+
+    for (;;) {
+        // ── Sample ADC ──
         int raw = analogRead(SENSOR_PIN);
-        // Center around midpoint (DC bias at VCC/2 = 1.65V → ADC 2048)
         float centered = (float)(raw - 2048);
-        // Convert ADC value to voltage, then to current via burden/CT ratio
-        float voltage = (centered / (float)ADC_MAX) * ADC_VREF;
-        float current = (voltage / BURDEN_R) * CT_RATIO;
-        sumSq += current * current;
+        float voltSensor = (centered / (float)ADC_MAX) * ADC_VREF;
+        float current = (voltSensor / BURDEN_R) * CT_RATIO;
+        sumSqCycle += current * current;
+        samplesCycle++;
+
+        // ── Check for 20ms AC wave-cycle boundary (50Hz) ──
+        unsigned long nowUs = micros();
+        unsigned long elapsedUs = nowUs - cycleStartUs;
+
+        if (elapsedUs >= 20000) {  // 20ms = one full 50Hz cycle
+            // Accumulate this cycle into the multi-cycle window
+            sumSqWindow  += sumSqCycle;
+            samplesWindow += samplesCycle;
+            completedCycles++;
+
+            // Reset per-cycle accumulators
+            sumSqCycle   = 0.0;
+            samplesCycle = 0;
+            cycleStartUs = nowUs;
+
+            // ── After 5 complete cycles (100ms), compute final RMS ──
+            if (completedCycles >= CYCLES_PER_WINDOW) {
+                float rmsAmps = sqrt(sumSqWindow / (float)samplesWindow);
+                float powerWatts = rmsAmps * VOLTAGE * POWER_FACTOR;
+
+                // ── Update sliding baseline ──
+                baselineRing[baselineIdx] = powerWatts;
+                baselineIdx = (baselineIdx + 1) % BASELINE_WINDOW;
+                if (baselineFill < BASELINE_WINDOW) baselineFill++;
+
+                float baselineAvg = 0.0;
+                for (int i = 0; i < baselineFill; i++) baselineAvg += baselineRing[i];
+                baselineAvg /= (float)baselineFill;
+
+                // ── Edge Arc-Fault Proxy Detection (dP/dt) ──
+                float rateOfChange = fabs(powerWatts - lastWatts);
+
+                // Dynamic inrush suppression:
+                // Only suppress if the baseline is genuinely low (appliance cold-start)
+                // AND the previous reading was within normal inrush headroom of baseline.
+                // If a 150W cooler is already running, baseline > 50W → inrush check fails
+                // → arc-fault detection remains armed (correct behavior).
+                bool isNormalInrush = (baselineAvg < BASELINE_INRUSH_CEIL)
+                                   && (lastWatts < (baselineAvg + INRUSH_HEADROOM));
+
+                if (rateOfChange > EDGE_ROC_THRESHOLD && !isNormalInrush) {
+                    // ⚡ IMMEDIATE PHYSICAL RELAY CUTOFF — NO NETWORK DEPENDENCY
+                    digitalWrite(RELAY_PIN, LOW);
+
+                    // Signal Core 1 to publish alert (best-effort)
+                    taskENTER_CRITICAL(&sharedMux);
+                    sharedArcFault    = true;
+                    sharedArcFaultRoC = rateOfChange;
+                    taskEXIT_CRITICAL(&sharedMux);
+
+                    Serial.printf("[CORE0] ⚡ EDGE ARC-FAULT! dP/dt=%.0fW/cycle "
+                                  "(threshold: %.0f). Relay CUTOFF.\n",
+                                  rateOfChange, EDGE_ROC_THRESHOLD);
+                }
+
+                // ── Overcurrent Cutoff (% of rated) ──
+                float criticalWatts = RATED_WATTS * CRITICAL_PCT;
+                if (powerWatts > criticalWatts) {
+                    digitalWrite(RELAY_PIN, LOW);
+                    Serial.printf("[CORE0] ⚡ OVERCURRENT! %.1fW > %.1fW. Relay CUTOFF.\n",
+                                  powerWatts, criticalWatts);
+                }
+
+                lastWatts = powerWatts;
+
+                // ── Write shared power under spinlock ──
+                taskENTER_CRITICAL(&sharedMux);
+                sharedPowerWatts = powerWatts;
+                taskEXIT_CRITICAL(&sharedMux);
+
+                // Reset multi-cycle accumulators
+                sumSqWindow     = 0.0;
+                samplesWindow   = 0;
+                completedCycles = 0;
+            }
+        }
+
+        // ~500µs between samples (same as original, but non-blocking via vTaskDelay)
+        // Using 1 tick at configTICK_RATE_HZ=1000 gives ~1ms granularity;
+        // for sub-ms we use delayMicroseconds since this task owns Core 0.
         delayMicroseconds(500);
     }
-
-    return sqrt(sumSq / (float)SAMPLES);
 }
 
 // ═══════════════════════════════════════════════════════
-//  MQTT CALLBACK — Relay Commands from Pipeline
+//  MQTT CALLBACK — Relay Commands from Pipeline (Core 1)
 // ═══════════════════════════════════════════════════════
 void callback(char* topic, byte* payload, unsigned int length) {
     // Any message from server = heartbeat
@@ -109,7 +244,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  WIFI + MQTT SETUP
+//  WIFI + MQTT SETUP (Core 1)
 // ═══════════════════════════════════════════════════════
 void setup() {
     Serial.begin(115200);
@@ -134,10 +269,25 @@ void setup() {
     client.setServer(mqtt_server, 1883);
     client.setCallback(callback);
     client.setKeepAlive(15);
+
+    // ═══ Launch Core 0 Safety Sampling Task ═══
+    // Priority 2 (above default Arduino loop priority 1)
+    // Stack size 4096 bytes, pinned to Core 0
+    xTaskCreatePinnedToCore(
+        SafetySamplingTask,   // Task function
+        "SafetySampling",     // Name
+        4096,                 // Stack size (bytes)
+        NULL,                 // Parameters
+        2,                    // Priority (higher than loop)
+        NULL,                 // Task handle (not needed)
+        0                     // Core 0
+    );
+    Serial.println("[INIT] Core 0: SafetySamplingTask launched (priority 2)");
+    Serial.println("[INIT] Core 1: MQTT + Telemetry (Arduino loop)");
 }
 
 // ═══════════════════════════════════════════════════════
-//  MQTT RECONNECT
+//  MQTT RECONNECT (Core 1)
 // ═══════════════════════════════════════════════════════
 void reconnectMQTT() {
     int retries = 0;
@@ -156,7 +306,7 @@ void reconnectMQTT() {
 }
 
 // ═══════════════════════════════════════════════════════
-//  MAIN LOOP
+//  MAIN LOOP (Core 1 — MQTT + Telemetry)
 // ═══════════════════════════════════════════════════════
 void loop() {
     if (!client.connected()) {
@@ -164,20 +314,48 @@ void loop() {
     }
     client.loop();
 
-    // Read true RMS current
-    float rmsAmps = readRMSCurrent();
-    float powerWatts = rmsAmps * VOLTAGE * POWER_FACTOR;
+    // ── Read shared power under spinlock ──
+    float powerWatts;
+    taskENTER_CRITICAL(&sharedMux);
+    powerWatts = sharedPowerWatts;
+    taskEXIT_CRITICAL(&sharedMux);
 
-    // ── Tier-0 Hardware Safety Cutoff (WS-1.4) ──
-    // Runs BEFORE any MQTT processing. Independent of server.
+    // ── 5-Minute Anti-Thrashing Lockout (upgraded from 5s) ──
+    if (relayLocked && (millis() - lockStartMs > SAFETY_LOCKOUT_MS)) {
+        relayLocked = false;
+        Serial.println("[SAFETY] 5-minute lockout complete. Relay unlocked.");
+    }
+
+    // ── Check for edge arc-fault flag from Core 0 ──
+    bool arcFaultTripped = false;
+    float arcRoC = 0.0;
+    taskENTER_CRITICAL(&sharedMux);
+    if (sharedArcFault) {
+        arcFaultTripped = true;
+        arcRoC = sharedArcFaultRoC;
+        sharedArcFault = false;  // Acknowledge
+    }
+    taskEXIT_CRITICAL(&sharedMux);
+
+    if (arcFaultTripped) {
+        relayLocked = true;
+        lockStartMs = millis();
+        // Best-effort alert publish (safety already acted on Core 0)
+        if (client.connected()) {
+            char alertMsg[80];
+            snprintf(alertMsg, sizeof(alertMsg),
+                     "EDGE_ARC_FAULT:dP/dt=%.0fW/cycle", arcRoC);
+            client.publish(topicStatus, alertMsg);
+        }
+    }
+
+    // ── Overcurrent Alert Publishing ──
     float criticalWatts = RATED_WATTS * CRITICAL_PCT;
     if (powerWatts > criticalWatts && !relayLocked) {
-        digitalWrite(RELAY_PIN, LOW);  // IMMEDIATE physical disconnect
         relayLocked = true;
         lockStartMs = millis();
         Serial.printf("[SAFETY] OVERCURRENT! %.1fW > %.1fW. Relay LOCKED.\n",
                       powerWatts, criticalWatts);
-        // Publish alert (best-effort — safety already acted)
         if (client.connected()) {
             char alertMsg[64];
             snprintf(alertMsg, sizeof(alertMsg), "OVERCURRENT:%.1f", powerWatts);
@@ -185,17 +363,10 @@ void loop() {
         }
     }
 
-    // Non-blocking cooldown (WS-1.4): unlock relay after 5 seconds
-    if (relayLocked && (millis() - lockStartMs > 5000)) {
-        relayLocked = false;
-        Serial.println("[SAFETY] Cooldown complete. Relay unlocked.");
-    }
-
-    // ── Server Heartbeat Watchdog (WS-1.5) ──
-    // If no server contact for 30s, log disconnect (but keep relay state — fail-safe)
+    // ── Server Heartbeat Watchdog ──
     if (millis() - lastServerHB > 30000 && lastServerHB > 0) {
         static unsigned long lastTimeoutLog = 0;
-        if (millis() - lastTimeoutLog > 30000) {  // Log at most once per 30s
+        if (millis() - lastTimeoutLog > 30000) {
             Serial.println("[WATCHDOG] No server heartbeat for 30s");
             if (client.connected()) {
                 client.publish(topicStatus, "SERVER_TIMEOUT");
@@ -204,7 +375,7 @@ void loop() {
         }
     }
 
-    // ── Publish Power at 1Hz (WS-1.2: plain float, not JSON) ──
+    // ── Publish Power at 1Hz (plain float, not JSON) ──
     if (millis() - lastMsgMs > 1000) {
         lastMsgMs = millis();
         char payload[16];

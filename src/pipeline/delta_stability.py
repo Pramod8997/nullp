@@ -7,8 +7,12 @@ whether the unknown is:
   - TRANSIENT: one-off noise spike → log silently (P4.4)
 
 This prevents alert fatigue from transient electrical noise.
+
+Production fix: self._temp_log uses deque(maxlen=1000) to prevent unbounded
+memory growth from continuous line noise in real-world deployments.
 """
 import uuid
+import hashlib
 import numpy as np
 from collections import deque
 from typing import Tuple, Optional
@@ -16,6 +20,7 @@ from typing import Tuple, Optional
 STABILITY_WINDOW = 10    # number of recent unknown signatures to compare
 STABILITY_THRESH = 15.0  # squared Euclidean distance for "same device"
 MIN_STABLE_COUNT = 3     # must appear >= 3 times to be flagged as stable unknown
+TEMP_LOG_CAPACITY = 1000 # max anomaly log entries before eviction
 
 
 class DeltaStabilityAnalyzer:
@@ -51,8 +56,12 @@ class DeltaStabilityAnalyzer:
         self.threshold = threshold
         self.min_count = min_count
 
-        self._buffer   = deque(maxlen=window)   # Signature Buffer D4.1
-        self._temp_log = []                      # Temporary Anomaly Log P4.4
+        self._buffer   = deque(maxlen=window)          # Signature Buffer D4.1
+        self._temp_log = deque(maxlen=TEMP_LOG_CAPACITY)  # Fixed-capacity anomaly log
+
+        # Track stable cluster state for background pseudo-labeling (Task 5)
+        self._last_stable_mean: Optional[np.ndarray] = None
+        self._last_stable_hits: int = 0
 
     def push(self, embedding: np.ndarray,
              timestamp: Optional[float] = None) -> Tuple[str, Optional[np.ndarray]]:
@@ -79,6 +88,8 @@ class DeltaStabilityAnalyzer:
 
         if close_count >= self.min_count:
             cluster_mean = embeddings[dists <= self.threshold].mean(axis=0)
+            self._last_stable_mean = cluster_mean
+            self._last_stable_hits = close_count
             return 'stable', cluster_mean
         else:
             self._temp_log.append({'embedding': embedding, 'ts': timestamp,
@@ -97,9 +108,40 @@ class DeltaStabilityAnalyzer:
             temp_id = f"Unknown_{uuid.uuid4().hex[:6]}"
             return False, temp_id
 
+    def get_stable_cluster(self) -> Tuple[Optional[np.ndarray], int]:
+        """
+        Return the last detected stable cluster mean and hit count.
+        Used by the orchestrator for background pseudo-labeling (Task 5).
+
+        Returns:
+            (cluster_mean_array, hit_count) or (None, 0) if no stable cluster.
+        """
+        return self._last_stable_mean, self._last_stable_hits
+
+    @staticmethod
+    def quantized_cluster_hash(mean_embedding: np.ndarray,
+                               decimals: int = 3) -> str:
+        """
+        Generate a deterministic hash from a mean embedding vector,
+        quantized to `decimals` decimal places to prevent sensor drift
+        and line noise from creating duplicate database rows.
+
+        Args:
+            mean_embedding: (EMBED_DIM,) numpy array.
+            decimals: rounding precision (default 3).
+
+        Returns:
+            Hex digest string suitable for database UNIQUE constraint.
+        """
+        quantized = np.round(mean_embedding, decimals).astype(np.float32)
+        return hashlib.sha256(quantized.tobytes()).hexdigest()[:16]
+
     def recent_log(self, n: int = 10) -> list:
-        return self._temp_log[-n:]
+        """Return last n anomaly log entries as a standard Python list."""
+        return list(self._temp_log)[-n:]
 
     def reset(self):
         self._buffer.clear()
         self._temp_log.clear()
+        self._last_stable_mean = None
+        self._last_stable_hits = 0
