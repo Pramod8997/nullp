@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+notebooks
+training_results
+.pytest_cache
+graphify-out
+docs
+*.md
+!README.md
+safety_events.log
