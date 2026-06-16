@@ -144,3 +144,4 @@ firmware/**/build/
 # ═══════════════════════════════════════════════════════
 .gemini/
 .antigravity/
+graphify-out/
