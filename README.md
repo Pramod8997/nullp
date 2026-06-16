@@ -7,51 +7,67 @@
 ![Mosquitto](https://img.shields.io/badge/mosquitto-2.0%2B-purple)
 ![License](https://img.shields.io/badge/license-Academic-orange)
 
-A production-grade Smart Home Energy Management System integrating **CNN/ProtoNet open-set device classification**, **Reinforcement Learning (Q-Learning)**, **real-time safety monitoring**, and a **premium React dashboard** — all orchestrated over MQTT with support for both **physical ESP32 hardware** and **simulated devices** in hybrid mode.
+A production-grade Smart Home Energy Management System integrating **CNN/ProtoNet open-set device classification**, **Reinforcement Learning (Q-Learning / DQN)**, **edge-local safety monitoring**, and a **premium React dashboard** — all orchestrated over MQTT with support for both **physical ESP32 hardware** and **simulated devices** in hybrid mode.
 
 ---
 
 ## 🏗 System Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│              MQTT Broker (Eclipse Mosquitto :1883)               │
-│              Native/systemd · QoS 1 · Persistence               │
-└──────┬───────────┬──────────────┬──────────────┬────────────────┘
-       │           │              │              │
-  ┌────▼────┐ ┌────▼─────┐  ┌────▼────┐   ┌────▼──────────┐
-  │  ESP32  │ │ Pipeline │  │ FastAPI │   │   React       │
-  │  Nodes  │ │Orchestr. │  │  API    │   │  Dashboard    │
-  │ (4 HW)  │ │          │  │ :8000   │   │  :5173        │
-  └─────────┘ └────┬─────┘  └────┬────┘   └───────────────┘
-  ┌─────────┐      │              │
-  │Simulator│──────┘              │
-  │ (6 SW)  │                     │
-  └─────────┘      ┌──────────────▼──────────────┐
-                   │    Processing Pipeline       │
-                   │                              │
-                   │  1. Safety Layer (‖ cutoff)  │
-                   │  2. RoC Arc-Fault Proxy      │
-                   │  3. Soft Anomaly Watchdog    │
-                   │  4. CNN → ProtoNet (open-set)│
-                   │  5. Phantom Load Tracker     │
-                   │  6. Database Persistence     │
-                   │  7. Analytics Engine (kWh)   │
-                   │  8. Digital Twin PMV (ISO)   │
-                   │  9. RL Agent (SHED/empathy)  │
-                   │ 10. Latency Monitor          │
-                   │ 11. Dashboard Broadcast      │
-                   └──────────────────────────────┘
+                                 ┌──────────────────────────────────┐
+                                 │ MQTT Broker (Mosquitto :1883)    │
+                                 └───────────────┬──────────────────┘
+                                                 │
+      ┌──────────────────────────────────────────┼────────────────────────────────────────┐
+      │                                          │                                        │
+┌─────▼────────────────────────────────────┐     │     ┌──────────────────────────────────▼─────┐
+│             ESP32 Edge Nodes             │     │     │           React Dashboard              │
+├──────────────────────────────────────────┤     │     │           (Vite Port :5173)            │
+│  Core 0 (High Priority Safety):          │     │     └──────────────────▲─────────────────────┘
+│    - True RMS Sampling (~500µs)          │     │                        │
+│    - Edge Arc-Fault Proxy (dP/dt)        │     │                        │ WebSockets
+│    - Immediate Relay Cutoff (0-network)  │     │                        │
+│                                          │     │     ┌──────────────────┴─────────────────────┐
+│  Core 1 (Standard Telemetry):            │     │     │         FastAPI API Port :8000         │
+│    - 1Hz Power Telemetry Publish         │     │     │  - REST Endpoints & WS Broadcasts      │
+│    - Subscriptions & Hardware ACKs       │     │     │  - Token-calibrated label submissions  │
+└──────────────────┬───────────────────────┘     │     └──────────────────▲─────────────────────┘
+                   │                             │                        │
+                   │ home/sensor/{id}/power      │                        │ Event JSONs
+                   └─────────────────────────────┼────────────────────────┘
+                                                 │
+                                       ┌─────────▼─────────┐
+                                       │ Pipeline Orchestr.│
+                                       │ (run_pipeline.py) │
+                                       └─────────┬─────────┘
+                                                 │
+                       ┌─────────────────────────┴────────────────────────┐
+                       │               Processing Pipeline                │
+                       ├──────────────────────────────────────────────────┤
+                       │  1. Fleet Diagnostics Monitor (parallel task)    │
+                       │  2. Watchdog & Temporal Validation               │
+                       │  3. NILM SG-filter + Transient Event Detector    │
+                       │  4. CNN → ProtoNet Embedding & OpenMax Rejected  │
+                       │  5. Temp Scaling Confidence Gate (>= 0.90)       │
+                       │  6. Delta Stability Analyzer (unknown routing)   │
+                       │  7. Phantom Load EMA Tracker                     │
+                       │  8. aiosqlite WAL DB with CSV fallback           │
+                       │  9. Usage Analytics Engine (ToU Pricing)         │
+                       │ 10. ISO 7730 Fanger PMV Thermal Comfort Model    │
+                       │ 11. RL Agent (Q-Learning / DQN with Shadow Gate) │
+                       │ 12. Performance & Latency Monitor (<200ms target)│
+                       └──────────────────────────────────────────────────┘
 ```
 
 ### Pipeline Flow
 
 | Step | Module | Description |
 |------|--------|-------------|
-| 0 | **Safety Monitor** | **Parallel asyncio.Task** — independent MQTT subscription, 110% warning / 125% cutoff |
-| 0b | **RoC Arc-Fault Proxy** | Rate-of-change detection (> 1000 W/s → immediate relay OFF) |
-| 1 | **Watchdog** | Rolling z-score anomaly detection for sensor drift |
-| 2 | **ProtoNet CNN** | 4-layer 1D CNN + Temporal Attention → 128D embedding → prototypical distance |
+| 0 | **Fleet Diagnostics** | **Parallel asyncio.Task** — Fleet-wide anomaly tracking and threshold warning dispatching (edge handles cutoff) |
+| 0b | **Edge Safety / Arc-Fault** | Core-0 high-priority sampling & cutoff on the ESP32 node (dP/dt > 800 W/cycle or overcurrent) |
+| 1 | **Watchdog & Temporal Validation** | Rolling z-score anomaly detection for sensor drift, bridged via `TemporalValidator` to suggest soft-control/RL overrides |
+| 1b | **NILM Preprocessing** | Savitzky-Golay filter + derivative transient event detector (only classifies on valid ±50W transitions) |
+| 2 | **ProtoNet CNN** | 4-layer 1D CNN + Temporal Attention → 128D embedding → prototypical distance comparison |
 | 2b | **OpenMax** | Weibull EVT on tail distances → open-set unknown rejection |
 | 2c | **Temp Scaling** | Learned temperature T for calibrated softmax confidence |
 | 3 | **Confidence Gate** | If confidence < 0.90 → skip RL, emit `LOW_CONFIDENCE` event |
@@ -60,7 +76,7 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 | 6 | **Database** | aiosqlite with WAL mode, batched writes every 10s, CSV fallback on lock-up |
 | 7 | **Analytics** | Per-device kWh accumulation and ToU cost estimation (peak/mid/off-peak) |
 | 8 | **Digital Twin** | Full ISO 7730 Fanger PMV (6-input) thermal comfort model |
-| 9 | **RL Agent** | Tabular Q-Learning with confidence gate + PMV empathy gate + ToU reward shaping |
+| 9 | **RL Agent** | Tabular Q-Learning or deep continuous DQN (with experience replay), protected by confidence, HVAC PMV empathy, per-device lockout, and policy promotion shadow gate |
 | 10 | **Latency Monitor** | `time.perf_counter()` per message; broadcasts avg/max/p95 every 30s |
 | 11 | **Broadcast** | Structured JSON events to dashboard via MQTT → WebSocket bridge |
 
@@ -68,8 +84,7 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 
 | Failure | Mitigation |
 |---------|------------|
-| Server crash | ESP32 relay still operates locally (heartbeat watchdog, 30s timeout) |
-| MQTT disconnect | Local edge execution mode, automatic reconnection with backoff |
+| Server crash / MQTT disconnect | ESP32 node operates safely and independently; Core 0 handles all threshold/arc-fault cutoffs locally without network/broker dependencies. Heartbeat watchdog checks server status. |
 | Database lock | CSV fallback captures writes; replayed on restart |
 | CT clamp drift | Calibration script (`calibrate_ct.py`) corrects CT_RATIO in-situ |
 
@@ -93,64 +108,6 @@ The system features a real-time responsive dashboard providing insights into cur
 ![EMS Dashboard Bottom](docs/screenshots/dashboard_bottom.png)
 
 </details>
-
----
-
-## 📊 Implementation Status
-
-### Phase 1 — Simulation ✅
-| Feature | Status |
-|---------|--------|
-| 5-layer CNN ProtoNet (128D embeddings) | ✅ |
-| Temporal Attention layer | ✅ |
-| Episodic N-way K-shot meta-learning | ✅ |
-| OpenMax + Weibull EVT unknown rejection | ✅ |
-| Temperature Scaling calibration | ✅ |
-| Full ISO 7730 Fanger PMV (6-input) | ✅ |
-| Q-Learning with ToU pricing & confidence gate | ✅ |
-| Policy Promotion Gate (RL twin validation) | ✅ |
-| Safety monitor (parallel asyncio task) | ✅ |
-| Delta stability for unknown device routing | ✅ |
-| 10-device ESP32 simulator (1Hz) | ✅ |
-| React dashboard with Digital Twin label prompts | ✅ |
-| API handling for LABEL_REQUEST / LOW_CONFIDENCE | ✅ |
-| Real UK-DALE dataset training (via Colab HDF5 loader) | ✅ |
-| Real REDD dataset training (via Colab) | ✅ |
-
-### Phase 2 — Production Hardware ✅
-| Feature | Status |
-|---------|--------|
-| Firmware rewrite (true RMS, non-blocking cutoff, heartbeat watchdog) | ✅ |
-| Infrastructure hardening (Mosquitto native/systemd, docker-compose fallback) | ✅ |
-| RL agent fix (state-space 3.9M → 576, epsilon decay, NEVER_SHED) | ✅ |
-| Real data integration (NILMTK replay from HDF5 traces) | ✅ |
-| Hardware ACK protocol (OFF_CONFIRMED relay feedback) | ✅ |
-| Rate-of-Change arc-fault safety proxy (> 1000 W/s) | ✅ |
-| Hybrid mode (4 physical + 6 simulated devices) | ✅ |
-| Pipeline latency instrumentation (avg/max/p95 < 200ms target) | ✅ |
-| CT-clamp calibration script | ✅ |
-| Firmware flash script (esptool.py) | ✅ |
-| 79-test integration suite (100% pass) | ✅ |
-| Dashboard latency panel | ✅ |
-
-### Phase 1 Bug Remediation ✅
-| Fix | Scope |
-|-----|-------|
-| RL reward logic (projected watts on SHED) | `agent.py` |
-| Cross-device policy bleed (device-aware state hash) | `agent.py` |
-| Epsilon burnout (0.999 → 0.999995 decay) | `agent.py`, `config.yaml` |
-| PMV empathy spam (HVAC-only gate) | `agent.py` |
-| RL state blindness (full house state) | `run_pipeline.py` |
-| Shadow mode delusion (accurate next_state) | `run_pipeline.py` |
-| Transient gating data starvation (confidence carry-over) | `run_pipeline.py` |
-| Digital Twin physics reset (all-device wattage) | `run_pipeline.py` |
-| Time dilation (real dt calculation) | `run_pipeline.py` |
-| Analytics clock drift (per-device timestamps) | `run_pipeline.py` |
-| Label submission MQTT bridge (REST → MQTT → pipeline) | `main.py`, `run_pipeline.py` |
-| Dead WebSocket leak (timeout + gather) | `main.py` |
-| DB data loss on shutdown (queue drain) | `session.py` |
-| CSV path crash (directory guard) | `run_pipeline.py`, `session.py` |
-| ProtoNet weight key remapping (legacy → current arch) | `run_pipeline.py` |
 
 ---
 
