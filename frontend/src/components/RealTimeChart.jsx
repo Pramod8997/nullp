@@ -53,9 +53,11 @@ const RealTimeChart = ({ data, devices }) => {
     data.forEach(point => {
       const key = point.time;
       if (!timeMap[key]) timeMap[key] = { time: key };
-      if (point.device_id && point[point.device_id] !== undefined) {
-        timeMap[key][point.device_id] = point[point.device_id];
-      }
+      Object.keys(point).forEach(k => {
+        if (k !== 'time' && k !== 'device_id') {
+          timeMap[key][k] = point[k];
+        }
+      });
     });
     return Object.values(timeMap).slice(-60);
   }, [data]);
