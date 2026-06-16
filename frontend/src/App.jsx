@@ -122,6 +122,28 @@ function App() {
         }));
         break;
 
+      case 'power_batch': {
+        // Batched power readings from WS aggregation (§4.3.3)
+        const readings = data.readings || {};
+        const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        const entry = { time: ts };
+        Object.entries(readings).forEach(([devId, watts]) => {
+          entry[devId] = watts;
+        });
+        setPowerHistory(prev => {
+          const next = [...prev, entry];
+          return next.length > 120 ? next.slice(-120) : next;
+        });
+        setDevices(prev => {
+          const updated = { ...prev };
+          Object.entries(readings).forEach(([devId, watts]) => {
+            updated[devId] = { ...updated[devId], power: watts };
+          });
+          return updated;
+        });
+        break;
+      }
+
       case 'DEVICE_STATUS':
         setDevices(prev => ({
           ...prev,

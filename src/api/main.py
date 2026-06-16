@@ -96,6 +96,12 @@ state_lock = asyncio.Lock()
 # Issue #4: Separate dict for WebSocket throttle timestamps (not in system_state)
 _ws_throttle: Dict[str, float] = {}
 
+# Fix §4.3.3: WebSocket power aggregation buffer.
+# Instead of broadcasting each 1Hz power reading individually (which floods
+# browsers at 100 devices = 100 msg/sec), readings are accumulated here and
+# broadcast as a single batched update every 1 second.
+_ws_power_buffer: Dict[str, float] = {}
+
 
 # ─── Issue #24: Pydantic Models for MQTT Event Validation ───────────
 class DeviceStatusEvent(BaseModel):
@@ -361,15 +367,10 @@ async def mqtt_listener_task():
                                 system_state["devices"][device_id] = {}
                             system_state["devices"][device_id]["power"] = power_watts
 
-                            # Issue #4: Use separate _ws_throttle dict
-                            now = time.time()
-                            if now - _ws_throttle.get(device_id, 0) >= 0.5:
-                                _ws_throttle[device_id] = now
-                                await manager.broadcast({
-                                    "type": "power_reading",
-                                    "device_id": device_id,
-                                    "power": power_watts,
-                                })
+                            # Fix §4.3.3: Accumulate into aggregation buffer
+                            # instead of broadcasting each reading individually.
+                            # The ws_aggregation_task flushes this buffer every 1s.
+                            _ws_power_buffer[device_id] = power_watts
                         except ValueError:
                             # Issue #11: Log instead of silently swallowing
                             logger.debug(f"Non-numeric power payload on {topic}: {payload[:50]}")
@@ -409,6 +410,30 @@ async def heartbeat_task():
             await manager.broadcast({"type": "heartbeat", "status": system_state["pipeline_status"]})
 
 
+# ─── Fix §4.3.3: WebSocket Telemetry Aggregation Task ────────────────
+async def ws_aggregation_task():
+    """Flush the power aggregation buffer as a single batched broadcast
+    every 1 second. This replaces per-device per-message broadcasting
+    and reduces WebSocket traffic by ~100x for multi-device deployments.
+
+    At 100 devices × 1Hz, this sends 1 batched message/sec instead of
+    100 individual messages/sec, preventing browser JS thread saturation."""
+    while True:
+        await asyncio.sleep(1.0)
+        if not manager.active_connections or not _ws_power_buffer:
+            continue
+        # Atomically snapshot and clear the buffer
+        snapshot = dict(_ws_power_buffer)
+        _ws_power_buffer.clear()
+        # Broadcast single aggregated message
+        await manager.broadcast({
+            "type": "power_batch",
+            "readings": snapshot,
+            "device_count": len(snapshot),
+            "timestamp": time.time(),
+        })
+
+
 # ─── App Lifecycle ───────────────────────────────────────────────────
 # Issue #10 & #22: Properly await cancelled tasks; catch and log errors
 @asynccontextmanager
@@ -425,10 +450,13 @@ async def lifespan(app: FastAPI):
 
     mqtt_task = asyncio.create_task(mqtt_listener_task())
     hb_task = asyncio.create_task(heartbeat_task())
+    # Fix §4.3.3: WebSocket aggregation task
+    agg_task = asyncio.create_task(ws_aggregation_task())
     try:
         yield
     finally:
-        for task, name in [(mqtt_task, "mqtt_listener"), (hb_task, "heartbeat")]:
+        for task, name in [(mqtt_task, "mqtt_listener"), (hb_task, "heartbeat"),
+                           (agg_task, "ws_aggregation")]:
             task.cancel()
             try:
                 await asyncio.wait_for(task, timeout=5.0)

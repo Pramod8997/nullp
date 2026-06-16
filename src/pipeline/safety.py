@@ -102,8 +102,10 @@ class FleetDiagnosticsMonitor:
                                 )
                                 # Dispatch alert to dashboard (no relay command)
                                 await relay_callback(device_id, "ALERT_ARC_FAULT")
-                                self._log_event("ARC_FAULT", device_id,
-                                                watts, rate_of_change)
+                                # Fix §4.3.2: Non-blocking safety log write
+                                await self._log_event_async(
+                                    "ARC_FAULT", device_id,
+                                    watts, rate_of_change)
 
                             elif pct >= self.critical_pct:
                                 logger.critical(
@@ -113,7 +115,9 @@ class FleetDiagnosticsMonitor:
                                 )
                                 # Dispatch alert to dashboard (no relay command)
                                 await relay_callback(device_id, "ALERT_CRITICAL")
-                                self._log_event("CRITICAL", device_id, watts, pct)
+                                # Fix §4.3.2: Non-blocking safety log write
+                                await self._log_event_async(
+                                    "CRITICAL", device_id, watts, pct)
 
                             elif pct >= self.warning_pct:
                                 logger.warning(
@@ -121,7 +125,9 @@ class FleetDiagnosticsMonitor:
                                     f"{watts:.1f}W ({pct*100:.1f}% of {rated}W)"
                                 )
                                 await relay_callback(device_id, "WARNING")
-                                self._log_event("WARNING", device_id, watts, pct)
+                                # Fix §4.3.2: Non-blocking safety log write
+                                await self._log_event_async(
+                                    "WARNING", device_id, watts, pct)
 
                             # ── Fleet aggregate check ──
                             total_fleet = sum(self._current_readings.values())
@@ -139,9 +145,10 @@ class FleetDiagnosticsMonitor:
         except Exception as e:
             logger.error(f"Fleet Diagnostics Monitor error: {e}")
 
-    def _log_event(self, level: str, device_id: str,
-                   watts: float, pct_or_roc: float) -> None:
-        """Log safety event to a file independent of DB for audit trail."""
+    def _log_event_sync(self, level: str, device_id: str,
+                        watts: float, pct_or_roc: float) -> None:
+        """Synchronous log write — safe to call from sync context
+        or via asyncio.to_thread()."""
         try:
             with open("safety_events.log", "a") as f:
                 f.write(f"{time.time()},{level},{device_id},"
@@ -149,6 +156,18 @@ class FleetDiagnosticsMonitor:
         except Exception:
             pass
 
+    async def _log_event_async(self, level: str, device_id: str,
+                               watts: float, pct_or_roc: float) -> None:
+        """Fix §4.3.2: Non-blocking safety log write.
+        Runs sync file I/O in a thread to avoid stalling the event loop."""
+        await asyncio.to_thread(
+            self._log_event_sync, level, device_id, watts, pct_or_roc
+        )
+
+    # Keep legacy name for backward compatibility
+    _log_event = _log_event_sync
+
 
 # Backward compatibility alias — existing imports use SafetyMonitor
 SafetyMonitor = FleetDiagnosticsMonitor
+

@@ -58,6 +58,31 @@ const float ADC_VREF   = 3.3;      // ESP32 ADC reference voltage
 const int   ADC_MAX    = 4095;     // 12-bit ADC
 const float CRITICAL_PCT = 1.25;   // 125% of rated → hardware cutoff
 
+// ═══════════════════════════════════════════════════════
+//  ADC CALIBRATION — Piecewise Polynomial Correction
+//  (Fix §1.3.1 from Feasibility Study)
+//
+//  The ESP32 ADC is notoriously non-linear, especially
+//  below 0.1V and above 3.1V. This 3rd-order polynomial
+//  maps raw ADC readings → corrected voltage, compensating
+//  for the ADC transfer function curve.
+//
+//  Coefficients derived from ESP32 ADC characterization:
+//    V_corrected = a0 + a1*raw + a2*raw² + a3*raw³
+//
+//  Set ADC_CALIBRATION_ENABLED = false to bypass.
+// ═══════════════════════════════════════════════════════
+const bool  ADC_CALIBRATION_ENABLED = true;
+const float ADC_CAL_A0 = -0.000362f;    // offset correction
+const float ADC_CAL_A1 =  0.001112f;    // linear term (mV per raw count)
+const float ADC_CAL_A2 = -1.630e-07f;   // quadratic correction
+const float ADC_CAL_A3 =  2.053e-11f;   // cubic correction
+
+// Dead-zone filter: readings below this are clamped to 0.0
+// to prevent phantom load false positives from ADC noise
+// (Fix §1.3.1 — ESP32 ADC noise floor at very low currents)
+const float ADC_NOISE_FLOOR_W = 3.0f;
+
 // ── Edge Arc-Fault Detection Constants ──
 const float EDGE_ROC_THRESHOLD = 800.0;  // W/cycle — rapid dP/dt trip
 const int   BASELINE_WINDOW    = 5;      // Sliding baseline sample count
@@ -94,6 +119,27 @@ char topicCommand[64];
 char topicStatus[64];
 
 // ═══════════════════════════════════════════════════════
+//  ADC CALIBRATION FUNCTION
+//  Maps raw ADC reading → corrected voltage (V)
+//  using piecewise polynomial curve fitting.
+// ═══════════════════════════════════════════════════════
+float calibrateADC(int raw) {
+    if (!ADC_CALIBRATION_ENABLED) {
+        return ((float)raw / (float)ADC_MAX) * ADC_VREF;
+    }
+    float r = (float)raw;
+    // V = a0 + a1*r + a2*r² + a3*r³
+    float voltage = ADC_CAL_A0
+                  + ADC_CAL_A1 * r
+                  + ADC_CAL_A2 * r * r
+                  + ADC_CAL_A3 * r * r * r;
+    // Clamp to valid range [0, ADC_VREF]
+    if (voltage < 0.0f) voltage = 0.0f;
+    if (voltage > ADC_VREF) voltage = ADC_VREF;
+    return voltage;
+}
+
+// ═══════════════════════════════════════════════════════
 //  CORE 0: HIGH-PRIORITY SAFETY SAMPLING TASK
 //
 //  Runs pinned to Core 0 at priority 2.
@@ -124,9 +170,10 @@ void SafetySamplingTask(void* pvParameters) {
     for (;;) {
         // ── Sample ADC ──
         int raw = analogRead(SENSOR_PIN);
-        float centered = (float)(raw - 2048);
-        float voltSensor = (centered / (float)ADC_MAX) * ADC_VREF;
-        float current = (voltSensor / BURDEN_R) * CT_RATIO;
+        // Apply piecewise polynomial ADC calibration (§1.3.1 fix)
+        float voltRaw = calibrateADC(raw);
+        float centered = voltRaw - (ADC_VREF / 2.0f);  // Center around midpoint
+        float current = (centered / BURDEN_R) * CT_RATIO;
         sumSqCycle += current * current;
         samplesCycle++;
 
@@ -149,6 +196,13 @@ void SafetySamplingTask(void* pvParameters) {
             if (completedCycles >= CYCLES_PER_WINDOW) {
                 float rmsAmps = sqrt(sumSqWindow / (float)samplesWindow);
                 float powerWatts = rmsAmps * VOLTAGE * POWER_FACTOR;
+
+                // Dead-zone filter: clamp sub-threshold readings to zero
+                // to prevent ADC noise from triggering phantom load alerts
+                // (§1.3.1 fix — ADC noise floor)
+                if (powerWatts < ADC_NOISE_FLOOR_W) {
+                    powerWatts = 0.0f;
+                }
 
                 // ── Update sliding baseline ──
                 baselineRing[baselineIdx] = powerWatts;

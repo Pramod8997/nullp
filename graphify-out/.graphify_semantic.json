@@ -1,0 +1,427 @@
+{
+  "nodes": [
+    {
+      "id": "session_databasesession",
+      "label": "DatabaseSession",
+      "file_type": "code",
+      "source_file": "src/database/session.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "mqtt_mqttclientmanager",
+      "label": "MQTTClientManager",
+      "file_type": "code",
+      "source_file": "src/hardware/mqtt.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "calibration_temperaturescaler",
+      "label": "TemperatureScaler",
+      "file_type": "code",
+      "source_file": "src/models/calibration.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "protonet_cnn1dencoder",
+      "label": "CNN1DEncoder",
+      "file_type": "code",
+      "source_file": "src/models/protonet.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "protonet_protonet",
+      "label": "ProtoNet",
+      "file_type": "code",
+      "source_file": "src/models/protonet.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "protonet_openmaxweibull",
+      "label": "OpenMaxWeibull",
+      "file_type": "code",
+      "source_file": "src/models/protonet.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "protonet_prototyperegistry",
+      "label": "PrototypeRegistry",
+      "file_type": "code",
+      "source_file": "src/models/protonet.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "thermodynamics_pmvthermodynamics",
+      "label": "PMVThermodynamics",
+      "file_type": "code",
+      "source_file": "src/models/thermodynamics.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "aggregate_nilm_nilmtransientdetector",
+      "label": "NILMTransientDetector",
+      "file_type": "code",
+      "source_file": "src/pipeline/aggregate_nilm.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "analytics_analyticsengine",
+      "label": "AnalyticsEngine",
+      "file_type": "code",
+      "source_file": "src/pipeline/analytics.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "delta_stability_deltastabilityanalyzer",
+      "label": "DeltaStabilityAnalyzer",
+      "file_type": "code",
+      "source_file": "src/pipeline/delta_stability.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "safety_fleetdiagnosticsmonitor",
+      "label": "FleetDiagnosticsMonitor",
+      "file_type": "code",
+      "source_file": "src/pipeline/safety.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "temporal_validator_temporalvalidator",
+      "label": "TemporalValidator",
+      "file_type": "code",
+      "source_file": "src/pipeline/temporal_validator.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "watchdog_softanomalywatchdog",
+      "label": "SoftAnomalyWatchdog",
+      "file_type": "code",
+      "source_file": "src/pipeline/watchdog.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "agent_tabularqlearningagent",
+      "label": "TabularQLearningAgent",
+      "file_type": "code",
+      "source_file": "src/rl/agent.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "readme_ems",
+      "label": "Confidence-Aware Digital Twin Energy Management System",
+      "file_type": "document",
+      "source_file": "README.md"
+    },
+    {
+      "id": "docker_compose",
+      "label": "Docker Compose Orchestration",
+      "file_type": "code",
+      "source_file": "docker-compose.yml"
+    },
+    {
+      "id": "simulate_esp32_script",
+      "label": "ESP32 Simulator",
+      "file_type": "code",
+      "source_file": "backend/scripts/simulate_esp32.py"
+    },
+    {
+      "id": "config_yaml",
+      "label": "System Configuration",
+      "file_type": "code",
+      "source_file": "config/config.yaml"
+    },
+    {
+      "id": "redd_loader",
+      "label": "REDD Data Loader",
+      "file_type": "code",
+      "source_file": "data/redd.py"
+    },
+    {
+      "id": "synd_generator",
+      "label": "Synthetic UK-DALE Generator",
+      "file_type": "code",
+      "source_file": "data/synd.py"
+    },
+    {
+      "id": "uk_dale_loader",
+      "label": "UK-DALE Data Loader",
+      "file_type": "code",
+      "source_file": "data/uk_dale.py"
+    },
+    {
+      "id": "esp32_firmware",
+      "label": "ESP32 Production Firmware",
+      "file_type": "code",
+      "source_file": "firmware/esp32_node/src/main.cpp"
+    },
+    {
+      "id": "app_jsx",
+      "label": "React Dashboard Main",
+      "file_type": "code",
+      "source_file": "frontend/src/App.jsx"
+    },
+    {
+      "id": "digital_twin_component",
+      "label": "Digital Twin UI Component",
+      "file_type": "code",
+      "source_file": "frontend/src/components/DigitalTwin.jsx"
+    },
+    {
+      "id": "colab_train_script",
+      "label": "Colab Training Script",
+      "file_type": "code",
+      "source_file": "notebooks/colab_train.py"
+    },
+    {
+      "id": "calibrate_ct_script",
+      "label": "CT Calibration Utility",
+      "file_type": "code",
+      "source_file": "scripts/calibrate_ct.py"
+    },
+    {
+      "id": "run_pipeline_script",
+      "label": "Pipeline Orchestrator",
+      "file_type": "code",
+      "source_file": "scripts/run_pipeline.py"
+    },
+    {
+      "id": "train_models_script",
+      "label": "Model Training Script",
+      "file_type": "code",
+      "source_file": "scripts/train_models.py"
+    },
+    {
+      "id": "api_main",
+      "label": "FastAPI Backend",
+      "file_type": "code",
+      "source_file": "src/api/main.py"
+    },
+    {
+      "id": "dashboard_bottom_img",
+      "label": "Dashboard Bottom Screenshot",
+      "file_type": "image",
+      "source_file": "docs/screenshots/dashboard_bottom.png"
+    },
+    {
+      "id": "dashboard_top_img",
+      "label": "Dashboard Top Screenshot",
+      "file_type": "image",
+      "source_file": "docs/screenshots/dashboard_top.png"
+    },
+    {
+      "id": "hero_img",
+      "label": "Hero Graphic",
+      "file_type": "image",
+      "source_file": "frontend/src/assets/hero.png"
+    }
+  ],
+  "edges": [
+    {
+      "source": "protonet_protonet",
+      "target": "protonet_cnn1dencoder",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "src/models/protonet.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "protonet_prototyperegistry",
+      "target": "protonet_protonet",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "src/models/protonet.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "agent_tabularqlearningagent",
+      "target": "thermodynamics_pmvthermodynamics",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "src/rl/agent.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "safety_fleetdiagnosticsmonitor",
+      "target": "mqtt_mqttclientmanager",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "src/pipeline/safety.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "temporal_validator_temporalvalidator",
+      "target": "watchdog_softanomalywatchdog",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src/pipeline/temporal_validator.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "session_databasesession",
+      "target": "delta_stability_deltastabilityanalyzer",
+      "relation": "shares_data_with",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "src/database/session.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "docker_compose",
+      "target": "run_pipeline_script",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "docker_compose",
+      "target": "api_main",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "run_pipeline_script",
+      "target": "config_yaml",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "api_main",
+      "target": "run_pipeline_script",
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9
+    },
+    {
+      "source": "esp32_firmware",
+      "target": "run_pipeline_script",
+      "relation": "references",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8
+    },
+    {
+      "source": "train_models_script",
+      "target": "synd_generator",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "app_jsx",
+      "target": "api_main",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "app_jsx",
+      "target": "digital_twin_component",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "calibrate_ct_script",
+      "target": "esp32_firmware",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "dashboard_top_img",
+      "target": "app_jsx",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "dashboard_bottom_img",
+      "target": "app_jsx",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0
+    },
+    {
+      "source": "colab_train_script",
+      "target": "uk_dale_loader",
+      "relation": "references",
+      "confidence": "INFERRED",
+      "confidence_score": 0.7
+    }
+  ],
+  "hyperedges": [],
+  "input_tokens": 110281,
+  "output_tokens": 3831,
+  "failed_chunks": 0
+}

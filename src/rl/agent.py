@@ -304,6 +304,12 @@ class TabularQLearningAgent:
             # Convert defaultdict back to dict for pickling
             pickle.dump({k: dict(v) for k, v in self.q_table.items()}, f)
 
+    async def save_async(self) -> None:
+        """Non-blocking Q-table save — Fix §3.3.2.
+        Runs sync pickle I/O in a thread to avoid stalling the event loop."""
+        import asyncio
+        await asyncio.to_thread(self.save)
+
     def load(self) -> None:
         try:
             with open(self.q_table_path, "rb") as f:
@@ -313,6 +319,52 @@ class TabularQLearningAgent:
             logger.info(f"Loaded Q-table from {self.q_table_path}")
         except Exception as e:
             logger.warning(f"Could not load Q-table: {e}")
+
+    async def load_async(self) -> None:
+        """Non-blocking Q-table load — Fix §3.3.2.
+        Runs sync pickle I/O in a thread to avoid stalling the event loop."""
+        import asyncio
+        await asyncio.to_thread(self.load)
+
+    async def save_to_sqlite(self, db_path: str = "data/ems_state.db") -> None:
+        """Fix §3.3.2: Persist Q-table to SQLite instead of pickle.
+        More scalable for large Q-tables and avoids full-file rewrites.
+        Uses aiosqlite for non-blocking I/O."""
+        import aiosqlite
+        import json
+        try:
+            async with aiosqlite.connect(db_path) as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS q_table (
+                        state_key TEXT PRIMARY KEY,
+                        action_values TEXT
+                    )
+                """)
+                for state_key, actions in self.q_table.items():
+                    await conn.execute(
+                        "INSERT OR REPLACE INTO q_table (state_key, action_values) "
+                        "VALUES (?, ?)",
+                        (state_key, json.dumps(dict(actions)))
+                    )
+                await conn.commit()
+            logger.info(f"Q-table saved to SQLite ({len(self.q_table)} states)")
+        except Exception as e:
+            logger.error(f"Failed to save Q-table to SQLite: {e}")
+
+    async def load_from_sqlite(self, db_path: str = "data/ems_state.db") -> None:
+        """Fix §3.3.2: Load Q-table from SQLite instead of pickle."""
+        import aiosqlite
+        import json
+        try:
+            async with aiosqlite.connect(db_path) as conn:
+                cursor = await conn.execute("SELECT state_key, action_values FROM q_table")
+                rows = await cursor.fetchall()
+                for state_key, action_json in rows:
+                    actions = json.loads(action_json)
+                    self.q_table[state_key].update(actions)
+            logger.info(f"Loaded Q-table from SQLite ({len(self.q_table)} states)")
+        except Exception as e:
+            logger.warning(f"Could not load Q-table from SQLite: {e}")
 
 
 # ── Alias ─────────────────────────────────────────────────────────────────────

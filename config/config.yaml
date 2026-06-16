@@ -98,12 +98,23 @@ rl:
   epsilon_end: 0.01
   epsilon_decay: 0.999995
   promotion_episodes: 50
+  # DQN Agent config (Fix §3.3.1)
+  dqn_model_path: "backend/models/weights/dqn_model.pt"
+  dqn_gamma: 0.99
+  dqn_lr: 0.001
+  dqn_batch_size: 64
+  dqn_target_update: 100
+  use_dqn: false  # Set to true to use DQN instead of tabular Q-learning
 
 preprocessing:
   sg_window: 11
   sg_poly: 2
   transient_threshold_w: 50.0
   transient_window_s: 5
+  # Fix §2.3.1: Configurable sample rate (1Hz for single-meter, 10Hz for sub-metered)
+  sample_rate_hz: 1
+  # Fix §2.3.2: Multi-label overlap detection window
+  overlap_window_s: 3.0
 
 delta_stability:
   buffer_size: 10
