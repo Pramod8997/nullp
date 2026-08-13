@@ -19,3 +19,9 @@ httpx>=0.24.0
 scikit-learn>=1.3.0
 matplotlib>=3.7.0
 tqdm>=4.60.0
+balagan-agent>=0.1.0
+# agent-chaos (install via github when needed)
+# torchmeta removed — requires torch<1.6, incompatible with torch>=2.0
+# Meta-learning augmentation implemented natively in scripts/verify_ml_agent.py
+locust>=2.30.0
+locust-plugins>=4.5.0

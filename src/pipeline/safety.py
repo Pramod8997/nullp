@@ -12,6 +12,7 @@ It does NOT issue relay commands over MQTT. All physical safety actions
 are edge-local and network-independent.
 """
 import logging
+import math
 import asyncio
 import time
 from typing import Callable, Awaitable, Dict
@@ -76,6 +77,14 @@ class FleetDiagnosticsMonitor:
                                            if isinstance(message.payload, bytes)
                                            else str(message.payload))
                             watts = float(payload_str)
+
+                            # Patch 9: Input sanitization — reject NaN/Inf/negative
+                            if math.isnan(watts) or math.isinf(watts):
+                                logger.warning(
+                                    f"⚠️ Invalid reading from {device_id}: "
+                                    f"{payload_str} — skipping")
+                                continue
+                            watts = abs(watts)  # Treat negative as faulty sensor
 
                             # Track fleet aggregate
                             self._current_readings[device_id] = watts

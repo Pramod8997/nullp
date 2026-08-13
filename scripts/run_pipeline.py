@@ -616,7 +616,7 @@ class EMSOrchestrator:
                         # Bug 2.1 fix: Use last-known wattages for ALL devices,
                         # then overlay the live tick for this device
                         appliance_watts = {
-                            k: (self.power_windows[k][-1] if k in self.power_windows and len(self.power_windows[k]) > 0 else 0)
+                            k: self.last_device_power.get(k, 0.0)
                             for k in self.device_states
                         }
                         appliance_watts[device_id] = power_watts  # Apply the live tick

@@ -84,6 +84,7 @@ class NILMTransientDetector:
         self.scaled_threshold = threshold / self.sample_rate_hz
 
         self._buffer: list = []            # rolling power samples
+        self._cooldown = 0                 # prevent consecutive triggers
 
         logger.info(
             f"NILMTransientDetector initialized: {self.sample_rate_hz}Hz, "
@@ -109,18 +110,24 @@ class NILMTransientDetector:
         smoothed = savgol_filter(arr, self.sg_window, self.sg_polyord)
         deriv    = np.diff(smoothed)
 
+        if self._cooldown > 0:
+            self._cooldown -= 1
+
         # Check last window_size derivatives
         recent = deriv[-self.window_size:]
-        if np.any(np.abs(recent) >= self.scaled_threshold):
+        if self._cooldown == 0 and np.any(np.abs(recent) >= self.scaled_threshold):
+            self._cooldown = self.embed_window // 2
             peak_idx = len(self._buffer) - 1
-            half     = self.embed_window // 2
-            start    = max(0, peak_idx - half)
-            end      = start + self.embed_window
+            # Fix: Since peak_idx is the most recent sample, we can't look ahead.
+            # We must either delay the decision, or take the last embed_window samples.
+            # We take the last embed_window samples so the transient is at the end.
+            start    = max(0, peak_idx - self.embed_window + 1)
+            end      = peak_idx + 1
             segment  = arr[start:end]
-            # zero-pad if near edges
+            # zero-pad if near edges (on the left side)
             if len(segment) < self.embed_window:
                 segment = np.pad(segment,
-                                 (0, self.embed_window - len(segment)),
+                                 (self.embed_window - len(segment), 0),
                                  mode='constant')
 
             # If sample rate > 1Hz, downsample the segment to embed_window
@@ -136,6 +143,7 @@ class NILMTransientDetector:
 
     def reset(self):
         self._buffer.clear()
+        self._cooldown = 0
 
 
 class OverlapAwareNILMDetector:

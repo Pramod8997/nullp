@@ -145,3 +145,16 @@ firmware/**/build/
 .gemini/
 .antigravity/
 graphify-out/
+
+# ═══════════════════════════════════════════════════════
+# Temp & Experimental Files
+# ═══════════════════════════════════════════════════════
+e.md
+SESSION_CHECKPOINT.md
+PROJECT_HANDOVER.md
+PRODUCTION_AUDIT_ARCHIVE.md
+scripts/chaos_test*.py
+scripts/verify_*_agent.py
+scripts/locustfile.py
+data/real/
+backend/models/

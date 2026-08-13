@@ -24,7 +24,7 @@ class MQTTClientManager:
                     logger.info(f"Connected to MQTT broker at {self.broker}:{self.port}")
                     topics = [read_topic] if isinstance(read_topic, str) else read_topic
                     for t in topics:
-                        await client.subscribe(t)
+                        await client.subscribe(t, qos=1)
                         logger.info(f"Subscribed to reads on {t}")
                     async for message in client.messages:
                         if self._read_callback and message.topic:
@@ -44,7 +44,7 @@ class MQTTClientManager:
             logger.error("MQTT client not connected, cannot publish.")
             return
         try:
-            await self.client.publish(write_topic, payload=payload)
+            await self.client.publish(write_topic, payload=payload, qos=1)
             logger.debug(f"Published to {write_topic}: {payload}")
         except Exception as e:
             logger.error(f"Failed to publish to {write_topic}: {e}")

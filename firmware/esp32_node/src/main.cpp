@@ -261,10 +261,10 @@ void SafetySamplingTask(void* pvParameters) {
             }
         }
 
-        // ~500µs between samples (same as original, but non-blocking via vTaskDelay)
-        // Using 1 tick at configTICK_RATE_HZ=1000 gives ~1ms granularity;
-        // for sub-ms we use delayMicroseconds since this task owns Core 0.
+        // ~500µs between samples — use portYIELD to prevent TWDT starvation
+        // on Core 0, while maintaining sub-ms sampling granularity.
         delayMicroseconds(500);
+        portYIELD();  // Patch 11: Yield CPU to prevent FreeRTOS Idle Task starvation
     }
 }
 
@@ -275,10 +275,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
     // Any message from server = heartbeat
     lastServerHB = millis();
 
-    String message = "";
-    for (unsigned int i = 0; i < length; i++) {
-        message += (char)payload[i];
-    }
+    // Patch 13: Pre-allocate buffer to prevent heap fragmentation
+    char msg[length + 1];
+    memcpy(msg, payload, length);
+    msg[length] = '\0';
+    String message = String(msg);
 
     if (String(topic) == String(topicCommand)) {
         if (message == "ON" && !relayLocked) {
@@ -343,19 +344,22 @@ void setup() {
 // ═══════════════════════════════════════════════════════
 //  MQTT RECONNECT (Core 1)
 // ═══════════════════════════════════════════════════════
+unsigned long lastReconnectAttempt = 0;  // Patch 12: Non-blocking reconnect timer
+
 void reconnectMQTT() {
-    int retries = 0;
-    while (!client.connected() && retries < 5) {
-        Serial.printf("[MQTT] Connecting as %s...\n", DEVICE_ID);
-        if (client.connect(DEVICE_ID)) {
-            Serial.println("[MQTT] Connected");
-            client.subscribe(topicCommand);
-            lastServerHB = millis();
-        } else {
-            Serial.printf("[MQTT] Failed rc=%d, retry in 5s\n", client.state());
-            delay(5000);
-            retries++;
-        }
+    // Patch 12: Non-blocking reconnect — returns immediately if not time yet
+    if (millis() - lastReconnectAttempt < 5000) {
+        return;  // Not time to retry yet
+    }
+    lastReconnectAttempt = millis();
+
+    Serial.printf("[MQTT] Connecting as %s...\n", DEVICE_ID);
+    if (client.connect(DEVICE_ID)) {
+        Serial.println("[MQTT] Connected");
+        client.subscribe(topicCommand);
+        lastServerHB = millis();
+    } else {
+        Serial.printf("[MQTT] Failed rc=%d, will retry in 5s\n", client.state());
     }
 }
 

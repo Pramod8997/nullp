@@ -88,6 +88,17 @@ class DeltaStabilityAnalyzer:
 
         if close_count >= self.min_count:
             cluster_mean = embeddings[dists <= self.threshold].mean(axis=0)
+
+            # Suppress redundant LABEL_REQUEST if this is the same cluster
+            # we already reported (centroid hasn't shifted significantly).
+            if self._last_stable_mean is not None:
+                shift = float(np.sum((cluster_mean - self._last_stable_mean) ** 2))
+                if shift < self.threshold:
+                    # Same cluster — update state silently, don't re-emit
+                    self._last_stable_mean = cluster_mean
+                    self._last_stable_hits = close_count
+                    return 'stable', cluster_mean
+
             self._last_stable_mean = cluster_mean
             self._last_stable_hits = close_count
             return 'stable', cluster_mean

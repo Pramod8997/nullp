@@ -271,6 +271,10 @@ class DQNAgent:
     def act(self, state_dict: Dict[str, Any], pmv: float, confidence: float,
             classified_device: str, min_confidence: float = None) -> str:
         """Act based on current state. Returns action string."""
+        # Gate 0: NaN safety — NaN bypasses all float comparisons silently
+        if math.isnan(pmv):
+            return "DEFER"
+
         # Gate 1: Confidence gate
         threshold = min_confidence if min_confidence is not None else self.confidence_threshold
         if confidence < threshold:

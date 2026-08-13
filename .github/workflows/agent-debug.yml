@@ -1,0 +1,39 @@
+name: AI Agent Debugging & Code Review
+
+on:
+  pull_request:
+    paths:
+      - 'src/models/**.py'
+      - 'notebooks/**.py'
+      - 'scripts/train_models.py'
+  workflow_dispatch:
+
+jobs:
+  agent-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Run PyTorch Tensor Shape & Metric Check (Mock)
+        run: |
+          echo "Running ML model trace..."
+          # In a real scenario, this would generate a trace.json for the agent to analyze
+          echo "{}" > trace.json
+
+      - name: Agent-Debug Analysis
+        uses: Viktorsdb/agent-debug@v1
+        with:
+          trace-file: 'trace.json'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          provider: 'gpt-4o'  # You can change this to Claude, DeepSeek, etc.
+          instruction: |
+            Analyze the PyTorch execution trace. Specifically check for:
+            1. Tensor shape mismatches (e.g., Softmax vs Sigmoid gating reducing signal amplitude).
+            2. Distance metric mismatches (e.g., L2 vs L2^2) between training and evaluation phases.
+            Suggest root causes and fixes automatically.

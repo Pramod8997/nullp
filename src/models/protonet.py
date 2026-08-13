@@ -116,7 +116,7 @@ class PreCNNTemporalAttention(nn.Module):
             nn.Linear(seq_len, seq_len // 4),
             nn.Tanh(),
             nn.Linear(seq_len // 4, seq_len),
-            nn.Softmax(dim=-1),
+            nn.Sigmoid(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -162,7 +162,7 @@ class ProtoNet(nn.Module):
         prototypes = sup_emb.mean(dim=1)                         # (N, EMBED_DIM)
         q_emb      = self.embed(query)                           # (Q, EMBED_DIM)
         dists      = torch.cdist(q_emb.unsqueeze(0),
-                                 prototypes.unsqueeze(0)).squeeze(0)  # (Q, N)
+                                 prototypes.unsqueeze(0)).pow(2).squeeze(0)  # (Q, N)
         return F.log_softmax(-dists, dim=1), dists
 
 

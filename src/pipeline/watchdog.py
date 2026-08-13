@@ -4,6 +4,7 @@ A parallel monitoring layer that detects soft anomalies (e.g., sensor drift, slo
 before they become critical failures. It works alongside the primary ProtoNet.
 """
 import time
+import math
 from collections import deque
 import statistics
 
@@ -33,7 +34,11 @@ class SoftAnomalyWatchdog:
         """
         if device_id not in self.history:
             self.history[device_id] = deque(maxlen=self.window_size)
-            
+
+        # Patch 10: Reject poisonous inputs that would corrupt the rolling history
+        if not isinstance(reading, (int, float)) or math.isnan(reading) or math.isinf(reading):
+            return False
+
         history = self.history[device_id]
         
         # Need a minimum number of samples to establish a baseline
@@ -51,7 +56,10 @@ class SoftAnomalyWatchdog:
         # Audit fix 4.2: Detect normal ON/OFF state transitions and reset baseline.
         # If the reading deviates massively from a low baseline (e.g., 1.5W → 1500W),
         # this is a normal appliance start, not a soft anomaly.
-        if abs(reading - mean) > 100.0 and mean < 10.0:
+        # If the reading deviates massively from a low baseline (e.g., 1.5W → 1500W),
+        # this is a normal appliance start, not a soft anomaly.
+        # Likewise, if the reading drops massively to <10W, it's a normal appliance stop.
+        if abs(reading - mean) > 100.0 and (mean < 10.0 or reading < 10.0):
             history.clear()
             history.append(reading)
             return False
