@@ -117,13 +117,33 @@ const LabelRequestCard = ({ event, onLabeled }) => {
 };
 
 /* ── Main DigitalTwin component ────────────────────────────────────────── */
-const DigitalTwin = ({ events, pmvScore }) => {
-  const pmv = getPmvLabel(pmvScore);
+const DigitalTwin = ({
+  events = [],
+  pmvScore,
+  pmv,
+  ppd,
+  rlLog = [],
+  unknownDevices = [],
+  onLabel,
+}) => {
+  const currentPmv = typeof pmv === 'number' ? pmv : (typeof pmvScore === 'number' ? pmvScore : 0);
+  const pmvInfo = getPmvLabel(currentPmv);
   const [labeled, setLabeled] = useState({});   // track which device_ids have been labeled
+  const [unknownInputs, setUnknownInputs] = useState({});
+  const [dismissedUnknowns, setDismissedUnknowns] = useState({});
 
   const handleLabeled = (deviceId, className) => {
     setLabeled(prev => ({ ...prev, [deviceId]: className }));
   };
+
+  const handleUnknownSubmit = (reqId, labelVal) => {
+    if (onLabel) {
+      onLabel(reqId, labelVal);
+    }
+    setDismissedUnknowns(prev => ({ ...prev, [reqId]: true }));
+  };
+
+  const combinedEvents = events.length > 0 ? events : rlLog;
 
   return (
     <div>
@@ -132,24 +152,91 @@ const DigitalTwin = ({ events, pmvScore }) => {
       </div>
 
       {/* PMV Gauge */}
-      <div className="pmv-gauge">
+      <div
+        data-testid="pmv-gauge"
+        data-pmv={String(currentPmv)}
+        className={`pmv-gauge ${pmvInfo.cls} ${currentPmv === 0 ? 'neutral comfort' : ''}`}
+      >
         <Thermometer size={24} color="#8b5cf6" />
-        <div className={`pmv-gauge__value ${pmv.cls}`}>{pmvScore.toFixed(2)}</div>
+        <div className={`pmv-gauge__value ${pmvInfo.cls}`}>{currentPmv.toFixed(2)}</div>
         <div className="pmv-gauge__info">
           <span className="pmv-gauge__label">PMV Index</span>
-          <span className="pmv-gauge__desc">{pmv.label}</span>
+          <span className="pmv-gauge__desc">{pmvInfo.label}</span>
         </div>
       </div>
 
+      {/* Unknown Devices Prompts */}
+      {unknownDevices.map(dev => {
+        const reqId = dev.requestId || dev.id;
+        if (dismissedUnknowns[reqId]) return null;
+        const currentVal = unknownInputs[reqId] || '';
+
+        return (
+          <div
+            key={reqId}
+            data-testid={`label-request-${reqId}`}
+            className="label-request-card"
+            style={{
+              background: 'rgba(245,158,11,0.1)',
+              border: '1px solid rgba(245,158,11,0.4)',
+              borderRadius: '8px',
+              padding: '0.6rem 0.8rem',
+              margin: '0.5rem 0',
+            }}
+          >
+            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#f59e0b', marginBottom: '0.4rem' }}>
+              Unknown Device Detected: {dev.id}
+            </div>
+            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+              <input
+                type="text"
+                role="textbox"
+                placeholder="Enter appliance name…"
+                value={currentVal}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setUnknownInputs(prev => ({ ...prev, [reqId]: val }));
+                }}
+                style={{
+                  flex: 1,
+                  background: 'rgba(255,255,255,0.07)',
+                  border: '1px solid rgba(245,158,11,0.5)',
+                  borderRadius: '6px',
+                  padding: '0.3rem 0.5rem',
+                  color: '#fef3c7',
+                  fontSize: '0.75rem',
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => handleUnknownSubmit(reqId, currentVal)}
+                style={{
+                  background: '#f59e0b',
+                  color: '#0f172a',
+                  border: 'none',
+                  padding: '0.3rem 0.75rem',
+                  borderRadius: '6px',
+                  fontWeight: 700,
+                  fontSize: '0.73rem',
+                  cursor: 'pointer',
+                }}
+              >
+                Submit
+              </button>
+            </div>
+          </div>
+        );
+      })}
+
       {/* Event Log */}
       <div className="event-log">
-        {events.length === 0 ? (
+        {combinedEvents.length === 0 ? (
           <div className="empty-state" style={{ minHeight: 120 }}>
             <BrainCircuit size={32} color="#64748b" />
             <p>Agent monitoring nominal</p>
           </div>
         ) : (
-          events.slice(0, 15).map((event, i) => {
+          combinedEvents.slice(0, 15).map((event, i) => {
             /* ── RL Action ── */
             if (event.type === 'RL_ACTION') {
               return (

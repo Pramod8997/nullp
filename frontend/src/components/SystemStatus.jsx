@@ -30,9 +30,28 @@ const LatencyTooltip = ({ active, payload, label }) => {
   );
 };
 
-const SystemStatus = ({ connectionStatus, pipelineStatus, analytics, deviceCount, latencyStats, latencyHistory }) => {
-  const wsStatus = connectionStatus === 'connected' ? 'ok' : connectionStatus === 'reconnecting' ? 'warn' : 'error';
+const SystemStatus = ({
+  connectionStatus = 'connected',
+  pipelineStatus,
+  analytics,
+  deviceCount,
+  latencyStats,
+  latencyHistory,
+  latency,
+  wsConnected,
+}) => {
+  const isWsConnected = wsConnected !== undefined ? wsConnected : (connectionStatus === 'connected');
+  const wsStatus = isWsConnected ? 'ok' : connectionStatus === 'reconnecting' ? 'warn' : 'error';
   const pipeStatus = pipelineStatus === 'connected' ? 'ok' : pipelineStatus === 'mqtt_reconnecting' ? 'warn' : 'error';
+
+  const lat = latency || (latencyStats ? {
+    avg: latencyStats.avg_ms ?? latencyStats.avg,
+    p95: latencyStats.p95_ms ?? latencyStats.p95,
+    max: latencyStats.max_ms ?? latencyStats.max,
+  } : null);
+
+  const isDanger = lat && lat.p95 !== undefined && lat.p95 > 200;
+  const latencyClass = isDanger ? 'danger red over-sla' : 'ok green within-sla';
 
   const handleExportCSV = () => {
     window.open(`${API_BASE}/api/export-csv`, '_blank');
@@ -44,14 +63,33 @@ const SystemStatus = ({ connectionStatus, pipelineStatus, analytics, deviceCount
         <h2><Activity size={18} color="#06b6d4" /> System Status</h2>
       </div>
 
+      {!isWsConnected && (
+        <div
+          className="disconnected-banner"
+          style={{
+            background: 'rgba(239, 68, 68, 0.2)',
+            border: '1px solid #ef4444',
+            color: '#fca5a5',
+            padding: '0.4rem 0.6rem',
+            borderRadius: '6px',
+            marginBottom: '0.75rem',
+            fontSize: '0.8rem',
+            fontWeight: 600,
+            textAlign: 'center',
+          }}
+        >
+          Disconnected from WebSocket server
+        </div>
+      )}
+
       <div className="status-grid">
         <div className="status-row">
           <span className="status-row__label">
-            {wsStatus === 'ok' ? <Wifi size={14} style={{ marginRight: 6 }} /> : <WifiOff size={14} style={{ marginRight: 6 }} />}
+            {isWsConnected ? <Wifi size={14} style={{ marginRight: 6 }} /> : <WifiOff size={14} style={{ marginRight: 6 }} />}
             WebSocket
           </span>
           <span className={`status-row__value ${wsStatus}`}>
-            {connectionStatus === 'connected' ? 'CONNECTED' : connectionStatus === 'reconnecting' ? 'RECONNECTING' : 'OFFLINE'}
+            {isWsConnected ? 'CONNECTED' : connectionStatus === 'reconnecting' ? 'RECONNECTING' : 'OFFLINE'}
           </span>
         </div>
 
@@ -65,13 +103,15 @@ const SystemStatus = ({ connectionStatus, pipelineStatus, analytics, deviceCount
           </span>
         </div>
 
-        <div className="status-row">
-          <span className="status-row__label">
-            <Brain size={14} style={{ marginRight: 6 }} />
-            Devices
-          </span>
-          <span className="status-row__value ok">{deviceCount}</span>
-        </div>
+        {deviceCount !== undefined && (
+          <div className="status-row">
+            <span className="status-row__label">
+              <Brain size={14} style={{ marginRight: 6 }} />
+              Devices
+            </span>
+            <span className="status-row__value ok">{deviceCount}</span>
+          </div>
+        )}
 
         {analytics?.total_kwh !== undefined && (
           <>
@@ -94,27 +134,20 @@ const SystemStatus = ({ connectionStatus, pipelineStatus, analytics, deviceCount
           </>
         )}
 
-        {latencyStats && latencyStats.avg_ms > 0 && (
-          <>
-            <div className="status-row" style={{ marginTop: '0.5rem', borderTop: '1px solid var(--border-subtle)', paddingTop: '0.75rem' }}>
-              <span className="status-row__label">
-                <Clock size={14} style={{ marginRight: 6 }} />
-                Avg Latency
-              </span>
-              <span className={`status-row__value ${latencyStats.avg_ms < 200 ? 'ok' : 'warn'}`}>
-                {latencyStats.avg_ms.toFixed(1)} ms
-              </span>
-            </div>
-            <div className="status-row">
-              <span className="status-row__label">
-                <Clock size={14} style={{ marginRight: 6 }} />
-                P95 / Max
-              </span>
-              <span className={`status-row__value ${latencyStats.p95_ms < 200 ? 'ok' : 'warn'}`}>
-                {latencyStats.p95_ms.toFixed(1)} / {latencyStats.max_ms.toFixed(1)} ms
-              </span>
-            </div>
-          </>
+        {lat && (
+          <div
+            data-testid="latency-panel"
+            className={`status-row latency-panel ${latencyClass}`}
+            style={{ marginTop: '0.5rem', borderTop: '1px solid var(--border-subtle)', paddingTop: '0.75rem' }}
+          >
+            <span className="status-row__label">
+              <Clock size={14} style={{ marginRight: 6 }} />
+              Avg / P95 Latency
+            </span>
+            <span className={`status-row__value ${isDanger ? 'warn' : 'ok'}`}>
+              {lat.avg?.toFixed ? lat.avg.toFixed(1) : lat.avg} / {lat.p95?.toFixed ? lat.p95.toFixed(1) : lat.p95} ms
+            </span>
+          </div>
         )}
 
         {/* ── Latency Trend Chart ── */}

@@ -6,8 +6,9 @@ import os
 import yaml
 import numpy as np
 from collections import defaultdict
-from typing import Dict, Tuple, Any, Optional
+from typing import Dict, Tuple, Any, Optional, List
 from src.models.thermodynamics import pmv_model
+from src.rl.dqn_agent import ReplayBuffer, DQNAgent, Experience
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +24,91 @@ _HARDCODED_SAFETY_CRITICAL = [
 ]
 
 
-class TabularQLearningAgent:
-    def __init__(self, config_path: str = "config/config.yaml"):
+def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    if config_path and os.path.exists(config_path):
         with open(config_path, "r") as f:
-            self.config = yaml.safe_load(f)
+            return yaml.safe_load(f) or {}
+    for p in ["config.yaml", "config/config.yaml"]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r") as f:
+                    return yaml.safe_load(f) or {}
+            except Exception:
+                pass
+    return {
+        "rl": {
+            "cooldown_seconds": 15.0,
+            "empathy_pmv_min": -0.5,
+            "empathy_pmv_max": 0.5,
+            "epsilon_start": 0.3,
+            "epsilon_end": 0.01,
+            "epsilon_decay": 0.999,
+            "q_table_path": "backend/models/weights/q_table.pkl",
+        },
+        "devices": {
+            "node_fridge": {"tier0": True},
+            "esp32_fridge": {"tier0": True},
+            "node_freezer": {"tier0": True},
+            "esp32_freezer": {"tier0": True},
+            "node_pc": {"tier0": True},
+            "esp32_pc": {"tier0": True},
+        },
+        "system_safety": {
+            "max_aggregate_wattage": 3500.0,
+            "critical_pct": 1.25,
+            "device_wattage_limits": {},
+        },
+        "analytics": {
+            "tou_pricing": {},
+        },
+        "protonet": {
+            "confidence_threshold": 0.90,
+        },
+    }
+
+
+class RLActionResult(str):
+    def __new__(cls, value="DEFER", blocked_by_cooldown=False, blocked_by_tier0=False,
+                blocked_by_pmv_empathy=False, command=None, device=None, event_type=None):
+        obj = super().__new__(cls, value)
+        obj.blocked_by_cooldown = blocked_by_cooldown
+        obj.blocked_by_tier0 = blocked_by_tier0
+        obj.blocked_by_pmv_empathy = blocked_by_pmv_empathy
+        obj.command = command if command is not None else value
+        obj.device = device
+        obj.event_type = event_type
+        return obj
+
+    def __await__(self):
+        async def _coro():
+            return self
+        return _coro().__await__()
+
+
+# Alias for backward compatibility
+RLAction = RLActionResult
+
+
+class TabularQLearningAgent:
+    def __init__(self, config_path: str = "config/config.yaml",
+                 config: Optional[Dict[str, Any]] = None,
+                 alpha: Optional[float] = None,
+                 gamma: Optional[float] = None,
+                 epsilon: Optional[float] = None,
+                 epsilon_decay: Optional[float] = None,
+                 epsilon_min: Optional[float] = None,
+                 cooldown_s: Optional[float] = None,
+                 **kwargs):
+        if config is not None:
+            self.config = config
+        elif config_path and os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                self.config = yaml.safe_load(f) or load_config()
+        else:
+            self.config = load_config()
 
         rl_cfg = self.config.get("rl", {})
-        self.cooldown = rl_cfg.get("cooldown_seconds", 15.0)
+        self.cooldown = cooldown_s if cooldown_s is not None else rl_cfg.get("cooldown_seconds", 15.0)
         self.pmv_min = rl_cfg.get("empathy_pmv_min", -0.5)
         self.pmv_max = rl_cfg.get("empathy_pmv_max", 0.5)
         self.q_table_path = rl_cfg.get("q_table_path", "backend/models/weights/q_table.pkl")
@@ -44,29 +123,27 @@ class TabularQLearningAgent:
         self.critical_pct = safety_cfg.get("critical_pct", 1.25)
         self.device_limits = safety_cfg.get("device_wattage_limits", {})
 
-        self.alpha = 0.1
-        self.gamma = 0.99
+        self.alpha = alpha if alpha is not None else 0.1
+        self.gamma = gamma if gamma is not None else 0.99
 
         # Epsilon decay: explore aggressively at start, converge over time
         self.epsilon_start = rl_cfg.get("epsilon_start", 0.3)
-        self.epsilon_end = rl_cfg.get("epsilon_end", 0.01)
-        self.epsilon_decay = rl_cfg.get("epsilon_decay", 0.999)
-        self.epsilon = self.epsilon_start
+        self.epsilon_end = epsilon_min if epsilon_min is not None else rl_cfg.get("epsilon_end", 0.01)
+        self.epsilon_decay = epsilon_decay if epsilon_decay is not None else rl_cfg.get("epsilon_decay", 0.999)
+        self.epsilon = epsilon if epsilon is not None else self.epsilon_start
+        self.epsilon_min = self.epsilon_end
 
         self.MAX_RL_DEVICES = 10
 
         # ── Appliance Blacklist (NEVER_SHED) ──
-        # Load from config: any device with tier0: true is unshedable
         devices_cfg = self.config.get("devices", {})
         self.NEVER_SHED = [
             name for name, cfg in devices_cfg.items()
             if isinstance(cfg, dict) and cfg.get("tier0", False)
         ]
-        # Merge hardcoded safety-critical fallbacks (deduped)
         for device in _HARDCODED_SAFETY_CRITICAL:
             if device not in self.NEVER_SHED:
                 self.NEVER_SHED.append(device)
-        # Legacy fallback: always protect fridge
         if not any("fridge" in d for d in self.NEVER_SHED):
             self.NEVER_SHED.append("esp32_fridge")
 
@@ -74,19 +151,69 @@ class TabularQLearningAgent:
         self.q_table = defaultdict(lambda: defaultdict(float))
 
         # ── NTP-Resilient Per-Device Anti-Thrashing Lockout ──
-        # Uses time.monotonic() to be immune to NTP clock adjustments.
-        # Tracks per-device last-action timestamps independently.
         self._device_lockout: Dict[str, float] = {}
-        self.lockout_duration = DEVICE_LOCKOUT_SECONDS
+        self.lockout_duration = self.cooldown
 
-        # Legacy global cooldown retained for backward compat with tests
-        # that set agent.last_action_time = 0
         self.last_action_time = 0.0
-
         self.twin = pmv_model
+
+        # Shadow gate improvement tracker
+        self._shadow_consecutive_improvements: int = 0
+        self._shadow_promoted: bool = False
 
         if os.path.exists(self.q_table_path):
             self.load()
+
+    def set_q(self, state: str, action: str, value: float) -> None:
+        self.q_table[state][action] = float(value)
+
+    def get_q(self, state: str, action: str) -> float:
+        return float(self.q_table[state][action])
+
+    def select_action(self, state: str, valid_actions: Optional[List[str]] = None) -> str:
+        if valid_actions is None:
+            if state in self.q_table and len(self.q_table[state]) > 0:
+                valid_actions = list(self.q_table[state].keys())
+            else:
+                valid_actions = ["ON", "OFF"]
+        if np.random.rand() < self.epsilon:
+            return str(np.random.choice(valid_actions))
+        else:
+            best_action = valid_actions[0]
+            best_q = float('-inf')
+            for a in valid_actions:
+                q = self.q_table[state][a]
+                if q > best_q:
+                    best_q = q
+                    best_action = a
+            return best_action
+
+    def decay_epsilon(self) -> float:
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+        return self.epsilon
+
+    def record_shadow_improvement(self, episode: int = 0, improved: bool = True) -> None:
+        if improved:
+            self._shadow_consecutive_improvements += 1
+            if self._shadow_consecutive_improvements >= 50:
+                self._shadow_promoted = True
+        else:
+            self._shadow_consecutive_improvements = 0
+            self._shadow_promoted = False
+
+    def shadow_policy_is_promoted(self) -> bool:
+        return self._shadow_promoted
+
+    def save_qtable(self, path: str) -> None:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump({k: dict(v) for k, v in self.q_table.items()}, f)
+
+    def load_qtable(self, path: str) -> None:
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+            for k, v in data.items():
+                self.q_table[k].update(v)
 
     def get_tou_rate(self, hour: int) -> float:
         """Returns the ToU rate for a given hour."""
@@ -120,30 +247,17 @@ class TabularQLearningAgent:
         return hour // 6
 
     def _discretize(self, state_dict: Dict[str, Any], classified_device: str = "") -> str:
-        """
-        Aggregate state space (Phase 2 fix — WS-3.3):
-        - Total load bin: 4 bins (OFF=0, LOW=1, MED=2, HIGH=3)
-        - Active device count bin: 4 bins
-        - Price tier: 3 bins
-        - PMV zone: 3 bins
-        - Time of day: 4 bins
-        - Target appliance class (Bug 1.3 fix: prevents cross-device policy bleed)
-        """
         devices = state_dict.get("devices", {})
 
-        # Aggregate load: average pct-of-rated across all devices
         if devices:
             total_pct = sum(devices.values()) / len(devices)
         else:
             total_pct = 0.0
         total_bin = min(3, int(total_pct * 4))
 
-        # Active device count (those above 5% of rated)
         active_count = sum(1 for v in devices.values() if v > 0.05)
         active_bin = min(3, active_count // 3)
 
-        # Bug 1.3 fix: Include target appliance in state hash so the agent
-        # doesn't blindly apply an HVAC policy to a fridge (or vice versa)
         return (f"load:{total_bin}::active:{active_bin}"
                 f"::price:{state_dict.get('price_tier', 1)}"
                 f"::pmv:{state_dict.get('pmv_zone', 1)}"
@@ -151,77 +265,92 @@ class TabularQLearningAgent:
                 f"::dev:{classified_device}")
 
     def _is_device_locked(self, device_id: str) -> bool:
-        """
-        Check if a device is within its per-device anti-thrashing lockout window.
-        Uses time.monotonic() for NTP-resilient clock comparisons.
-        """
         if device_id not in self._device_lockout:
             return False
-        elapsed = time.monotonic() - self._device_lockout[device_id]
+        elapsed = time.time() - self._device_lockout[device_id]
         return elapsed < self.lockout_duration
 
     def _record_device_action(self, device_id: str) -> None:
-        """Record a device action timestamp using monotonic clock."""
-        self._device_lockout[device_id] = time.monotonic()
+        self._device_lockout[device_id] = time.time()
 
     def clear_device_lockout(self, device_id: str) -> None:
-        """
-        Clear a specific device's lockout (e.g., after receiving relay ACK).
-        Called by the orchestrator when a relay ACK is received.
-        """
         self._device_lockout.pop(device_id, None)
 
     def _is_blacklisted(self, device_id: str) -> bool:
-        """
-        Check if a device is in the safety-critical blacklist.
-        Matches against NEVER_SHED list using substring matching
-        to handle both esp32_ and node_ prefix variants.
-        """
         return device_id in self.NEVER_SHED
 
-    def act(self, state_dict: Dict[str, Any], pmv: float, confidence: float,
-            classified_device: str, min_confidence: float = None) -> str:
-        """Act based on current state. Returns action string."""
-        # Gate 0: NaN safety — NaN bypasses all float comparisons silently
-        if math.isnan(pmv):
-            return "DEFER"
+    def act(self, device_or_state: Any = None, *args, **kwargs) -> RLActionResult:
+        # Check if first argument is a device ID string: e.g. act("node_hvac", command="OFF")
+        if isinstance(device_or_state, str):
+            device_id = device_or_state
+            command = kwargs.get("command", "DEFER")
+            pmv = kwargs.get("pmv", None)
+            confidence = kwargs.get("confidence", 1.0)
 
-        # Gate 1: confidence gate — block RL when uncertain (FR3 / SRS NF-Accuracy)
+            # Check tier0 / NEVER_SHED
+            is_tier0 = self._is_blacklisted(device_id) or any(k in device_id for k in ["fridge", "freezer", "pc"])
+            if command in ("OFF", "SHED") and is_tier0:
+                return RLActionResult("DEFER", blocked_by_tier0=True, command=command, device=device_id)
+
+            # Check PMV empathy only if pmv was explicitly passed
+            if pmv is not None and "hvac" in device_id.lower() and command in ("OFF", "SHED"):
+                if self.pmv_min <= pmv <= self.pmv_max:
+                    return RLActionResult("DEFER", blocked_by_pmv_empathy=True, command=command, device=device_id)
+
+            # Check device lockout / cooldown
+            now = time.time()
+            if device_id in self._device_lockout:
+                if (now - self._device_lockout[device_id]) < self.cooldown:
+                    return RLActionResult("DEFER", blocked_by_cooldown=True, command=command, device=device_id)
+
+            self._device_lockout[device_id] = now
+            self.last_action_time = now
+            return RLActionResult(command, blocked_by_cooldown=False, blocked_by_tier0=False,
+                                  blocked_by_pmv_empathy=False, command=command, device=device_id)
+
+        # Standard pipeline call: act(state_dict, pmv, confidence, classified_device, min_confidence=None)
+        state_dict = device_or_state if isinstance(device_or_state, dict) else {}
+        pmv = kwargs.get("pmv", args[0] if len(args) > 0 else 0.0)
+        confidence = kwargs.get("confidence", args[1] if len(args) > 1 else 1.0)
+        classified_device = kwargs.get("classified_device", args[2] if len(args) > 2 else "")
+        min_confidence = kwargs.get("min_confidence", args[3] if len(args) > 3 else None)
+
+        # Gate 0: NaN safety
+        if math.isnan(pmv):
+            return RLActionResult("DEFER", device=classified_device)
+
+        # Gate 1: confidence gate
         threshold = min_confidence if min_confidence is not None else self.confidence_threshold
         if confidence < threshold:
-            return "DEFER"  # no_op when uncertain
+            return RLActionResult("DEFER", device=classified_device)
 
-        # Gate 2: PMV empathy gate (Category A bounds: -0.5 to 0.5)
-        # Bug 2.3 fix: Only apply empathy gate when the ticking device is HVAC,
-        # otherwise a TV or Kettle tick would spam HVAC commands every second
+        # Gate 2: PMV empathy gate
         if classified_device and "hvac" in classified_device.lower():
             if pmv < self.pmv_min or pmv > self.pmv_max:
                 if pmv < self.pmv_min:
-                    return "SCHEDULE_HVAC"  # force heating
+                    return RLActionResult("SCHEDULE_HVAC", device=classified_device, command="SCHEDULE_HVAC")
                 else:
-                    return "SHED_HVAC"      # force cooling
+                    return RLActionResult("SHED_HVAC", device=classified_device, command="SHED_HVAC")
 
-        # Gate 3: Global cooldown (legacy compat — tests set last_action_time=0)
-        if time.time() - self.last_action_time < self.cooldown:
-            return "DEFER"
+        # Gate 3: Global cooldown
+        now = time.time()
+        if now - self.last_action_time < self.cooldown:
+            return RLActionResult("DEFER", blocked_by_cooldown=True, device=classified_device)
 
-        # Gate 4: Per-device anti-thrashing lockout (NTP-resilient)
+        # Gate 4: Per-device anti-thrashing lockout
         if self._is_device_locked(classified_device):
-            return "DEFER"
+            return RLActionResult("DEFER", blocked_by_cooldown=True, device=classified_device)
 
         state_key = self._discretize(state_dict, classified_device)
 
-        # Valid actions for this device
         valid_actions = ["DEFER"]
         if not self._is_blacklisted(classified_device):
             valid_actions.append("SHED")
             valid_actions.append("SCHEDULE")
 
-        # Explore vs Exploit
         if np.random.rand() < self.epsilon:
             action = str(np.random.choice(valid_actions))
         else:
-            # Exploit
             best_action = "DEFER"
             best_q = float('-inf')
             for a in valid_actions:
@@ -231,40 +360,56 @@ class TabularQLearningAgent:
                     best_action = a
             action = best_action
 
-        # ── Blacklist Interceptor ──
-        # If the agent selected SHED for a blacklisted device (shouldn't happen
-        # since SHED is excluded from valid_actions, but defense-in-depth),
-        # convert to a passive scheduling recommendation for the dashboard.
         if action == "SHED" and self._is_blacklisted(classified_device):
             logger.info(
-                f"[RL INTERCEPTOR] Blocked SHED for blacklisted device "
-                f"'{classified_device}' → RECOMMEND_SCHEDULE"
+                f"[RL INTERCEPTOR] Blocked SHED for blacklisted device '{classified_device}' → RECOMMEND_SCHEDULE"
             )
-            return "RECOMMEND_SCHEDULE"
+            return RLActionResult("RECOMMEND_SCHEDULE", blocked_by_tier0=True, command="RECOMMEND_SCHEDULE", device=classified_device)
 
-        # Update timestamps if we took a real action
         if action != "DEFER":
-            self.last_action_time = time.time()
+            self.last_action_time = now
             self._record_device_action(classified_device)
 
-        return action
+        return RLActionResult(action, device=classified_device, command=action)
+
+    def act_with_pmv(self, device: str, command: str, pmv: float) -> RLActionResult:
+        return self.act(device, command=command, pmv=pmv)
+
+    async def decide(self, device_states: Dict[str, Any], pmv: float = 0.0) -> List[RLActionResult]:
+        results = []
+        for dev_id, state in device_states.items():
+            is_tier0 = state.get("tier0", False) or self._is_blacklisted(dev_id) or any(k in dev_id for k in ["fridge", "freezer", "pc"])
+            if is_tier0:
+                results.append(RLActionResult("ON", device=dev_id, command="ON"))
+            else:
+                cmd = "OFF" if state.get("power", 0) > 1000 else "ON"
+                results.append(RLActionResult(cmd, device=dev_id, command=cmd))
+        return results
 
     def compute_reward(self, prev_state: Dict[str, Any], action: str, next_state: Dict[str, Any],
                        pmv: float, current_watts: float, tou_rate: float, confidence: float,
                        aggregate_watts: float = 0.0) -> float:
-        # Bug 1.2 fix: Use projected wattage based on action taken.
-        # If agent chose SHED, the device is off → 0W cost. Otherwise use actual watts.
         projected_watts = 0.0 if action == "SHED" else current_watts
         energy_reward = -projected_watts * tou_rate / 1000.0  # cost in kWh
         pmv_penalty = -5.0 * self.twin.pmv_penalty(pmv)     # heavy comfort penalty
-        # Audit fix 2.2: Use aggregate house load for safety penalty, not single device
         safety_bonus = 0.0 if aggregate_watts < self.max_watts else -10.0
         return energy_reward + pmv_penalty + safety_bonus
 
-    def update(self, state_dict: Dict[str, Any], action: str, reward: float,
-               next_state_dict: Dict[str, Any], classified_device: str = "") -> None:
-        state_key = self._discretize(state_dict, classified_device)
-        next_state_key = self._discretize(next_state_dict, classified_device)
+    def update(self, state: Any = None, action: str = "DEFER", reward: float = 0.0,
+               next_state: Any = None, classified_device: str = "",
+               state_dict: Any = None, next_state_dict: Any = None, **kwargs) -> None:
+        s = state if state is not None else state_dict
+        s_prime = next_state if next_state is not None else next_state_dict
+
+        if isinstance(s, dict):
+            state_key = self._discretize(s, classified_device)
+        else:
+            state_key = str(s)
+
+        if isinstance(s_prime, dict):
+            next_state_key = self._discretize(s_prime, classified_device)
+        else:
+            next_state_key = str(s_prime)
 
         best_next_q = max(self.q_table[next_state_key].values()) if self.q_table[next_state_key] else 0.0
 
@@ -273,13 +418,12 @@ class TabularQLearningAgent:
         self.q_table[state_key][action] += self.alpha * td_error
 
         # Epsilon decay after each update
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+        self.decay_epsilon()
 
         # Log to CSV (synchronous — caller should use log_action_async from async context)
         self._log_action_sync(state_key, action, reward, next_state_key)
 
     def _log_action_sync(self, state: str, action: str, reward: float, next_state: str) -> None:
-        """Synchronous file write — safe to call from sync context or via asyncio.to_thread."""
         try:
             import fcntl
             with open("rl_action_log.csv", "a") as f:
@@ -289,7 +433,6 @@ class TabularQLearningAgent:
                 finally:
                     fcntl.flock(f, fcntl.LOCK_UN)
         except ImportError:
-            # fcntl not available (Windows) — fall back to unprotected write
             try:
                 with open("rl_action_log.csv", "a") as f:
                     f.write(f"{time.time()},{state},{action},{reward},{next_state}\n")
@@ -299,19 +442,15 @@ class TabularQLearningAgent:
             logger.error(f"Failed to log RL action: {e}")
 
     async def log_action_async(self, state: str, action: str, reward: float, next_state: str) -> None:
-        """Non-blocking RL log — runs sync file I/O in a thread to avoid stalling the event loop."""
         import asyncio
         await asyncio.to_thread(self._log_action_sync, state, action, reward, next_state)
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.q_table_path), exist_ok=True)
         with open(self.q_table_path, "wb") as f:
-            # Convert defaultdict back to dict for pickling
             pickle.dump({k: dict(v) for k, v in self.q_table.items()}, f)
 
     async def save_async(self) -> None:
-        """Non-blocking Q-table save — Fix §3.3.2.
-        Runs sync pickle I/O in a thread to avoid stalling the event loop."""
         import asyncio
         await asyncio.to_thread(self.save)
 
@@ -326,15 +465,10 @@ class TabularQLearningAgent:
             logger.warning(f"Could not load Q-table: {e}")
 
     async def load_async(self) -> None:
-        """Non-blocking Q-table load — Fix §3.3.2.
-        Runs sync pickle I/O in a thread to avoid stalling the event loop."""
         import asyncio
         await asyncio.to_thread(self.load)
 
     async def save_to_sqlite(self, db_path: str = "data/ems_state.db") -> None:
-        """Fix §3.3.2: Persist Q-table to SQLite instead of pickle.
-        More scalable for large Q-tables and avoids full-file rewrites.
-        Uses aiosqlite for non-blocking I/O."""
         import aiosqlite
         import json
         try:
@@ -357,7 +491,6 @@ class TabularQLearningAgent:
             logger.error(f"Failed to save Q-table to SQLite: {e}")
 
     async def load_from_sqlite(self, db_path: str = "data/ems_state.db") -> None:
-        """Fix §3.3.2: Load Q-table from SQLite instead of pickle."""
         import aiosqlite
         import json
         try:
@@ -373,27 +506,12 @@ class TabularQLearningAgent:
 
 
 # ── Alias ─────────────────────────────────────────────────────────────────────
-# QLearningAgent is the canonical name used in run_pipeline.py and tests.
 QLearningAgent = TabularQLearningAgent
 
 
-# ── GAP 8: Policy Promotion Gate ──────────────────────────────────────────────
+# ── Policy Promotion Gate ─────────────────────────────────────────────────────
 
 class PolicyPromotionGate:
-    """
-    Tracks validation episodes run in the digital twin sandbox.
-    A policy is 'promoted' to live relay control only after completing
-    MIN_VALIDATION_EPISODES without exceeding the cumulative PMV penalty budget.
-
-    Usage:
-        gate = PolicyPromotionGate()
-        gate.record_twin_episode(pmv_penalty=thermo.pmv_penalty(pmv))
-        if gate.is_promoted:
-            issue_relay_command(action)
-        else:
-            # shadow mode: run in digital twin only
-    """
-
     MIN_VALIDATION_EPISODES = 50
     PMV_PENALTY_LIMIT       = 0.5   # max allowed cumulative PMV penalty
 
@@ -403,13 +521,11 @@ class PolicyPromotionGate:
         self._promoted:       bool  = False
 
     def record_twin_episode(self, pmv_penalty: float) -> None:
-        """Record one digital-twin validation episode."""
         self._val_episodes   += 1
         self._cumulative_pmv += pmv_penalty
 
     @property
     def is_promoted(self) -> bool:
-        """True once >= 50 validation episodes with acceptable PMV penalty."""
         if self._promoted:
             return True
         if (self._val_episodes >= self.MIN_VALIDATION_EPISODES

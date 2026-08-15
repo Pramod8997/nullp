@@ -2,9 +2,48 @@
 Temperature Scaling — post-hoc confidence calibration.
 Reference: Guo et al., "On Calibration of Modern Neural Networks", ICML 2017.
 """
+from dataclasses import dataclass
+from typing import Optional
 import torch
 import torch.nn as nn
 import numpy as np
+
+
+@dataclass
+class ConfidenceGateResult:
+    action: str
+    event_type: Optional[str] = None
+    confidence: float = 0.0
+    threshold: float = 0.90
+
+
+def temperature_scale(logits: torch.Tensor, T: float = 1.0) -> torch.Tensor:
+    """
+    Applies temperature scaling to logits and returns softmax probabilities.
+    p_calibrated = softmax(logits / T)
+    """
+    return torch.softmax(logits / T, dim=-1)
+
+
+def confidence_gate(confidence: float, threshold: float = 0.90) -> ConfidenceGateResult:
+    """
+    Confidence gate for gating predictions to RL agent.
+    If confidence < threshold: returns action='SKIP_RL', event_type='LOW_CONFIDENCE'.
+    If confidence >= threshold: returns action='PASS_RL', event_type=None.
+    """
+    if confidence >= threshold:
+        return ConfidenceGateResult(
+            action="PASS_RL",
+            event_type=None,
+            confidence=confidence,
+            threshold=threshold,
+        )
+    return ConfidenceGateResult(
+        action="SKIP_RL",
+        event_type="LOW_CONFIDENCE",
+        confidence=confidence,
+        threshold=threshold,
+    )
 
 
 class TemperatureScaler(nn.Module):

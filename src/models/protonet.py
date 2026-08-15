@@ -12,7 +12,8 @@ Legacy compatibility classes are preserved below the new implementations.
 """
 import os
 import pickle
-from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional, Any, Union
 
 import numpy as np
 import torch
@@ -67,9 +68,6 @@ class CNN1DEncoder(nn.Module):
         self.project = nn.Linear(CNN_CHANNELS[-1], embed_dim)
         self.project_bn = nn.BatchNorm1d(embed_dim)
 
-        # Legacy attention (kept for backward compat with old test that uses encoder directly)
-        self._legacy_attention = _LegacyTemporalAttention(hidden_size=CNN_CHANNELS[-1])
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Supports two input shapes:
@@ -119,13 +117,46 @@ class PreCNNTemporalAttention(nn.Module):
             nn.Sigmoid(),
         )
 
+    def get_attention_weights(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (batch, 128) or (batch, 1, 128) -> (batch, 128) softmax weights."""
+        if x.dim() == 3:
+            x_flat = x.squeeze(1) if x.shape[1] == 1 else x.mean(dim=1)
+        else:
+            x_flat = x
+        return self.attn(x_flat)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (batch, 128) raw segment → (batch, 128) weighted."""
-        weights = self.attn(x)
+        weights = self.get_attention_weights(x)
+        if x.dim() == 3:
+            return x * weights.unsqueeze(1)
         return x * weights
 
 
-# ── 3. Full ProtoNet (Encoder + Attention) ──────────────────────────────────
+# ── 3. Full ProtoNet & CNNEncoder ──────────────────────────────────────────
+
+class CNNEncoder(nn.Module):
+    """
+    4-layer 1D CNN + Temporal Attention module producing 128D embeddings.
+    Maps (batch, 1, seq_len) or (batch, seq_len) -> (batch, EMBED_DIM).
+    """
+    def __init__(self, in_channels: int = 1, embed_dim: int = EMBED_DIM, seq_len: int = 128,
+                 input_size: Optional[int] = None, embedding_size: Optional[int] = None):
+        super().__init__()
+        if embedding_size is not None:
+            embed_dim = embedding_size
+        self.attention = PreCNNTemporalAttention(seq_len)
+        self.encoder   = CNN1DEncoder(in_channels=in_channels, embed_dim=embed_dim)
+
+    def get_attention_weights(self, x: torch.Tensor) -> torch.Tensor:
+        return self.attention.get_attention_weights(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        weighted = self.attention(x)
+        return self.encoder(weighted)
+
 
 class ProtoNet(nn.Module):
     """
@@ -140,8 +171,11 @@ class ProtoNet(nn.Module):
         self.attention = PreCNNTemporalAttention(seq_len)
         self.encoder   = CNN1DEncoder(embed_dim=embed_dim)
 
+    def get_attention_weights(self, x: torch.Tensor) -> torch.Tensor:
+        return self.attention.get_attention_weights(x)
+
     def embed(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (batch, 128) → (batch, EMBED_DIM)."""
+        """x: (batch, 128) or (batch, 1, 128) → (batch, EMBED_DIM)."""
         x = self.attention(x)
         return self.encoder(x)
 
@@ -196,16 +230,21 @@ class OpenMaxWeibull:
 
     # ── New API (index-based, matches phase-1 spec) ──────────────────────────
 
-    def fit(self, class_idx_or_embeddings, distances: Optional[np.ndarray] = None):
+    def fit(self, class_idx_or_embeddings, distances_or_embeddings=None):
         """
-        Two call signatures:
-          fit(class_idx: int, distances: np.ndarray)   ← new spec API
-          fit(embeddings_per_class: dict)               ← legacy API
+        Three call signatures:
+          fit(class_idx: int, distances: np.ndarray)             ← indexed API
+          fit(embeddings_per_class: dict)                        ← legacy API
+          fit(prototypes: dict, known_embeddings: dict)          ← 2-dict API
         """
         if isinstance(class_idx_or_embeddings, dict):
-            self._fit_legacy(class_idx_or_embeddings)
+            if isinstance(distances_or_embeddings, dict):
+                # 2-dict API: prototypes + embeddings
+                self._fit_from_prototypes(class_idx_or_embeddings, distances_or_embeddings)
+            else:
+                self._fit_legacy(class_idx_or_embeddings)
         else:
-            self._fit_indexed(int(class_idx_or_embeddings), distances)
+            self._fit_indexed(int(class_idx_or_embeddings), distances_or_embeddings)
 
     def _fit_indexed(self, class_idx: int, distances: np.ndarray):
         tail   = np.sort(distances)[-self.tail_size:]
@@ -214,11 +253,42 @@ class OpenMaxWeibull:
         params = exponweib.fit(tail, floc=0)
         self._weibull[class_idx] = params
 
+    def _fit_from_prototypes(self, prototypes: dict, known_embeddings: dict):
+        """Fit from explicit prototype dict + embeddings dict (verify_ml_agent API)."""
+        import scipy.stats
+        if not hasattr(self, '_weibull_by_name'):
+            self._weibull_by_name: Dict[str, Any] = {}
+
+        for cls_key in prototypes:
+            proto = prototypes[cls_key]
+            embs = known_embeddings[cls_key]
+            # Convert torch tensors to numpy
+            if isinstance(proto, torch.Tensor):
+                proto = proto.detach().cpu().numpy()
+            if isinstance(embs, torch.Tensor):
+                embs = embs.detach().cpu().numpy()
+            proto = np.atleast_1d(proto).flatten()
+            if embs.ndim == 1:
+                embs = embs.reshape(1, -1)
+
+            distances = np.linalg.norm(embs - proto, axis=1)
+            tail = np.sort(distances)[-self.tail_size:]
+            if len(tail) < 2:
+                tail = np.append(tail, tail[-1] + 1e-5)
+            shape, loc, scale = scipy.stats.weibull_min.fit(tail, floc=0)
+            self._weibull[cls_key] = (1, shape, loc, scale)
+            self._weibull_by_name[cls_key] = {
+                'shape': shape, 'loc': loc, 'scale': scale,
+                'prototype': proto
+            }
+
     def _fit_legacy(self, embeddings_per_class: Dict[str, np.ndarray]):
         """Legacy fit: stores embeddings and fits Weibull from distances to centroid."""
         import scipy.stats
         self._class_embeddings = embeddings_per_class
         for idx, (cls_name, embs) in enumerate(embeddings_per_class.items()):
+            if isinstance(embs, torch.Tensor):
+                embs = embs.detach().cpu().numpy()
             proto     = embs.mean(axis=0)
             distances = np.linalg.norm(embs - proto, axis=1)
             tail      = np.sort(distances)[-self.tail_size:]
@@ -239,16 +309,17 @@ class OpenMaxWeibull:
             return 0.0
         return float(exponweib.cdf(distance, *self._weibull[class_idx]))
 
-    def predict(self, distances: np.ndarray, softmax_probs: np.ndarray):
+    def predict(self, distances_or_embedding, softmax_probs=None):
         """
-        Args:
-            distances:     (N,) distance from query to each prototype
-            softmax_probs: (N,) raw softmax over known classes
+        Two call signatures:
+          predict(distances, softmax_probs)  → (revised_probs, is_unknown)
+          predict(embedding)                 → (pred_class, confidence, is_unknown)
+        """
+        if softmax_probs is None:
+            # Single-embedding API: compute distances to prototypes internally
+            return self._predict_embedding(distances_or_embedding)
 
-        Returns:
-            revised_probs: (N+1,) where index N = unknown class
-            is_unknown:    bool — True if P(unknown) > unknown_threshold
-        """
+        distances = distances_or_embedding
         N      = len(softmax_probs)
         ranked = np.argsort(-softmax_probs)
 
@@ -265,6 +336,59 @@ class OpenMaxWeibull:
 
         is_unknown = bool(full[-1] > self.unknown_threshold)
         return full, is_unknown
+
+    def _predict_embedding(self, embedding):
+        """
+        Single-embedding prediction: computes distances to stored prototypes,
+        runs Weibull CDF, returns (pred_class, confidence, is_unknown).
+        """
+        if isinstance(embedding, torch.Tensor):
+            embedding = embedding.detach().cpu().numpy()
+        embedding = np.atleast_1d(embedding).flatten()
+
+        # Use legacy name-based prototypes if available
+        if hasattr(self, '_weibull_by_name') and self._weibull_by_name:
+            import scipy.stats
+            class_names = list(self._weibull_by_name.keys())
+            distances = []
+            for cls_name in class_names:
+                proto = self._weibull_by_name[cls_name]['prototype']
+                d = float(np.linalg.norm(embedding - proto))
+                distances.append(d)
+            distances = np.array(distances)
+
+            # Compute softmax over negative distances
+            neg_d = -distances
+            neg_d -= neg_d.max()
+            exp_d = np.exp(neg_d)
+            softmax_probs = exp_d / (exp_d.sum() + 1e-12)
+
+            # Compute Weibull CDF for each class
+            psi = np.zeros(len(class_names))
+            for i, cls_name in enumerate(class_names):
+                p = self._weibull_by_name[cls_name]
+                cdf = scipy.stats.weibull_min.cdf(
+                    distances[i], p['shape'], loc=p['loc'], scale=p['scale']
+                )
+                psi[i] = float(cdf)
+
+            revised = softmax_probs * (1.0 - psi)
+            p_unknown = float(np.sum(softmax_probs * psi))
+            full = np.append(revised, p_unknown)
+            full /= full.sum() + 1e-12
+
+            is_unknown = bool(full[-1] > self.unknown_threshold)
+            pred_class = int(np.argmax(full[:-1]))
+            confidence = float(full[pred_class])
+            return pred_class, confidence, is_unknown
+
+        # Fallback: use index-based prototypes
+        if not self._weibull:
+            return 0, 0.0, True
+
+        class_indices = sorted(self._weibull.keys())
+        # Cannot compute distances without stored prototypes
+        return 0, 0.0, True
 
     # ── Legacy API (used by old SupportSetManager tests) ────────────────────
 
@@ -315,6 +439,73 @@ class OpenMaxWeibull:
 
 # Alias used by existing tests
 WEibullOpenMax = OpenMaxWeibull
+
+
+class WeibullModel:
+    """Fitted Weibull tail distribution parameters."""
+    def __init__(self, shape: float, scale: float, loc: float = 0.0):
+        self.shape = float(shape)
+        self.scale = float(scale)
+        self.loc = float(loc)
+
+    def __repr__(self) -> str:
+        return f"WeibullModel(shape={self.shape:.4f}, scale={self.scale:.4f}, loc={self.loc:.4f})"
+
+
+def fit_weibull(distances: Any, tail_size: int = 20) -> WeibullModel:
+    """Fit a Weibull distribution to the tail of distances."""
+    import scipy.stats
+    distances_arr = np.asarray(distances, dtype=np.float64)
+    tail = np.sort(distances_arr)[-tail_size:]
+    if len(tail) < 2:
+        tail = np.append(tail, tail[-1] + 1e-5)
+    shape, loc, scale = scipy.stats.weibull_min.fit(tail, floc=0)
+    return WeibullModel(shape=shape, scale=scale, loc=loc)
+
+
+def weibull_cdf(weibull: WeibullModel, distance: float) -> float:
+    """Compute the Weibull CDF at distance."""
+    import scipy.stats
+    return float(scipy.stats.weibull_min.cdf(
+        distance, weibull.shape, loc=weibull.loc, scale=weibull.scale
+    ))
+
+
+class OpenMaxClassifier:
+    """
+    OpenMax Classifier: fits Weibull distributions to prototype distance tails
+    to identify and reject open-set unknown samples at inference time.
+    """
+    def __init__(self, tail_size: int = 20, threshold: float = 0.99):
+        self.tail_size = tail_size
+        self.threshold = threshold
+        self.prototypes: Dict[str, np.ndarray] = {}
+        self.weibull_models: Dict[str, WeibullModel] = {}
+
+    def fit(self, training_embeds: Dict[str, Any]) -> None:
+        """Fit class centroids (prototypes) and per-class Weibull tail models."""
+        for cls_name, embs in training_embeds.items():
+            arr = np.asarray(embs, dtype=np.float64)
+            proto = np.mean(arr, axis=0)
+            dists = np.linalg.norm(arr - proto, axis=1)
+            self.prototypes[cls_name] = proto
+            self.weibull_models[cls_name] = fit_weibull(dists, tail_size=self.tail_size)
+
+    def predict(self, query: Any) -> str:
+        """
+        Predict class label or 'unknown' if distance tail CDF exceeds threshold.
+        """
+        if not self.prototypes:
+            return "unknown"
+        query_arr = np.asarray(query, dtype=np.float64)
+        dists = {cls_name: float(np.linalg.norm(query_arr - proto))
+                 for cls_name, proto in self.prototypes.items()}
+        best_cls = min(dists, key=dists.get)
+        best_dist = dists[best_cls]
+        cdf = weibull_cdf(self.weibull_models[best_cls], best_dist)
+        if cdf > self.threshold:
+            return "unknown"
+        return best_cls
 
 
 # ── 5. Prototype Registry (incremental, no encoder retraining) ───────────────
@@ -395,6 +586,14 @@ class SupportSetManager:
 
     def __init__(self):
         self.raw_windows: Dict[str, List[np.ndarray]] = {}
+
+    def add(self, class_name: str, window: np.ndarray) -> None:
+        self.add_support(class_name, window)
+
+    def get_prototype(self, class_name: str) -> Optional[np.ndarray]:
+        if class_name not in self.raw_windows or len(self.raw_windows[class_name]) == 0:
+            return None
+        return np.mean(self.raw_windows[class_name], axis=0)
 
     def add_support(self, class_name: str, window: np.ndarray) -> None:
         if class_name not in self.raw_windows:
@@ -537,3 +736,55 @@ class TemperatureScaler(nn.Module):
 
     def load(self, path: str) -> None:
         self.load_state_dict(torch.load(path, map_location='cpu'))
+
+
+# ── 8. Utility & Routing Functions ──────────────────────────────────────────
+
+@dataclass
+class ProtonetRoutingResult:
+    classified: bool
+    route_to_openmax: bool
+
+
+def compute_prototype(embeddings: Union[List[np.ndarray], np.ndarray]) -> np.ndarray:
+    """Compute mean prototype from a collection of embeddings."""
+    return np.mean(embeddings, axis=0)
+
+
+def euclidean_distance_squared(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute squared Euclidean distance between two vectors."""
+    diff = np.asarray(a) - np.asarray(b)
+    return float(np.sum(diff ** 2))
+
+
+def protonet_softmax(distances: Union[Dict[str, float], np.ndarray, List[float]]) -> Union[Dict[str, float], np.ndarray]:
+    """
+    Compute softmax probabilities over negative distances: P(y=k) = exp(-d_k) / sum(exp(-d_j)).
+    Supports either a dictionary of {class_name: distance} or array/list of distances.
+    """
+    if isinstance(distances, dict):
+        keys = list(distances.keys())
+        d_vals = np.array([distances[k] for k in keys], dtype=np.float64)
+        logits = -d_vals
+        logits_shifted = logits - np.max(logits)
+        exp_logits = np.exp(logits_shifted)
+        probs = exp_logits / np.sum(exp_logits)
+        return {k: float(p) for k, p in zip(keys, probs)}
+    else:
+        d_vals = np.array(distances, dtype=np.float64)
+        logits = -d_vals
+        logits_shifted = logits - np.max(logits)
+        exp_logits = np.exp(logits_shifted)
+        probs = exp_logits / np.sum(exp_logits)
+        return probs
+
+
+def protonet_classify_or_reject(min_distance: float, threshold: float = 15.0) -> ProtonetRoutingResult:
+    """
+    Route query to closed-set classification or reject to OpenMax based on distance threshold.
+    """
+    if min_distance <= threshold:
+        return ProtonetRoutingResult(classified=True, route_to_openmax=False)
+    else:
+        return ProtonetRoutingResult(classified=False, route_to_openmax=True)
+

@@ -137,8 +137,8 @@ async def test_submit_label_with_valid_api_key(transport):
 
 
 @pytest.mark.asyncio
-async def test_submit_label_no_auth_required_when_key_unset(transport):
-    """When EMS_API_KEY is not set, any request should be accepted."""
+async def test_submit_label_rejects_when_key_unset(transport):
+    """Fix Issue #1: When EMS_API_KEY is not set, requests should be REJECTED (401)."""
     # Ensure key is not set
     os.environ.pop("EMS_API_KEY", None)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -146,14 +146,14 @@ async def test_submit_label_no_auth_required_when_key_unset(transport):
             "/api/submit-label",
             json={"device_id": "test_device", "label": "fridge"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 401
 
 
 # ─── Input Validation (Issue #9) ────────────────────────────────────
 @pytest.mark.asyncio
 async def test_submit_label_rejects_oversized_segments(transport):
     """Issue #9: Reject more than 100 segments."""
-    os.environ.pop("EMS_API_KEY", None)
+    os.environ["EMS_API_KEY"] = "test-key"
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/submit-label",
@@ -162,6 +162,7 @@ async def test_submit_label_rejects_oversized_segments(transport):
                 "label": "fridge",
                 "segments": [[0.0] * 128] * 101,  # 101 > 100 limit
             },
+            headers={"X-API-Key": "test-key"},
         )
         assert response.status_code == 422  # Validation error
 
@@ -169,7 +170,7 @@ async def test_submit_label_rejects_oversized_segments(transport):
 @pytest.mark.asyncio
 async def test_submit_label_rejects_wrong_dimension_segments(transport):
     """Issue #9: Reject segments with wrong dimension (not 128)."""
-    os.environ.pop("EMS_API_KEY", None)
+    os.environ["EMS_API_KEY"] = "test-key"
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/submit-label",
@@ -178,6 +179,7 @@ async def test_submit_label_rejects_wrong_dimension_segments(transport):
                 "label": "fridge",
                 "segments": [[0.0] * 64],  # 64 != 128
             },
+            headers={"X-API-Key": "test-key"},
         )
         assert response.status_code == 422
 
@@ -185,7 +187,7 @@ async def test_submit_label_rejects_wrong_dimension_segments(transport):
 @pytest.mark.asyncio
 async def test_submit_label_rejects_long_device_id(transport):
     """Issue #9: Reject device_id longer than 64 chars."""
-    os.environ.pop("EMS_API_KEY", None)
+    os.environ["EMS_API_KEY"] = "test-key"
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/submit-label",
@@ -193,6 +195,7 @@ async def test_submit_label_rejects_long_device_id(transport):
                 "device_id": "x" * 65,
                 "label": "fridge",
             },
+            headers={"X-API-Key": "test-key"},
         )
         assert response.status_code == 422
 

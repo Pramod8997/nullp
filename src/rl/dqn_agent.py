@@ -83,24 +83,41 @@ class QNetwork(nn.Module):
         return self.net(x)
 
 
+class Experience:
+    def __init__(self, state: np.ndarray, action: int, reward: float,
+                 next_state: np.ndarray, done: bool = False):
+        self.state = state
+        self.action = action
+        self.reward = reward
+        self.next_state = next_state
+        self.done = done
+
+    def __iter__(self):
+        return iter((self.state, self.action, self.reward, self.next_state, self.done))
+
+
 class ReplayBuffer:
     """Fixed-size circular experience replay buffer."""
 
     def __init__(self, capacity: int = REPLAY_BUFFER_SIZE):
+        self.capacity = capacity
         self.buffer: deque = deque(maxlen=capacity)
 
     def push(self, state: np.ndarray, action: int, reward: float,
-             next_state: np.ndarray, done: bool) -> None:
-        self.buffer.append((state, action, reward, next_state, done))
+             next_state: np.ndarray, done: bool = False) -> None:
+        self.buffer.append(Experience(state, action, reward, next_state, done))
 
-    def sample(self, batch_size: int) -> Tuple:
+    def sample(self, batch_size: int) -> List[Experience]:
+        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
+
+    def sample_tensors(self, batch_size: int) -> Tuple:
         batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
-        states, actions, rewards, next_states, dones = zip(*batch)
-        return (np.array(states, dtype=np.float32),
-                np.array(actions, dtype=np.int64),
-                np.array(rewards, dtype=np.float32),
-                np.array(next_states, dtype=np.float32),
-                np.array(dones, dtype=np.float32))
+        states = np.array([b.state for b in batch], dtype=np.float32)
+        actions = np.array([b.action for b in batch], dtype=np.int64)
+        rewards = np.array([b.reward for b in batch], dtype=np.float32)
+        next_states = np.array([b.next_state for b in batch], dtype=np.float32)
+        dones = np.array([b.done for b in batch], dtype=np.float32)
+        return (states, actions, rewards, next_states, dones)
 
     def __len__(self) -> int:
         return len(self.buffer)
@@ -387,7 +404,7 @@ class DQNAgent:
 
     def _train_step(self) -> None:
         """Perform one gradient step on a batch from replay buffer."""
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample(
+        states, actions, rewards, next_states, dones = self.replay_buffer.sample_tensors(
             self.batch_size
         )
 

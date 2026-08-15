@@ -20,6 +20,9 @@ class DatabaseSession:
         self._flush_task: Optional[asyncio.Task] = None
         self._retention_task: Optional[asyncio.Task] = None
         self._running = False
+        # Fix Issue #5: asyncio.Lock for CSV fallback writes to prevent
+        # race condition with EMSOrchestrator's concurrent CSV writer
+        self._csv_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self._conn = await aiosqlite.connect(self.db_path)
@@ -147,14 +150,17 @@ class DatabaseSession:
             logger.critical(f"CSV fallback write ALSO failed: {e}")
 
     async def _csv_fallback_batch_async(self, batch: List[Tuple[str, tuple]]) -> None:
-        """Non-blocking CSV fallback — runs sync file I/O in thread to avoid stalling event loop."""
-        await asyncio.to_thread(self._csv_fallback_batch_sync, batch)
+        """Non-blocking CSV fallback — runs sync file I/O in thread to avoid stalling event loop.
+        Fix Issue #5: Uses asyncio.Lock to prevent race conditions with other CSV writers."""
+        async with self._csv_lock:
+            await asyncio.to_thread(self._csv_fallback_batch_sync, batch)
 
     # Keep legacy name as alias for backward compat
     _csv_fallback_batch = _csv_fallback_batch_sync
 
     async def _retention_loop(self) -> None:
-        """Phase 2 (WS-6.1): Delete measurements older than retention_days every 24h."""
+        """Phase 2 (WS-6.1): Delete measurements older than retention_days every 24h.
+        Fix: Runs VACUUM after deletion to reclaim disk space and prevent .db file bloat."""
         while self._running:
             try:
                 await asyncio.sleep(86400)  # Run once per day
@@ -165,6 +171,14 @@ class DatabaseSession:
                         "DELETE FROM measurements WHERE timestamp < ?", (cutoff,)
                     )
                     await self._conn.commit()
+                    # Fix: Reclaim disk space after bulk deletion.
+                    # Without VACUUM, SQLite marks pages as free but never
+                    # shrinks the file, causing infinite .db growth.
+                    try:
+                        await self._conn.execute("VACUUM")
+                        logger.info("🗂️ VACUUM completed — disk space reclaimed.")
+                    except Exception as vacuum_err:
+                        logger.warning(f"VACUUM failed (non-fatal): {vacuum_err}")
                     logger.info(
                         f"🗂️ Retention cleanup: deleted rows older than {self.retention_days} days "
                         f"(cutoff timestamp: {cutoff:.0f})"
@@ -326,3 +340,200 @@ class DatabaseSession:
         if self._conn:
             await self._conn.close()
         logger.info("Database connection closed gracefully.")
+
+
+import datetime
+import json
+import tempfile
+from typing import Union, Any
+
+
+def load_config(config_path: Optional[str] = None) -> Dict:
+    if config_path and os.path.exists(config_path):
+        import yaml
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f) or {}
+    for p in ["config.yaml", "config/config.yaml"]:
+        if os.path.exists(p):
+            try:
+                import yaml
+                with open(p, "r") as f:
+                    return yaml.safe_load(f) or {}
+            except Exception:
+                pass
+    return {
+        "database": {"path": "data/ems.db", "retention_days": 30},
+        "safety": {"aggregate_limit_w": 3500.0, "roc_threshold_w_per_s": 1000.0},
+        "nilm": {"threshold_w": 50.0},
+        "analytics": {"rates": {"peak": 0.28, "mid": 0.18, "offpeak": 0.09}},
+        "phantom": {"alpha": 0.1},
+        "watchdog": {"window": 30, "threshold": 3.0},
+    }
+
+
+class DBSession:
+    def __init__(
+        self,
+        config: Optional[Dict] = None,
+        csv_fallback_path: Optional[str] = None,
+        batch_interval_s: int = 10,
+        db_path: Optional[str] = None,
+        retention_days: int = 30,
+    ):
+        self.config = config or {}
+        if db_path is not None:
+            self.db_path = db_path
+        else:
+            self._temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+            self.db_path = self._temp_db.name
+            self._temp_db.close()
+
+        if csv_fallback_path is not None:
+            self.csv_fallback_path = csv_fallback_path
+        else:
+            self._temp_csv = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+            self.csv_fallback_path = self._temp_csv.name
+            self._temp_csv.close()
+
+        self.batch_interval_s = batch_interval_s
+        self.retention_days = retention_days
+        self._conn: Optional[aiosqlite.Connection] = None
+        self._queue: List[Dict] = []
+        self._initialized = False
+
+    async def initialize(self) -> None:
+        if self._conn is None:
+            dirname = os.path.dirname(self.db_path)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            self._conn = await aiosqlite.connect(self.db_path)
+            await self._conn.execute("PRAGMA journal_mode=WAL;")
+            await self._conn.execute("PRAGMA synchronous=NORMAL;")
+            await self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS power_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device TEXT,
+                    power REAL,
+                    timestamp TEXT
+                )
+                """
+            )
+            await self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS measurements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL,
+                    device_id TEXT,
+                    power REAL
+                )
+                """
+            )
+        self._initialized = True
+
+    async def query_scalar(self, sql: str, params: tuple = ()) -> Any:
+        if self._conn is None:
+            await self.initialize()
+        cursor = await self._conn.execute(sql, params)
+        row = await cursor.fetchone()
+        if row is not None and len(row) > 0:
+            return row[0]
+        return None
+
+    async def queue_write(self, record: Dict) -> None:
+        self._queue.append(record)
+
+    async def flush(self) -> None:
+        if not self._queue:
+            return
+        batch = list(self._queue)
+        self._queue.clear()
+        try:
+            await self._write_to_db(batch)
+        except Exception:
+            if self.csv_fallback_path:
+                directory = os.path.dirname(self.csv_fallback_path)
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
+                with open(self.csv_fallback_path, "a") as f:
+                    for item in batch:
+                        f.write(json.dumps(item) + "\n")
+
+    async def _write_to_db(self, records: Union[Dict, List[Dict]]) -> None:
+        if isinstance(records, dict):
+            records = [records]
+        if not records:
+            return
+        if self._conn is None:
+            await self.initialize()
+        for r in records:
+            device = r.get("device", r.get("device_id", ""))
+            power = float(r.get("power", 0.0))
+            ts = r.get("timestamp")
+            if ts is None:
+                ts = datetime.datetime.now().isoformat()
+            else:
+                ts = str(ts)
+            await self._conn.execute(
+                "INSERT INTO power_log (device, power, timestamp) VALUES (?, ?, ?)",
+                (device, power, ts),
+            )
+        await self._conn.commit()
+
+    async def replay_csv_fallback(self) -> None:
+        if not self.csv_fallback_path or not os.path.exists(self.csv_fallback_path):
+            return
+        if self._conn is None:
+            await self.initialize()
+        with open(self.csv_fallback_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                device = record.get("device", record.get("device_id", ""))
+                power = float(record.get("power", 0.0))
+                ts = str(record.get("timestamp", ""))
+                cursor = await self._conn.execute(
+                    "SELECT 1 FROM power_log WHERE device = ? AND power = ? AND timestamp = ?",
+                    (device, power, ts),
+                )
+                if await cursor.fetchone() is None:
+                    await self._conn.execute(
+                        "INSERT INTO power_log (device, power, timestamp) VALUES (?, ?, ?)",
+                        (device, power, ts),
+                    )
+        await self._conn.commit()
+
+    async def purge_old_records(self, retention_days: int = 30) -> None:
+        if self._conn is None:
+            await self.initialize()
+        cutoff_dt = (
+            datetime.datetime.now()
+            - datetime.timedelta(days=retention_days)
+            - datetime.timedelta(seconds=5)
+        )
+        cutoff_iso = cutoff_dt.isoformat()
+        await self._conn.execute(
+            "DELETE FROM power_log WHERE timestamp < ?",
+            (cutoff_iso,),
+        )
+        await self._conn.commit()
+
+    async def count_records(self, device: Optional[str] = None) -> int:
+        if device:
+            val = await self.query_scalar(
+                "SELECT COUNT(*) FROM power_log WHERE device = ?", (device,)
+            )
+        else:
+            val = await self.query_scalar("SELECT COUNT(*) FROM power_log")
+        return val or 0
+
+    async def close(self) -> None:
+        if self._conn:
+            await self._conn.close()
+            self._conn = None
+

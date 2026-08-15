@@ -275,8 +275,14 @@ void callback(char* topic, byte* payload, unsigned int length) {
     // Any message from server = heartbeat
     lastServerHB = millis();
 
-    // Patch 13: Pre-allocate buffer to prevent heap fragmentation
-    char msg[length + 1];
+    // Fix: Bounded static buffer prevents stack overflow from oversized payloads
+    // on the small FreeRTOS task stack.
+    static const unsigned int MAX_MQTT_PAYLOAD = 256;
+    if (length > MAX_MQTT_PAYLOAD) {
+        Serial.printf("[MQTT] Payload too large (%u bytes), dropping.\n", length);
+        return;
+    }
+    char msg[MAX_MQTT_PAYLOAD + 1];
     memcpy(msg, payload, length);
     msg[length] = '\0';
     String message = String(msg);

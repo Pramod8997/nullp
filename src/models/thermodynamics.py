@@ -151,3 +151,121 @@ class ThermodynamicsModel(PMVThermodynamics):
 
 # Module-level singletons for backward compat
 pmv_model       = ThermodynamicsModel()
+
+
+# ── ISO 7730 Standalone Functional API ───────────────────────────────────────
+
+def compute_pa(ta: float, rh: float) -> float:
+    """
+    Compute partial water vapour pressure (Pa).
+    pa = rh * 10 * exp(16.6536 - 4030.183 / (ta + 235))
+    where rh is relative humidity in % (0-100).
+    """
+    return rh * 10.0 * math.exp(16.6536 - 4030.183 / (ta + 235.0))
+
+
+def compute_fcl(Icl_m2KW: float = None, Icl: float = None) -> float:
+    """
+    Clothing area factor fcl.
+    fcl = 1.00 + 1.290 * Icl (if Icl <= 0.078 m²K/W)
+          1.05 + 0.645 * Icl (if Icl > 0.078 m²K/W)
+    """
+    val = Icl_m2KW if Icl_m2KW is not None else (Icl if Icl is not None else 0.0)
+    if val <= 0.078:
+        return 1.00 + 1.290 * val
+    return 1.05 + 0.645 * val
+
+
+def compute_hc(tcl: float, ta: float, var: float) -> float:
+    """
+    Convective heat transfer coefficient hc (W/(m²·K)).
+    hc = max(2.38 * |tcl - ta|^0.25, 12.1 * sqrt(var))
+    """
+    return max(2.38 * (abs(tcl - ta) ** 0.25), 12.1 * math.sqrt(max(var, 0.0)))
+
+
+def compute_tcl(M: float = 70.0, W: float = 0.0, ta: float = 22.0, tr: float = 22.0,
+                var: float = 0.1, Icl: float = 1.0) -> float:
+    """
+    Compute clothing surface temperature tcl (°C) iteratively.
+    Icl is clothing insulation in clo.
+    """
+    if Icl < 0.5:
+        f_cl = 1.0 + 1.290 * Icl
+    else:
+        f_cl = 1.05 + 0.645 * Icl
+
+    m = M - W
+    i_cl = 0.155 * Icl
+
+    t_cl_init = 35.7 - 0.028 * m
+    t_cl = t_cl_init - i_cl * (
+        3.96e-8 * f_cl * ((t_cl_init + 273.0) ** 4 - (tr + 273.0) ** 4) +
+        f_cl * 2.38 * (abs(t_cl_init - ta) ** 0.25) * (t_cl_init - ta)
+    )
+    t_cl = float(np.clip(t_cl, ta - 5, ta + 30))
+
+    for _ in range(150):
+        hc = max(2.38 * abs(t_cl - ta) ** 0.25, 12.1 * math.sqrt(max(var, 0.0)))
+        try:
+            rad_term = 3.96e-8 * f_cl * ((t_cl + 273.0) ** 4 - (tr + 273.0) ** 4)
+        except (OverflowError, ValueError):
+            rad_term = 0.0
+        t_cl_new = 35.7 - 0.028 * m - i_cl * (rad_term + f_cl * hc * (t_cl - ta))
+        t_cl_new = float(np.clip(t_cl_new, -10.0, 60.0))
+        if abs(t_cl_new - t_cl) < 0.001:
+            t_cl = t_cl_new
+            break
+        t_cl = 0.9 * t_cl + 0.1 * t_cl_new
+
+    return round(float(t_cl), 4)
+
+
+def compute_pmv(M: float = 70.0, W: float = 0.0, ta: float = 22.0, tr: float = 22.0,
+                var: float = 0.1, rh: float = 60.0, Icl: float = 1.0) -> float:
+    """
+    Compute Predicted Mean Vote (PMV) according to ISO 7730.
+    """
+    if Icl < 0.5:
+        f_cl = 1.0 + 1.290 * Icl
+    else:
+        f_cl = 1.05 + 0.645 * Icl
+
+    m = M - W
+    pa = compute_pa(ta, rh)
+    t_cl = compute_tcl(M=M, W=W, ta=ta, tr=tr, var=var, Icl=Icl)
+    hc = compute_hc(t_cl, ta, var)
+
+    hl1 = 3.05e-3 * (5733.0 - 6.99 * m - pa)
+    hl2 = 0.42 * max(0.0, m - 58.15)
+    hl3 = 1.7e-5 * M * (5867.0 - pa)
+    hl4 = 0.0014 * M * (34.0 - ta)
+    try:
+        hl5 = 3.96e-8 * f_cl * ((t_cl + 273.0) ** 4 - (tr + 273.0) ** 4)
+    except (OverflowError, ValueError):
+        hl5 = 0.0
+    hl6 = f_cl * hc * (t_cl - ta)
+
+    L = m - hl1 - hl2 - hl3 - hl4 - hl5 - hl6
+    pmv_val = (0.303 * math.exp(-0.036 * M) + 0.028) * L
+    return round(float(np.clip(pmv_val, -3.0, 3.0)), 4)
+
+
+def compute_ppd(pmv: float) -> float:
+    """
+    Compute Predicted Percentage of Dissatisfied (PPD) from PMV.
+    PPD = 100 - 95 * exp(-0.03353 * PMV^4 - 0.2179 * PMV^2)
+    """
+    return round(float(100.0 - 95.0 * math.exp(-0.03353 * (pmv ** 4) - 0.2179 * (pmv ** 2))), 4)
+
+
+def rl_agent_may_shed(device: str, pmv: float) -> bool:
+    """
+    Check if a device may be shed given the current PMV comfort value.
+    For HVAC devices, shedding is blocked inside the comfort zone (-0.5 < PMV < 0.5).
+    """
+    if "hvac" in device.lower():
+        return abs(pmv) >= 0.5
+    return True
+
+

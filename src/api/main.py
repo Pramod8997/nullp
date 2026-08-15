@@ -217,7 +217,7 @@ _shared_db: Optional[aiosqlite.Connection] = None
 async def verify_api_key(x_api_key: str = Header(None)):
     """Dependency that checks X-API-Key header against EMS_API_KEY env var."""
     expected = os.environ.get("EMS_API_KEY")
-    if expected and x_api_key != expected:
+    if not expected or x_api_key != expected:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -475,6 +475,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Digital Twin EMS", lifespan=lifespan)
+app.state.broadcast = manager.broadcast
 
 # Issue #8: Restrict CORS to specific trusted origins
 allowed_origins = os.environ.get(

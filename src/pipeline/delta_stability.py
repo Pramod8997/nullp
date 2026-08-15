@@ -156,3 +156,84 @@ class DeltaStabilityAnalyzer:
         self._temp_log.clear()
         self._last_stable_mean = None
         self._last_stable_hits = 0
+
+
+class LabelRequestEvent:
+    """Represents a LABEL_REQUEST event emitted when an unknown device is stable."""
+    def __init__(self, event_type: str = "LABEL_REQUEST",
+                 cluster_mean: Optional[np.ndarray] = None,
+                 embedding: Optional[np.ndarray] = None,
+                 timestamp: Optional[float] = None,
+                 hits: int = 0):
+        self.event_type = event_type
+        self.cluster_mean = cluster_mean
+        self.embedding = embedding
+        self.timestamp = timestamp
+        self.hits = hits
+
+    def __repr__(self) -> str:
+        return f"LabelRequestEvent(event_type={self.event_type}, hits={self.hits})"
+
+
+class DeltaStabilityTracker:
+    """
+    Async delta stability tracker buffering unknown embeddings.
+    Emits a LABEL_REQUEST event when min_occurrences stable embeddings are observed.
+    """
+    def __init__(self, buffer_size: int = 10, std_threshold: float = 3.0,
+                 min_occurrences: int = 3, **kwargs):
+        self.buffer_size = buffer_size
+        self.std_threshold = std_threshold
+        self.min_occurrences = min_occurrences
+        self.buffer: deque = deque(maxlen=buffer_size)
+        self._analyzer = DeltaStabilityAnalyzer(
+            window=buffer_size,
+            threshold=std_threshold,
+            min_count=min_occurrences
+        )
+
+    def _add_to_buffer(self, embedding: np.ndarray):
+        self.buffer.append(np.asarray(embedding, dtype=np.float32))
+
+    async def process(self, embedding: np.ndarray, timestamp: Optional[float] = None) -> Optional[LabelRequestEvent]:
+        emb = np.asarray(embedding, dtype=np.float32)
+        self._add_to_buffer(emb)
+
+        if len(self.buffer) < self.min_occurrences:
+            return None
+
+        # Calculate distances across all embeddings in buffer
+        embeddings = np.stack(list(self.buffer))
+        dists = np.linalg.norm(embeddings - emb, axis=1)
+        close_mask = dists <= self.std_threshold
+        close_count = int(np.sum(close_mask))
+
+        if close_count >= self.min_occurrences:
+            cluster_mean = embeddings[close_mask].mean(axis=0)
+            return LabelRequestEvent(
+                event_type="LABEL_REQUEST",
+                cluster_mean=cluster_mean,
+                embedding=emb,
+                timestamp=timestamp,
+                hits=close_count
+            )
+        return None
+
+    def reset(self):
+        self.buffer.clear()
+        self._analyzer.reset()
+
+
+class DeltaStabilityStage(DeltaStabilityTracker):
+    """Pipeline Stage 4 wrapper for Delta Stability."""
+    def __init__(self, config: Optional[dict] = None, **kwargs):
+        buffer_size = 10
+        std_threshold = 3.0
+        min_occurrences = 3
+        if config and isinstance(config, dict):
+            buffer_size = config.get("delta_stability_window", buffer_size)
+            std_threshold = config.get("delta_stability_threshold", std_threshold)
+            min_occurrences = config.get("delta_stability_min_count", min_occurrences)
+        super().__init__(buffer_size=buffer_size, std_threshold=std_threshold,
+                         min_occurrences=min_occurrences, **kwargs)
+

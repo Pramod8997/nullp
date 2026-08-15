@@ -24,3 +24,12 @@ class ModeClassifier:
             return "MULTI_DEVICE_AGGREGATE"
             
         return "SINGLE_DEVICE_STABLE"
+
+
+# Export OpenMax components for pipeline access
+from src.models.protonet import (  # noqa: E402
+    OpenMaxClassifier,
+    fit_weibull,
+    weibull_cdf,
+    WeibullModel,
+)

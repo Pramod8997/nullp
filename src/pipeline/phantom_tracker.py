@@ -5,16 +5,43 @@ that occur when devices are nominally turned off.
 """
 
 class PhantomTracker:
-    def __init__(self, baseline_threshold_watts: float = 5.0):
+    def __init__(self, baseline_threshold_watts: float = 5.0, alpha: float = 0.1):
         """
         Initialize the Micro-Load Tracker.
         
         Args:
             baseline_threshold_watts: Maximum power draw considered to be a phantom load.
+            alpha: Smoothing factor for exponential moving average (default: 0.1).
         """
         self.baseline_threshold = baseline_threshold_watts
+        self.alpha = alpha
         self.phantom_loads = {}
         
+    def update(self, device_id: str, power: float, state: str = "OFF"):
+        """
+        Update the phantom load EMA for a device given its current power and state.
+        
+        Args:
+            device_id: Identifier for the device.
+            power: Current power draw in watts.
+            state: Device state ('OFF' or 'ON').
+        """
+        if state.upper() == "OFF":
+            ema_old = self.phantom_loads.get(device_id, 0.0)
+            self.phantom_loads[device_id] = self.alpha * power + (1 - self.alpha) * ema_old
+
+    def get_ema(self, device_id: str) -> float:
+        """
+        Get the current EMA phantom load for a device.
+        
+        Args:
+            device_id: Identifier for the device.
+            
+        Returns:
+            float: Current EMA value (0.0 if not tracked).
+        """
+        return self.phantom_loads.get(device_id, 0.0)
+
     def track(self, device_id: str, power_draw: float, is_nominally_off: bool):
         """
         Track potential phantom load for a device.

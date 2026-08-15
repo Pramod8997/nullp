@@ -17,7 +17,7 @@ import logging
 import numpy as np
 from collections import deque
 from scipy.signal import savgol_filter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,27 @@ class NILMTransientDetector:
             return True, segment.astype(np.float32)
 
         return False, None
+
+    def get_current_segment(self) -> Optional[np.ndarray]:
+        """Extract the current buffer as a CNN-ready segment without requiring a transient.
+
+        Used during post-transient ticks to feed the DeltaStabilityAnalyzer
+        with steady-state embeddings, fixing the OpenMax starvation bug where
+        the analyzer was starved of the min_occurrences=3 consecutive embeddings
+        needed to flag stable unknowns.
+
+        Returns:
+            (embed_window,) float32 array, or None if buffer is too small.
+        """
+        if len(self._buffer) < self.embed_window:
+            if len(self._buffer) < self.sg_window:
+                return None
+            # Zero-pad on left if buffer is smaller than embed_window
+            arr = np.array(self._buffer, dtype=np.float32)
+            return np.pad(arr, (self.embed_window - len(arr), 0),
+                          mode='constant').astype(np.float32)
+        arr = np.array(self._buffer[-self.embed_window:], dtype=np.float32)
+        return arr
 
     def reset(self):
         self._buffer.clear()
@@ -284,3 +305,61 @@ class OverlapAwareNILMDetector:
 
 # Keep a module-level singleton for backward compatibility
 nilm_detector = NILMTransientDetector()
+
+
+def savitzky_golay(signal: np.ndarray, window_length: int = 11, polyorder: int = 2) -> np.ndarray:
+    """Savitzky-Golay filter convenience wrapper."""
+    return savgol_filter(signal, window_length=window_length, polyorder=polyorder)
+
+
+class TransientEvent:
+    """Represents a detected power transient step event."""
+    def __init__(self, delta: float, index: int = 0, power_before: float = 0.0,
+                 power_after: float = 0.0, timestamp: Optional[float] = None):
+        self.delta = float(delta)
+        self.index = int(index)
+        self.power_before = float(power_before)
+        self.power_after = float(power_after)
+        self.timestamp = timestamp
+
+    def __repr__(self) -> str:
+        return f"TransientEvent(delta={self.delta:.1f}W, index={self.index})"
+
+
+NILMEvent = TransientEvent
+
+
+def detect_transients(signal: Optional[Union[List[float], np.ndarray]] = None,
+                      power_window: Optional[Union[List[float], np.ndarray]] = None,
+                      threshold: float = TRANSIENT_THRESHOLD_W,
+                      **kwargs) -> List[TransientEvent]:
+    """
+    Detect step transients in a power window.
+    Returns a list of TransientEvent objects where |delta| >= threshold.
+    """
+    sig = power_window if power_window is not None else signal
+    if sig is None:
+        return []
+    sig_arr = np.asarray(sig, dtype=np.float64)
+    if len(sig_arr) < 2:
+        return []
+
+    diffs = np.diff(sig_arr)
+    events: List[TransientEvent] = []
+    i = 0
+    while i < len(diffs):
+        d = diffs[i]
+        if abs(d) >= threshold:
+            p_before = sig_arr[i]
+            p_after = sig_arr[i + 1]
+            events.append(TransientEvent(
+                delta=d,
+                index=i,
+                power_before=p_before,
+                power_after=p_after
+            ))
+            i += 1
+        else:
+            i += 1
+    return events
+

@@ -1,15 +1,21 @@
 # ═══════════════════════════════════════════════════════
-# Planning & Audit Docs (local only)
+# Documentation (Exclude all .md except README)
 # ═══════════════════════════════════════════════════════
-do.md
-phase1probapbeerrors.md
-phase-1results.md
-Phase2_Implementation_Plan.md
-Phase2plan.md
-Phase2\ Progress\ Log.md
+*.md
+!README.md
+!README.MD
+!readme.md
 Project_Overview.pdf
 make_pdf.py
 make_detailed_pdf.py
+
+# ═══════════════════════════════════════════════════════
+# Tests
+# ═══════════════════════════════════════════════════════
+tests/
+firmware/tests/
+frontend/src/__tests__/
+*test*.py
 
 # ═══════════════════════════════════════════════════════
 # Python

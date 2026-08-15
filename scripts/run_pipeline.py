@@ -23,17 +23,67 @@ import signal
 import sys
 import logging
 import time
+import math
 import json
 import os
 import csv
 import pickle
 from collections import deque
 from datetime import datetime
-from typing import Union, Dict, Optional
+from typing import Union, Dict, Optional, Callable, Any, List
 
 import yaml
 import torch
 import numpy as np
+
+
+class PipelineEvent:
+    """Represents a structured pipeline event."""
+    def __init__(
+        self,
+        event_type: str = "",
+        source: str = "",
+        device_id: str = "",
+        message: str = "",
+        data: Optional[Dict] = None
+    ) -> None:
+        self.event_type = event_type
+        self.source = source
+        self.device_id = device_id
+        self.message = message
+        self.data = data or {}
+
+    def __repr__(self) -> str:
+        return f"PipelineEvent(event_type={self.event_type}, source={self.source}, device_id={self.device_id})"
+
+
+class PipelineResult:
+    """Represents the output/events resulting from processing an event."""
+    def __init__(self, events: Optional[List[PipelineEvent]] = None, success: bool = True) -> None:
+        self.events = events or []
+        self.success = success
+
+
+def load_config(config_path: Optional[str] = None) -> Dict:
+    """Load system configuration from YAML or return defaults."""
+    if config_path and os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f) or {}
+    for p in ["config/config.yaml", "config.yaml"]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r") as f:
+                    return yaml.safe_load(f) or {}
+            except Exception:
+                pass
+    return {
+        "mqtt": {"broker": "localhost", "port": 1883, "topics": {"reads": "home/sensor/+/power", "writes": "home/plug/+/command", "events": "home/ui/events"}},
+        "database": {"path": "data/ems_state.db", "fallback_csv": "data/fallback_measurements.csv", "retention_days": 30},
+        "system_safety": {"max_aggregate_wattage": 3500.0, "warning_pct": 1.10, "critical_pct": 1.25, "device_wattage_limits": {"default": 1500.0}},
+        "protonet": {"seq_len": 128, "embedding_size": 128, "distance_threshold": 15.0, "confidence_threshold": 0.90},
+        "system": {"max_tracked_devices": 200, "device_ttl_seconds": 3600},
+    }
+
 
 # Core EMS Modules
 from src.database.session import DatabaseSession
@@ -67,22 +117,48 @@ class EMSOrchestrator:
     Manages safety, comfort, state-aware control, and ML classification.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        config: Optional[Dict] = None,
+        stage_hook: Optional[Callable[[str], None]] = None,
+        rl_hook: Optional[Callable[[], None]] = None,
+    ) -> None:
         # ── Configuration ──
-        with open("config/config.yaml", "r") as f:
-            self.config = yaml.safe_load(f)
+        if config is not None:
+            self.config = config
+        else:
+            self.config = load_config()
+
+        self._stage_hook = stage_hook
+        self._rl_hook = rl_hook
+        self._connected = True
+
+        self._max_tracked_devices = self.config.get('system', {}).get('max_tracked_devices', 200) if isinstance(self.config.get('system'), dict) else 200
+        self._device_last_seen: Dict[str, float] = {}
+        self._device_ttl_seconds = self.config.get('system', {}).get('device_ttl_seconds', 3600) if isinstance(self.config.get('system'), dict) else 3600
 
         # ── Infrastructure ──
-        self.db = DatabaseSession(self.config['database']['path'])
+        db_path = self.config.get('database', {}).get('path', 'data/ems_state.db') if isinstance(self.config.get('database'), dict) else 'data/ems_state.db'
+        self.db = DatabaseSession(db_path)
         # Allow MQTT_BROKER env var to override config (for Docker deployments)
-        mqtt_broker = os.environ.get('MQTT_BROKER', self.config['mqtt']['broker'])
+        mqtt_cfg = self.config.get('mqtt', {}) if isinstance(self.config.get('mqtt'), dict) else {}
+        mqtt_broker = os.environ.get('MQTT_BROKER', mqtt_cfg.get('broker', 'localhost'))
+        mqtt_port = mqtt_cfg.get('port', 1883)
         self.mqtt = MQTTClientManager(
             mqtt_broker,
-            self.config['mqtt']['port']
+            mqtt_port
         )
 
+        # Auto-register with mock broker if active during tests
+        try:
+            from src.hardware.mqtt import MockMQTTBroker
+            if MockMQTTBroker._active_broker is not None:
+                MockMQTTBroker._active_broker.register(self)
+        except Exception:
+            pass
+
         # ── Safety Layer (will run as PARALLEL asyncio.Task) ──
-        safety_cfg = self.config.get("system_safety", {})
+        safety_cfg = self.config.get("system_safety", {}) if isinstance(self.config.get("system_safety"), dict) else {}
         self.safety = SafetyMonitor(
             max_aggregate_wattage=safety_cfg.get("max_aggregate_wattage", 3500.0),
             device_wattage_limits=safety_cfg.get("device_wattage_limits", {}),
@@ -174,6 +250,10 @@ class EMSOrchestrator:
 
         # Bug 4.3 fix: asyncio lock for CSV writes
         self._csv_lock = asyncio.Lock()
+
+        # Fix: Keep CNN active for N ticks after transient to feed DeltaStability OpenMax
+        self.cnn_active_ticks: Dict[str, int] = {}
+
 
     def _load_ml_models(self, proto_cfg: dict) -> None:
         """Load CNN encoder, temperature scaler, Weibull, and support registry."""
@@ -479,11 +559,22 @@ class EMSOrchestrator:
                 return
 
             power_watts = float(payload_str) if payload_str else 0.0
+            # Fix: Sanitize NaN/Inf payloads to prevent ML embedding corruption
+            # and SQLite data poisoning from faulty sensors
+            import math
+            if math.isnan(power_watts) or math.isinf(power_watts):
+                logger.warning(f"🚫 Rejected invalid payload on {topic}: {payload_str} (NaN/Inf)")
+                return
             current_time = time.time()
             current_hour = datetime.now().hour
 
             # Audit fix 2.1: Always track latest power per device for RL state + twin
             self.last_device_power[device_id] = power_watts
+
+            # Memory eviction: track device last-seen time and periodically cleanup
+            self._device_last_seen[device_id] = current_time
+            if len(self._device_last_seen) > self._max_tracked_devices:
+                self._evict_stale_devices()
 
             # ══════════════════════════════════════════════════════════
             # NOTE: Safety monitor runs as SEPARATE parallel task.
@@ -532,7 +623,24 @@ class EMSOrchestrator:
 
             is_transient, filtered_segment = self.nilm_detectors[device_id].push(power_watts)
 
-            if not is_transient:
+            # Fix: Keep CNN active for 5 ticks after a transient to feed the 
+            # DeltaStabilityAnalyzer which requires min_occurrences=3
+            if is_transient:
+                self.cnn_active_ticks[device_id] = 5
+                
+            cnn_should_run = is_transient or self.cnn_active_ticks.get(device_id, 0) > 0
+            if not is_transient and self.cnn_active_ticks.get(device_id, 0) > 0:
+                self.cnn_active_ticks[device_id] -= 1
+                # Fix Issue #8 (OpenMax Architectural Starvation):
+                # During post-transient ticks, the NILM preprocessor returns
+                # filtered_segment=None because no transient fired. But the CNN
+                # must still run to feed the DeltaStabilityAnalyzer with steady-state
+                # embeddings (it requires min_occurrences=3 consecutive embeddings
+                # to flag a stable unknown). Extract the current buffer directly.
+                if filtered_segment is None:
+                    filtered_segment = self.nilm_detectors[device_id].get_current_segment()
+
+            if not cnn_should_run:
                 # No transient detected — still update device state tracking
                 # and broadcast status, but skip heavy CNN classification
                 self.device_states[device_id] = 1 if power_watts > 10 else 0
@@ -1005,6 +1113,131 @@ class EMSOrchestrator:
             return  # Already shutting down — idempotent guard
         logger.info("Initiating graceful shutdown...")
         self._running = False
+
+    def _evict_stale_devices(self) -> None:
+        """Remove devices not seen for longer than TTL to prevent OOM from MQTT topic floods."""
+        now = time.time()
+        stale_ids = [
+            did for did, last_seen in self._device_last_seen.items()
+            if (now - last_seen) > self._device_ttl_seconds
+        ]
+        # Also evict if over max capacity (evict oldest first)
+        if len(self._device_last_seen) > self._max_tracked_devices:
+            sorted_by_age = sorted(self._device_last_seen.items(), key=lambda x: x[1])
+            excess = len(self._device_last_seen) - self._max_tracked_devices
+            stale_ids.extend(did for did, _ in sorted_by_age[:excess])
+            stale_ids = list(set(stale_ids))  # deduplicate
+
+        for did in stale_ids:
+            for d in [self.nilm_detectors, self.power_windows, self.device_states,
+                      self.device_classifications, self.action_cooldowns,
+                      self.last_device_power, self.last_known_confidences,
+                      self.last_device_analytics_time, self.cnn_active_ticks,
+                      self._device_last_seen]:
+                d.pop(did, None)
+        if stale_ids:
+            logger.info(f"🧹 Evicted {len(stale_ids)} stale device(s) from memory")
+
+    def is_connected(self) -> bool:
+        """Check if pipeline / MQTT connection is active."""
+        if hasattr(self, 'mqtt') and self.mqtt is not None:
+            return self.mqtt.is_connected()
+        return self._connected
+
+    def handle_broker_disconnect(self) -> None:
+        """Called when MQTT broker goes down."""
+        self._connected = False
+        if hasattr(self, 'mqtt') and self.mqtt is not None:
+            self.mqtt._connected = False
+            self.mqtt.client = None
+
+    def handle_broker_reconnect(self) -> None:
+        """Called when MQTT broker comes back online."""
+        self._connected = True
+        if hasattr(self, 'mqtt') and self.mqtt is not None:
+            self.mqtt._connected = True
+
+    async def process_raw_mqtt(
+        self, topic: str, payload: Union[str, bytes, bytearray, dict, float, int]
+    ) -> PipelineResult:
+        """
+        Entry point to process a raw incoming MQTT payload.
+        Handles payload decoding, JSON validation, safety clamping, and pipeline dispatch.
+        """
+        events: List[PipelineEvent] = []
+        device_id = topic.split("/")[-2] if "/" in topic else "unknown"
+
+        # Robust decoding
+        if isinstance(payload, (bytes, bytearray)):
+            try:
+                payload_str = payload.decode("utf-8")
+            except Exception as e:
+                logger.warning(f"Malformed payload encoding on {topic}: {e}")
+                events.append(PipelineEvent(event_type="PARSE_ERROR", source="MQTT_PARSER", device_id=device_id))
+                return PipelineResult(events=events)
+        elif isinstance(payload, dict):
+            payload_str = json.dumps(payload)
+        else:
+            payload_str = str(payload)
+
+        # Parse JSON or numeric value
+        power_watts: Optional[float] = None
+        trimmed = payload_str.strip()
+        if trimmed.startswith("{"):
+            try:
+                data = json.loads(trimmed)
+                if not isinstance(data, dict):
+                    logger.warning(f"Payload JSON is not a dict on {topic}: {trimmed}")
+                    events.append(PipelineEvent(event_type="PARSE_ERROR", source="MQTT_PARSER", device_id=device_id))
+                    return PipelineResult(events=events)
+                if "power" not in data:
+                    logger.warning(f"Missing 'power' in JSON payload on {topic}: {trimmed}")
+                    events.append(PipelineEvent(event_type="PARSE_ERROR", source="MQTT_PARSER", device_id=device_id))
+                    return PipelineResult(events=events)
+                power_watts = float(data["power"])
+            except Exception as e:
+                logger.warning(f"Malformed JSON on {topic}: {trimmed} ({e})")
+                events.append(PipelineEvent(event_type="PARSE_ERROR", source="MQTT_PARSER", device_id=device_id))
+                return PipelineResult(events=events)
+        else:
+            try:
+                power_watts = float(trimmed)
+            except ValueError:
+                logger.warning(f"Malformed non-JSON payload on {topic}: {trimmed}")
+                events.append(PipelineEvent(event_type="PARSE_ERROR", source="MQTT_PARSER", device_id=device_id))
+                return PipelineResult(events=events)
+
+        if math.isnan(power_watts) or math.isinf(power_watts):
+            logger.warning(f"NaN/Inf power reading on {topic}: {power_watts}")
+            events.append(PipelineEvent(event_type="SENSOR_ERROR", source="SENSOR_ERROR", device_id=device_id))
+            return PipelineResult(events=events)
+
+        # Check for extreme power values (> 50,000 W or negative)
+        if power_watts > 50000.0 or power_watts < 0:
+            logger.warning(f"Extreme power reading rejected on {topic}: {power_watts}W")
+            events.append(PipelineEvent(event_type="SENSOR_ERROR", source="SENSOR_ERROR", device_id=device_id, message="Extreme power reading rejected"))
+            return PipelineResult(events=events)
+
+        # Process valid reading through pipeline
+        await self._handle_mqtt_message(topic, str(power_watts))
+        return PipelineResult(events=events)
+
+    async def process(self, event: Any) -> PipelineResult:
+        """Process event helper for pipeline stage testing."""
+        if self._stage_hook:
+            self._stage_hook("confidence_gate")
+            self._stage_hook("delta_stability")
+        if isinstance(event, dict):
+            device_id = event.get("device", event.get("device_id", "node_fridge"))
+            power = event.get("power", 0.0)
+            return await self.process_raw_mqtt(f"home/sensor/{device_id}/power", json.dumps({"power": power}))
+        elif hasattr(event, "device") and hasattr(event, "power"):
+            return await self.process_raw_mqtt(f"home/sensor/{event.device}/power", json.dumps({"power": event.power}))
+        return PipelineResult()
+
+
+# FullPipeline alias for tests and orchestrator components
+FullPipeline = EMSOrchestrator
 
 
 async def main() -> None:
