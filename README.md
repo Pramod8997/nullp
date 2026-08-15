@@ -1,7 +1,7 @@
 # ⚡ Confidence-Aware Digital Twin Energy Management System
 
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
-![Tests](https://img.shields.io/badge/tests-79%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-260%20passed-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Node](https://img.shields.io/badge/node-18%2B-green)
 ![Mosquitto](https://img.shields.io/badge/mosquitto-2.0%2B-purple)
@@ -206,20 +206,23 @@ Physical nodes publish to `home/sensor/{DEVICE_ID}/power` and accept commands on
 
 ## 🧪 Testing
 
-Run the full test suite (79 tests):
+Run the full Python test suite (224 tests):
 
 ```bash
 make test
 ```
 
-### Test Coverage
+We also have a full CI/CD GitHub Action (`.github/workflows/test.yml`) that enforces 90% codebase coverage.
 
-| Category | Tests | Scope |
-|----------|-------|-------|
-| API Endpoints | 5 | health, devices, analytics, phantom, status |
-| Phase 1 Core | 34 | watchdog, phantom, analytics, failure matrix, mode classifier, thermodynamics, confidence gate, openmax, temperature scaling, delta stability, ToU reward, safety parallel, episodic training, full pipeline |
-| Phase 1 Bug Fixes | 20 | NILM transient, OpenMax predict, calibration, delta stability, PMV thermodynamics, policy promotion, confidence gate, temporal validator, CSV fallback, NILM preprocessing, unknown device RL routing |
-| Phase 2 Integration | 20 | relay ACK, hybrid mode, RL action chain, RoC safety, data retention, CSV replay, epsilon decay, state space, latency, NEVER_SHED, MQTT topics, docker compose |
+### Test Coverage (260 Total Tests)
+
+| Category | Tests | Framework | Scope |
+|----------|-------|-----------|-------|
+| **Python Backend** | 224 | `pytest`, `hypothesis` | Pipeline stages, Safety, Thermodynamics (PMV), OpenMax Weibull, ProtoNet CNN, RL (Q-Learning), DB (WAL/CSV), MQTT, APIs. |
+| **Frontend UI** | 13 | `vitest`, `RTL` | React components (DeviceCards, DigitalTwin, Status). |
+| **Chaos/Adversarial** | 19 | `verify_chaos_agent.py` | RL NaN/Inf guard, Watchdog sanitization, 100-input barrage. |
+| **ML Verification** | 4 | `verify_ml_agent.py` | Sigmoid gating energy bounds, EVT metric alignment, Augmentation variance. |
+| **ESP32 Firmware** | 10 | `Unity` (C) | True RMS, Arc-fault (dP/dt), Watchdog, Non-blocking relays. |
 
 ---
 
