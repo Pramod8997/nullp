@@ -6,6 +6,10 @@ import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# Skip the entire module if playwright is not installed (e.g., in CI backend jobs)
+pytest.importorskip("playwright")
+
 from playwright.async_api import Page
 
 # Ensure project root is on sys.path
