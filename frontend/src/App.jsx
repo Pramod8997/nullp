@@ -1,16 +1,23 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import RealTimeChart from './components/RealTimeChart';
-import SafetyAlerts from './components/SafetyAlerts';
-import DigitalTwin from './components/DigitalTwin';
-import DeviceCards from './components/DeviceCards';
-import PhantomTracker from './components/PhantomTracker';
-import SystemStatus from './components/SystemStatus';
+import Sidebar from './components/Sidebar/Sidebar';
+import OverviewPage from './pages/OverviewPage/OverviewPage';
+import AppliancesPage from './pages/AppliancesPage/AppliancesPage';
+import AnalyticsPage from './pages/AnalyticsPage/AnalyticsPage';
+import DigitalTwinPage from './pages/DigitalTwinPage/DigitalTwinPage';
+import SchedulePage from './pages/SchedulePage/SchedulePage';
+import AlertsPage from './pages/AlertsPage/AlertsPage';
+import SettingsPage from './pages/SettingsPage/SettingsPage';
 import './App.css';
 
 const WS_URL = `ws://${window.location.hostname}:8000/ws`;
 const MAX_RECONNECT_DELAY = 10000;
 
 function App() {
+  // ── Navigation State ──
+  const [activeTab, setActiveTab] = useState('overview');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  // ── Data State ──
   const [devices, setDevices]             = useState({});
   const [powerHistory, setPowerHistory]     = useState([]);
   const [alerts, setAlerts]                 = useState([]);
@@ -20,7 +27,7 @@ function App() {
   const [analytics, setAnalytics]           = useState({});
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [pipelineStatus, setPipelineStatus]     = useState('initializing');
-  const [pendingUnknowns, setPendingUnknowns]   = useState([]);  // LABEL_REQUEST events
+  const [pendingUnknowns, setPendingUnknowns]   = useState([]);
   const [latencyStats, setLatencyStats]           = useState({ avg_ms: 0, max_ms: 0, p95_ms: 0 });
   const [latencyHistory, setLatencyHistory]       = useState([]);
   const [isArcFaultActive, setIsArcFaultActive]   = useState(false);
@@ -268,9 +275,67 @@ function App() {
     }
   }, [triggerArcFault]);
 
+  // ── Page Renderer ──
+  const renderPage = () => {
+    switch (activeTab) {
+      case 'overview':
+        return (
+          <OverviewPage
+            devices={devices}
+            powerHistory={powerHistory}
+          />
+        );
+
+      case 'appliances':
+        return <AppliancesPage devices={devices} />;
+
+      case 'analytics':
+        return (
+          <AnalyticsPage
+            devices={devices}
+            powerHistory={powerHistory}
+            connectionStatus={connectionStatus}
+            pipelineStatus={pipelineStatus}
+            analytics={analytics}
+            latencyStats={latencyStats}
+            latencyHistory={latencyHistory}
+          />
+        );
+
+      case 'digital-twin':
+        return (
+          <DigitalTwinPage
+            devices={devices}
+            powerHistory={powerHistory}
+            twinEvents={twinEvents}
+            pmvScore={pmvScore}
+            phantomData={phantomData}
+            pendingUnknowns={pendingUnknowns}
+          />
+        );
+
+      case 'schedule':
+        return <SchedulePage />;
+
+      case 'alerts':
+        return <AlertsPage alerts={alerts} />;
+
+      case 'settings':
+        return <SettingsPage />;
+
+      default:
+        return (
+          <OverviewPage
+            devices={devices}
+            powerHistory={powerHistory}
+          />
+        );
+    }
+  };
+
   return (
-    <div className={`dashboard ${isArcFaultActive ? 'arc-fault-active' : ''}`}>
-      {/* ── Arc-Fault Emergency Overlay ── */}
+    <div className={`app-layout ${isArcFaultActive ? 'arc-fault-active' : ''}`}>
+      {/* Arc-Fault Emergency Overlay */}
       {isArcFaultActive && (
         <div className="arc-fault-overlay" id="arc-fault-overlay">
           <div className="arc-fault-overlay__inner">
@@ -280,64 +345,34 @@ function App() {
         </div>
       )}
 
-      {/* ── Header ── */}
-      <header className="dashboard-header">
-        <div className="dashboard-header__title">
-          <div>
-            <h1>⚡ EMS Digital Twin</h1>
-            <span className="subtitle">Confidence-Aware Energy Management System</span>
+      {/* Sidebar Navigation */}
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed(prev => !prev)}
+      />
+
+      {/* Main Content Area */}
+      <main
+        className={`app-main ${sidebarCollapsed ? 'app-main--sidebar-collapsed' : ''}`}
+      >
+        {/* Header Bar */}
+        <header className="app-header">
+          <div className="app-header__title">
+            <h1>{activeTab.replace('-', ' ').replace(/\b\w/g, c => c.toUpperCase())}</h1>
           </div>
-        </div>
-        <div className={`status-badge ${connectionStatus === 'connected' ? 'online' : connectionStatus === 'reconnecting' ? 'reconnecting' : 'offline'}`}>
-          <span className="status-dot" />
-          {connectionStatus === 'connected' ? 'LIVE 1Hz Stream' : connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Disconnected'}
-        </div>
-      </header>
-
-      {/* ── Dashboard Grid ── */}
-      <div className="dashboard-grid">
-        {/* Row 1: Device Status Cards */}
-        <div className="panel panel-devices">
-          <DeviceCards devices={devices} />
-        </div>
-
-        {/* Row 2: Chart + Safety Alerts */}
-        <div className="panel panel-chart">
-          <div className="panel-header">
-            <h2>📊 Real-Time Power Monitor</h2>
-            <span className="panel-badge">{Object.keys(devices).length} devices</span>
+          <div className={`status-badge ${connectionStatus === 'connected' ? 'online' : connectionStatus === 'reconnecting' ? 'reconnecting' : 'offline'}`}>
+            <span className="status-dot" />
+            {connectionStatus === 'connected' ? 'LIVE 1Hz Stream' : connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Disconnected'}
           </div>
-          <RealTimeChart data={powerHistory} devices={devices} />
-        </div>
+        </header>
 
-        <div className="panel panel-safety">
-          <div className="panel-header">
-            <h2>🛡️ Safety Layer</h2>
-            <span className="panel-badge">{alerts.length} events</span>
-          </div>
-          <SafetyAlerts alerts={alerts} />
+        {/* Page Content */}
+        <div className="app-content">
+          {renderPage()}
         </div>
-
-        {/* Row 3: Digital Twin + Phantom + System Status */}
-        <div className="panel panel-twin">
-          <DigitalTwin events={twinEvents} pmvScore={pmvScore} />
-        </div>
-
-        <div className="panel panel-phantom">
-          <PhantomTracker data={phantomData} />
-        </div>
-
-        <div className="panel panel-status">
-          <SystemStatus
-            connectionStatus={connectionStatus}
-            pipelineStatus={pipelineStatus}
-            analytics={analytics}
-            deviceCount={Object.keys(devices).length}
-            latencyStats={latencyStats}
-            latencyHistory={latencyHistory}
-          />
-        </div>
-      </div>
+      </main>
     </div>
   );
 }

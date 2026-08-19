@@ -1,23 +1,62 @@
 /* ═══════════════════════════════════════════════════════
    EMS Dashboard — Production Layout & Component Styles
-   Glassmorphic Dark Theme with Neon Accents
+   Sidebar + Content Layout with Glassmorphic Dark Theme
    ═══════════════════════════════════════════════════════ */
 
-/* ── Dashboard Shell ── */
-.dashboard {
+/* ── App Layout Shell ── */
+.app-layout {
   display: flex;
-  flex-direction: column;
   min-height: 100vh;
-  padding: 1.25rem 1.5rem;
-  max-width: 1600px;
-  margin: 0 auto;
-  gap: 1.25rem;
   position: relative;
   transition: all 0.3s ease;
 }
 
+/* ── Main Content Area ── */
+.app-main {
+  flex: 1;
+  margin-left: 240px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.app-main--sidebar-collapsed {
+  margin-left: 72px;
+}
+
+/* ── Header ── */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.75rem;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-bottom: 1px solid var(--glass-border);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.app-header__title h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  text-transform: capitalize;
+}
+
+/* ── Content Area ── */
+.app-content {
+  flex: 1;
+  padding: 1.5rem 1.75rem;
+  overflow-y: auto;
+}
+
 /* ── Arc-Fault Active State ── */
-.dashboard.arc-fault-active {
+.app-layout.arc-fault-active {
   animation: arcFaultBorder 0.6s ease-in-out infinite;
 }
 
@@ -59,48 +98,7 @@
   text-shadow: 0 0 12px rgba(255, 255, 255, 0.5);
 }
 
-/* ── Header ── */
-.dashboard-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1rem 1.5rem;
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--shadow-md);
-  transition: border-color 0.3s ease;
-}
-
-.dashboard-header:hover {
-  border-color: rgba(59, 130, 246, 0.15);
-}
-
-.dashboard-header__title {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.dashboard-header__title h1 {
-  font-size: 1.5rem;
-  font-weight: 700;
-  background: linear-gradient(135deg, #60a5fa, #a78bfa, #ec4899);
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-  letter-spacing: -0.02em;
-}
-
-.dashboard-header__title .subtitle {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  font-weight: 400;
-  letter-spacing: 0.01em;
-}
-
+/* ── Status Badge ── */
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -140,48 +138,6 @@
   border-radius: 50%;
   background: currentColor;
   animation: statusPulse 2s ease-in-out infinite;
-}
-
-/* ── Main Grid ── */
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  grid-template-rows: auto auto auto;
-  gap: 1.25rem;
-}
-
-/* Named areas for the 6-panel layout */
-.dashboard-grid .panel-devices    { grid-column: 1 / -1; }
-.dashboard-grid .panel-chart      { grid-column: 1 / 3; grid-row: span 1; }
-.dashboard-grid .panel-safety     { grid-column: 3 / 4; }
-.dashboard-grid .panel-twin       { grid-column: 1 / 2; }
-.dashboard-grid .panel-phantom    { grid-column: 2 / 3; }
-.dashboard-grid .panel-status     { grid-column: 3 / 4; }
-
-@media (max-width: 1200px) {
-  .dashboard-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-  .dashboard-grid .panel-devices { grid-column: 1 / -1; }
-  .dashboard-grid .panel-chart   { grid-column: 1 / -1; }
-  .dashboard-grid .panel-safety  { grid-column: 1 / 2; }
-  .dashboard-grid .panel-twin    { grid-column: 2 / 3; }
-  .dashboard-grid .panel-phantom { grid-column: 1 / 2; }
-  .dashboard-grid .panel-status  { grid-column: 2 / 3; }
-}
-
-@media (max-width: 768px) {
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-  }
-  .dashboard-grid .panel-devices,
-  .dashboard-grid .panel-chart,
-  .dashboard-grid .panel-safety,
-  .dashboard-grid .panel-twin,
-  .dashboard-grid .panel-phantom,
-  .dashboard-grid .panel-status {
-    grid-column: 1 / -1;
-  }
 }
 
 /* ── Panel Card Base (Glassmorphic) ── */
@@ -671,4 +627,19 @@
 .export-btn:active {
   transform: translateY(0);
   box-shadow: none;
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .app-main {
+    margin-left: 72px;
+  }
+
+  .app-content {
+    padding: 1rem;
+  }
+
+  .app-header {
+    padding: 0.75rem 1rem;
+  }
 }

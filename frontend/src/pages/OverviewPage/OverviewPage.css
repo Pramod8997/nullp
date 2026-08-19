@@ -1,0 +1,33 @@
+/* ═══════════════════════════════════════════════════════
+   Overview Page — Layout Grid
+   ═══════════════════════════════════════════════════════ */
+
+.overview-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.overview-page__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+
+.overview-page__col--table {
+  min-width: 0;
+}
+
+.overview-page__col--chart {
+  min-width: 0;
+}
+
+.overview-page__twin-preview {
+  min-height: 400px;
+}
+
+@media (max-width: 1200px) {
+  .overview-page__row {
+    grid-template-columns: 1fr;
+  }
+}

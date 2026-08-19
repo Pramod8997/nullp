@@ -1,0 +1,38 @@
+/* ═══════════════════════════════════════════════════════
+   Analytics Page
+   ═══════════════════════════════════════════════════════ */
+
+.analytics-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.analytics-page__header h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+.analytics-page__subtitle {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.analytics-page__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+
+.analytics-page__col {
+  min-width: 0;
+}
+
+@media (max-width: 1200px) {
+  .analytics-page__row {
+    grid-template-columns: 1fr;
+  }
+}

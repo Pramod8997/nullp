@@ -1,0 +1,29 @@
+/* ═══════════════════════════════════════════════════════
+   Digital Twin Page — Layout Grid
+   ═══════════════════════════════════════════════════════ */
+
+.dt-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.dt-page__visualization {
+  min-height: 420px;
+}
+
+.dt-page__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+
+.dt-page__col {
+  min-width: 0;
+}
+
+@media (max-width: 1200px) {
+  .dt-page__row {
+    grid-template-columns: 1fr;
+  }
+}
