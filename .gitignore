@@ -1,22 +1,8 @@
-# ═══════════════════════════════════════════════════════
-# Documentation (Exclude temp .md except README & Context)
-# ═══════════════════════════════════════════════════════
-*.md
-!README.md
-!README.MD
-!readme.md
-!AI_CONTEXT_AND_DISCOVERIES.md
-!firmware/**/README*.md
-!frontend/README.md
-!.github/**/*.md
-Project_Overview.pdf
-*.pdf
-make_pdf.py
-make_detailed_pdf.py
+# ═════════════════════════════════════════════════════════════════════════════
+# Confidence-Aware Digital Twin EMS — Root Gitignore
+# ═════════════════════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════
-# Python
-# ═══════════════════════════════════════════════════════
+# ── Python & Virtual Environments ───────────────────────────────────────────
 venv/
 .venv/
 env/
@@ -49,17 +35,37 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# ═══════════════════════════════════════════════════════
-# Testing, Linting & Coverage
-# ═══════════════════════════════════════════════════════
+# ── Frontend & Node.js ──────────────────────────────────────────────────────
+node_modules/
+**/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+.vite/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnp
+.pnp.js
+.eslintcache
+*.tsbuildinfo
+
+# ── Testing, Profiling & Coverage ───────────────────────────────────────────
 .pytest_cache/
 **/.pytest_cache/
 .hypothesis/
 **/.hypothesis/
+.vitest/
+coverage/
+**/coverage/
+htmlcov/
 .coverage
 .coverage.*
-coverage/
-htmlcov/
 coverage.xml
 nosetests.xml
 *.cover
@@ -72,115 +78,47 @@ nosetests.xml
 dmypy.json
 .ruff_cache/
 **/.ruff_cache/
-.eslintcache
 
-# ═══════════════════════════════════════════════════════
-# Node.js / Frontend
-# ═══════════════════════════════════════════════════════
-node_modules/
-**/node_modules/
-frontend/dist/
-dist/
-dist-ssr/
-.vite/
-frontend/.vite/
-*.local
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-.pnp
-.pnp.js
-
-# ═══════════════════════════════════════════════════════
-# OS, IDE & System
-# ═══════════════════════════════════════════════════════
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-.vscode/
-!.vscode/extensions.json
-.idea/
-*.code-workspace
-*.swp
-*.swo
-*.sw?
-*~
-*.tmp
-*.temp
-*.bak
-*.orig
-core
-core.*
-*.core
-Screenshot*.png
-Screenshot from *.png
-
-# ═══════════════════════════════════════════════════════
-# Environment & Secrets
-# ═══════════════════════════════════════════════════════
-.env
-.env.*
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-!.env.example
-!.env.template
-
-# ═══════════════════════════════════════════════════════
-# Database Files & Caches
-# ═══════════════════════════════════════════════════════
+# ── Databases & Runtime State ───────────────────────────────────────────────
 *.db
 *.sqlite
 *.sqlite3
 *.db-shm
 *.db-wal
 *.db-journal
+data/ems_state.db*
+data/fallback_measurements.csv
+mosquitto/data/
+mosquitto/log/
 
-# ═══════════════════════════════════════════════════════
-# Model Weights & Generated Data
-# ═══════════════════════════════════════════════════════
+# ── Machine Learning Weights, Tensors & Large Datasets ──────────────────────
 backend/models/weights/
-backend/models/
-backend/data/
+backend/models/ems_weights/
 backend/data/*.h5
+data/real/*.h5
+data/real/*.npy
+data/raw/
+data/processed/
 *.onnx
 *.pt
 *.pth
 *.safetensors
 *.tflite
 *.ckpt
-data/raw/
-data/processed/
-data/real/
+*.pkl
+*.h5
+*.hdf5
 
-# ═══════════════════════════════════════════════════════
-# Training Artifacts, Logs & Telemetry
-# ═══════════════════════════════════════════════════════
-rl_action_log.csv
-safety_events.log
+# ── Logs & Telemetry ────────────────────────────────────────────────────────
 *.log
 logs/
+**/logs/
+rl_action_log.csv
+safety_events.log
 training_results/
 scratch/
 
-# ═══════════════════════════════════════════════════════
-# Runtime Data & Fallback / MQTT
-# ═══════════════════════════════════════════════════════
-data/fallback_measurements.csv
-data/ems_state.db*
-mosquitto/data/
-mosquitto/log/
-
-# ═══════════════════════════════════════════════════════
-# ESP32 / PlatformIO / Embedded
-# ═══════════════════════════════════════════════════════
+# ── Firmware & Embedded (ESP32 / PlatformIO) ────────────────────────────────
 .pio/
 **/.pio/
 .pioenvs/
@@ -197,16 +135,47 @@ firmware/build/
 *.a
 *.d
 
-# ═══════════════════════════════════════════════════════
-# Jupyter Notebooks
-# ═══════════════════════════════════════════════════════
+# ── OS & IDE Artifacts ──────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*.sw?
+*~
+*.tmp
+*.temp
+*.bak
+*.orig
+core
+core.*
+*.core
+
+# ── Environment & Secrets ───────────────────────────────────────────────────
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+!.env.template
+
+# ── Jupyter Notebooks ───────────────────────────────────────────────────────
 .jupyter
 .ipynb_checkpoints/
 */.ipynb_checkpoints/*
 
-# ═══════════════════════════════════════════════════════
-# AI & Agent Tools
-# ═══════════════════════════════════════════════════════
+# ── AI Agents, Scratch & Knowledge Graph ────────────────────────────────────
 .gemini/
 .antigravity/
 .cursor/
@@ -214,14 +183,25 @@ firmware/build/
 graphify-out/
 .system_generated/
 
-# ═══════════════════════════════════════════════════════
-# Temp & Experimental Files
-# ═══════════════════════════════════════════════════════
+# ── Documentation & Checkpoint Markdown ─────────────────────────────────────
+*.md
+!README.md
+!README.MD
+!readme.md
+!AI_CONTEXT_AND_DISCOVERIES.md
+!FRONTEND_CONTEXT.md
+!frontend/FRONTEND_CONTEXT.md
+!frontend/README.md
+!firmware/**/README*.md
+!.github/**/*.md
+!.agents/**/*.md
+
+Project_Overview.pdf
+*.pdf
+make_pdf.py
+make_detailed_pdf.py
 e.md
 SESSION_CHECKPOINT.md
 PROJECT_HANDOVER.md
 PRODUCTION_AUDIT_ARCHIVE.md
 nullp_exhaustive_test_prompt.md
-scripts/chaos_test*.py
-scripts/verify_*_agent.py
-scripts/locustfile.py

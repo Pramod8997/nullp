@@ -1,26 +1,21 @@
 import React, { useState } from 'react';
-import { BrainCircuit, Zap, HelpCircle, ShieldOff, Thermometer, Tag, AlertTriangle } from 'lucide-react';
+import { BrainCircuit, Zap, HelpCircle, ShieldOff, Thermometer, Tag, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 const API_BASE = `http://${window.location.hostname}:8000`;
 
 const getPmvLabel = (pmv) => {
-  if (pmv <= -2) return { label: 'Cold',        cls: 'cold' };
-  if (pmv <= -1) return { label: 'Cool',        cls: 'cold' };
-  if (pmv <= 1)  return { label: 'Comfortable', cls: 'comfort' };
-  if (pmv <= 2)  return { label: 'Warm',        cls: 'warm' };
-  return         { label: 'Hot',         cls: 'hot' };
+  if (pmv <= -2) return { label: 'Cold', cls: 'cold text-blue-500 bg-blue-50 dark:bg-blue-950/50 border-blue-200 dark:border-blue-800' };
+  if (pmv <= -1) return { label: 'Cool', cls: 'cold text-cyan-500 bg-cyan-50 dark:bg-cyan-950/50 border-cyan-200 dark:border-cyan-800' };
+  if (pmv <= 1) return { label: 'Comfortable (Neutral)', cls: 'comfort neutral text-emerald-500 bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800' };
+  if (pmv <= 2) return { label: 'Warm', cls: 'warm text-amber-500 bg-amber-50 dark:bg-amber-950/50 border-amber-200 dark:border-amber-800' };
+  return { label: 'Hot', cls: 'hot text-rose-500 bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800' };
 };
 
-/* ── Label Request Card ────────────────────────────────────────────────────
-   Shown when the DeltaStabilityAnalyzer flags a STABLE UNKNOWN device.
-   Lets the user type a class name and submits to POST /api/label_device.
-   The payload includes the embedding stored in the event as `segments`.
-*/
 const LabelRequestCard = ({ event, onLabeled }) => {
-  const [label, setLabel]     = useState('');
+  const [label, setLabel] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState('');
-  const [done, setDone]       = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -31,14 +26,12 @@ const LabelRequestCard = ({ event, onLabeled }) => {
     setError('');
 
     try {
-      // Build (K, 128) segments from the embedding stored in the LABEL_REQUEST event.
-      // The pipeline sends cluster_mean as `embedding` (128,); wrap it as [[...]] = (1, 128).
       const segments = event.embedding && event.embedding.length === 128
         ? [event.embedding]
         : null;
 
       if (!segments) {
-        setError('No embedding data in event. Retrying next detection cycle.');
+        setError('No embedding data in event. Retrying next cycle.');
         setLoading(false);
         return;
       }
@@ -55,7 +48,7 @@ const LabelRequestCard = ({ event, onLabeled }) => {
       }
 
       setDone(true);
-      onLabeled && onLabeled(trimmed);
+      if (onLabeled) onLabeled(trimmed);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -65,108 +58,115 @@ const LabelRequestCard = ({ event, onLabeled }) => {
 
   if (done) {
     return (
-      <div style={{
-        background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.4)',
-        borderRadius: '8px', padding: '0.6rem 0.8rem', marginTop: '0.4rem',
-        fontSize: '0.75rem', color: '#86efac', fontWeight: 600,
-      }}>
-        ✅ "{label}" added to Prototype Registry
+      <div className="flex items-center gap-1.5 p-3 rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold mt-2">
+        <CheckCircle2 size={14} />
+        <span>"{label}" successfully enrolled into Prototype Registry</span>
       </div>
     );
   }
 
   return (
-    <form onSubmit={handleSubmit} style={{ marginTop: '0.5rem' }}>
-      <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+    <form onSubmit={handleSubmit} className="mt-2.5">
+      <div className="flex items-center gap-2 flex-wrap">
         <input
           id={`label-input-${event.device_id}`}
           type="text"
-          placeholder="Enter appliance name…"
+          placeholder="Enter appliance name (e.g. Microwave)..."
           value={label}
-          onChange={e => setLabel(e.target.value)}
+          onChange={(e) => setLabel(e.target.value)}
           disabled={loading}
-          style={{
-            flex: 1, minWidth: 120,
-            background: 'rgba(255,255,255,0.07)',
-            border: '1px solid rgba(245,158,11,0.5)',
-            borderRadius: '6px', padding: '0.3rem 0.5rem',
-            color: '#fef3c7', fontSize: '0.75rem', outline: 'none',
-          }}
+          className="flex-1 min-w-[140px] px-3 py-1.5 bg-white dark:bg-gray-800 border border-amber-300 dark:border-amber-700 rounded-lg text-xs text-gray-900 dark:text-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-500"
         />
         <button
           id={`label-submit-${event.device_id}`}
           type="submit"
           disabled={loading || !label.trim()}
-          style={{
-            background: loading ? '#6b7280' : '#f59e0b',
-            color: '#0f172a', border: 'none',
-            padding: '0.3rem 0.75rem', borderRadius: '6px',
-            fontWeight: 700, fontSize: '0.73rem',
-            cursor: loading ? 'not-allowed' : 'pointer',
-            transition: 'background 0.2s',
-          }}
+          className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-gray-950 font-bold text-xs shadow-sm transition-all cursor-pointer"
         >
-          {loading ? 'Saving…' : 'Label Device'}
+          {loading ? 'Saving...' : 'Label Device'}
         </button>
       </div>
       {error && (
-        <div style={{ color: '#f87171', fontSize: '0.7rem', marginTop: '0.25rem' }}>{error}</div>
+        <p className="text-rose-500 text-[11px] mt-1 font-medium">{error}</p>
       )}
     </form>
   );
 };
 
-/* ── Main DigitalTwin component ────────────────────────────────────────── */
 const DigitalTwin = ({
   events = [],
   pmvScore,
   pmv,
-  ppd,
   rlLog = [],
   unknownDevices = [],
   onLabel,
+  ...rest
 }) => {
   const currentPmv = typeof pmv === 'number' ? pmv : (typeof pmvScore === 'number' ? pmvScore : 0);
   const pmvInfo = getPmvLabel(currentPmv);
-  const [labeled, setLabeled] = useState({});   // track which device_ids have been labeled
+  const [labeled, setLabeled] = useState({});
   const [unknownInputs, setUnknownInputs] = useState({});
   const [dismissedUnknowns, setDismissedUnknowns] = useState({});
 
   const handleLabeled = (deviceId, className) => {
-    setLabeled(prev => ({ ...prev, [deviceId]: className }));
+    setLabeled((prev) => ({ ...prev, [deviceId]: className }));
   };
 
   const handleUnknownSubmit = (reqId, labelVal) => {
     if (onLabel) {
       onLabel(reqId, labelVal);
     }
-    setDismissedUnknowns(prev => ({ ...prev, [reqId]: true }));
+    setDismissedUnknowns((prev) => ({ ...prev, [reqId]: true }));
   };
 
   const combinedEvents = events.length > 0 ? events : rlLog;
 
   return (
-    <div>
-      <div className="panel-header">
-        <h2><BrainCircuit size={18} color="#a78bfa" /> Digital Twin</h2>
-      </div>
-
-      {/* PMV Gauge */}
-      <div
-        data-testid="pmv-gauge"
-        data-pmv={String(currentPmv)}
-        className={`pmv-gauge ${pmvInfo.cls} ${currentPmv === 0 ? 'neutral comfort' : ''}`}
-      >
-        <Thermometer size={24} color="#8b5cf6" />
-        <div className={`pmv-gauge__value ${pmvInfo.cls}`}>{currentPmv.toFixed(2)}</div>
-        <div className="pmv-gauge__info">
-          <span className="pmv-gauge__label">PMV Index</span>
-          <span className="pmv-gauge__desc">{pmvInfo.label}</span>
+    <div className="w-full space-y-5" data-ppd={rest.ppd}>
+      {/* Header */}
+      <div className="flex items-center justify-between pb-3 border-b border-gray-200/80 dark:border-gray-700/80">
+        <div className="flex items-center gap-2.5">
+          <div className="p-2 rounded-xl bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400">
+            <BrainCircuit size={18} />
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-gray-900 dark:text-white">
+              AI Digital Twin & RL Agent
+            </h2>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Autonomous energy dispatch & thermal comfort
+            </p>
+          </div>
         </div>
       </div>
 
-      {/* Unknown Devices Prompts */}
-      {unknownDevices.map(dev => {
+      {/* PMV Thermal Comfort Gauge Card */}
+      <div
+        data-testid="pmv-gauge"
+        data-pmv={String(currentPmv)}
+        className={`pmv-gauge ${pmvInfo.cls} ${currentPmv === 0 ? 'neutral comfort' : ''} p-4 rounded-2xl border flex items-center justify-between transition-all duration-300`}
+      >
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-purple-100 dark:bg-purple-900/50 text-purple-600 dark:text-purple-300">
+            <Thermometer size={24} />
+          </div>
+          <div>
+            <span className="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+              Predicted Mean Vote (PMV)
+            </span>
+            <div className="text-xl font-bold text-gray-900 dark:text-white">
+              {pmvInfo.label}
+            </div>
+          </div>
+        </div>
+
+        <div className="text-2xl font-mono font-extrabold px-3.5 py-1 rounded-xl bg-white/80 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700 shadow-sm">
+          {currentPmv.toFixed(2)}
+        </div>
+      </div>
+
+      {/* Unknown Devices Label Requests */}
+      {unknownDevices.map((dev) => {
         const reqId = dev.requestId || dev.id;
         if (dismissedUnknowns[reqId]) return null;
         const currentVal = unknownInputs[reqId] || '';
@@ -175,51 +175,28 @@ const DigitalTwin = ({
           <div
             key={reqId}
             data-testid={`label-request-${reqId}`}
-            className="label-request-card"
-            style={{
-              background: 'rgba(245,158,11,0.1)',
-              border: '1px solid rgba(245,158,11,0.4)',
-              borderRadius: '8px',
-              padding: '0.6rem 0.8rem',
-              margin: '0.5rem 0',
-            }}
+            className="label-request-card p-4 rounded-2xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800/60 shadow-sm transition-all"
           >
-            <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#f59e0b', marginBottom: '0.4rem' }}>
-              Unknown Device Detected: {dev.id}
+            <div className="flex items-center gap-2 text-xs font-bold text-amber-800 dark:text-amber-300 mb-2">
+              <HelpCircle size={15} />
+              <span>Unknown Device Detected: {dev.id}</span>
             </div>
-            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <div className="flex items-center gap-2">
               <input
                 type="text"
                 role="textbox"
-                placeholder="Enter appliance name…"
+                placeholder="Enter appliance name (e.g. Dishwasher)..."
                 value={currentVal}
                 onChange={(e) => {
                   const val = e.target.value;
-                  setUnknownInputs(prev => ({ ...prev, [reqId]: val }));
+                  setUnknownInputs((prev) => ({ ...prev, [reqId]: val }));
                 }}
-                style={{
-                  flex: 1,
-                  background: 'rgba(255,255,255,0.07)',
-                  border: '1px solid rgba(245,158,11,0.5)',
-                  borderRadius: '6px',
-                  padding: '0.3rem 0.5rem',
-                  color: '#fef3c7',
-                  fontSize: '0.75rem',
-                }}
+                className="flex-1 px-3 py-2 bg-white dark:bg-gray-800 border border-amber-300 dark:border-amber-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
               />
               <button
                 type="button"
                 onClick={() => handleUnknownSubmit(reqId, currentVal)}
-                style={{
-                  background: '#f59e0b',
-                  color: '#0f172a',
-                  border: 'none',
-                  padding: '0.3rem 0.75rem',
-                  borderRadius: '6px',
-                  fontWeight: 700,
-                  fontSize: '0.73rem',
-                  cursor: 'pointer',
-                }}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-gray-950 font-bold text-xs shadow-sm transition-all cursor-pointer"
               >
                 Submit
               </button>
@@ -228,119 +205,103 @@ const DigitalTwin = ({
         );
       })}
 
-      {/* Event Log */}
-      <div className="event-log">
-        {combinedEvents.length === 0 ? (
-          <div className="empty-state" style={{ minHeight: 120 }}>
-            <BrainCircuit size={32} color="#64748b" />
-            <p>Agent monitoring nominal</p>
-          </div>
-        ) : (
-          combinedEvents.slice(0, 15).map((event, i) => {
-            /* ── RL Action ── */
-            if (event.type === 'RL_ACTION') {
-              return (
-                <div key={i} className="event-item">
-                  <div className="event-item__icon" style={{ background: 'rgba(139,92,246,0.15)' }}>
-                    <Zap size={16} color="#a78bfa" />
+      {/* Agent Event Log */}
+      <div className="space-y-3">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+          Reinforcement Learning Log
+        </h3>
+
+        <div className="event-log space-y-2.5 max-h-[360px] overflow-y-auto pr-1">
+          {combinedEvents.length === 0 ? (
+            <div className="flex flex-col items-center justify-center p-8 bg-gray-50/50 dark:bg-gray-800/40 rounded-2xl border border-dashed border-gray-200 dark:border-gray-700 text-center">
+              <BrainCircuit size={28} className="text-gray-400 dark:text-gray-500 mb-2 opacity-60" />
+              <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Agent monitoring nominal</p>
+            </div>
+          ) : (
+            combinedEvents.slice(0, 15).map((event, i) => {
+              if (event.type === 'RL_ACTION') {
+                return (
+                  <div key={i} className="flex items-start gap-3 p-3 rounded-xl bg-purple-50/60 dark:bg-purple-950/20 border border-purple-200/60 dark:border-purple-800/40">
+                    <div className="p-2 rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400 shrink-0">
+                      <Zap size={15} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-bold text-purple-700 dark:text-purple-300">RL Optimization</div>
+                      <div className="text-xs text-gray-700 dark:text-gray-300 mt-0.5">{event.message}</div>
+                      {event.confidence !== undefined && (
+                        <div className="text-[11px] font-mono text-gray-500 dark:text-gray-400 mt-1">
+                          conf={event.confidence?.toFixed(3)} | PMV={event.pmv?.toFixed(2)} | ToU=${event.tou_rate?.toFixed(2)}/kWh
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className="event-item__body">
-                    <div className="event-item__label" style={{ color: '#a78bfa' }}>RL Optimization</div>
-                    <div className="event-item__desc">{event.message}</div>
-                    {event.confidence !== undefined && (
-                      <div style={{ fontSize: '0.68rem', color: '#94a3b8', marginTop: '2px' }}>
-                        conf={event.confidence?.toFixed(3)} | PMV={event.pmv?.toFixed(2)} | ToU=${event.tou_rate?.toFixed(2)}/kWh
+                );
+              }
+
+              if (event.type === 'EMPATHY_BLOCK' || event.type === 'EMPATHY_ACTION') {
+                return (
+                  <div key={i} className="flex items-start gap-3 p-3 rounded-xl bg-rose-50/60 dark:bg-rose-950/20 border border-rose-200/60 dark:border-rose-800/40">
+                    <div className="p-2 rounded-lg bg-rose-500/10 text-rose-600 dark:text-rose-400 shrink-0">
+                      <ShieldOff size={15} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-bold text-rose-700 dark:text-rose-300">Empathy Gate Intervention</div>
+                      <div className="text-xs text-gray-700 dark:text-gray-300 mt-0.5">{event.message}</div>
+                    </div>
+                  </div>
+                );
+              }
+
+              if (event.type === 'LABEL_REQUEST') {
+                const alreadyLabeled = labeled[event.device_id];
+                return (
+                  <div key={i} className="flex items-start gap-3 p-3 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800/60">
+                    <div className="p-2 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0">
+                      <Tag size={15} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-bold text-amber-800 dark:text-amber-300">
+                        Unknown Device — Label Required
                       </div>
-                    )}
-                  </div>
-                </div>
-              );
-            }
-
-            /* ── Empathy Block / Empathy Action ── */
-            if (event.type === 'EMPATHY_BLOCK' || event.type === 'EMPATHY_ACTION') {
-              return (
-                <div key={i} className="event-item">
-                  <div className="event-item__icon" style={{ background: 'rgba(239,68,68,0.15)' }}>
-                    <ShieldOff size={16} color="#ef4444" />
-                  </div>
-                  <div className="event-item__body">
-                    <div className="event-item__label" style={{ color: '#ef4444' }}>Empathy Gate</div>
-                    <div className="event-item__desc">{event.message}</div>
-                  </div>
-                </div>
-              );
-            }
-
-            /* ── LABEL_REQUEST (stable unknown — needs user label) ── */
-            if (event.type === 'LABEL_REQUEST') {
-              const alreadyLabeled = labeled[event.device_id];
-              return (
-                <div key={i} className="event-item" style={{
-                  borderLeft: '3px solid #f59e0b',
-                  paddingLeft: '0.5rem',
-                }}>
-                  <div className="event-item__icon" style={{ background: 'rgba(245,158,11,0.15)' }}>
-                    <Tag size={16} color="#f59e0b" />
-                  </div>
-                  <div className="event-item__body" style={{ width: '100%' }}>
-                    <div className="event-item__label" style={{ color: '#f59e0b' }}>
-                      Unknown Device — Label Required
-                    </div>
-                    <div className="event-item__desc">{event.message}</div>
-                    <div style={{ fontSize: '0.68rem', color: '#94a3b8', marginTop: '2px' }}>
-                      Device: <b>{event.device_id}</b> | Power: {event.power}W
-                    </div>
-                    {alreadyLabeled ? (
-                      <div style={{ color: '#86efac', fontSize: '0.72rem', marginTop: '0.3rem', fontWeight: 600 }}>
-                        ✅ Labeled as "{alreadyLabeled}"
+                      <div className="text-xs text-gray-700 dark:text-gray-300 mt-0.5">{event.message}</div>
+                      <div className="text-[11px] font-mono text-gray-500 dark:text-gray-400 mt-1">
+                        Device: <b>{event.device_id}</b> | Power: {event.power}W
                       </div>
-                    ) : (
-                      <LabelRequestCard
-                        event={event}
-                        onLabeled={(cls) => handleLabeled(event.device_id, cls)}
-                      />
-                    )}
-                  </div>
-                </div>
-              );
-            }
-
-            /* ── UNKNOWN_DEVICE (legacy event type) ── */
-            if (event.type === 'UNKNOWN_DEVICE') {
-              return (
-                <div key={i} className="event-item">
-                  <div className="event-item__icon" style={{ background: 'rgba(245,158,11,0.15)' }}>
-                    <HelpCircle size={16} color="#f59e0b" />
-                  </div>
-                  <div className="event-item__body">
-                    <div className="event-item__label" style={{ color: '#f59e0b' }}>Unknown Signature</div>
-                    <div className="event-item__desc">{event.message}</div>
-                  </div>
-                </div>
-              );
-            }
-
-            /* ── LOW_CONFIDENCE ── */
-            if (event.type === 'LOW_CONFIDENCE') {
-              return (
-                <div key={i} className="event-item">
-                  <div className="event-item__icon" style={{ background: 'rgba(251,191,36,0.12)' }}>
-                    <AlertTriangle size={16} color="#fbbf24" />
-                  </div>
-                  <div className="event-item__body">
-                    <div className="event-item__label" style={{ color: '#fbbf24' }}>Low Confidence</div>
-                    <div className="event-item__desc">
-                      {event.classified_as} — conf {event.confidence?.toFixed(3)} &lt; {event.threshold}
+                      {alreadyLabeled ? (
+                        <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-2">
+                          ✓ Enrolled as "{alreadyLabeled}"
+                        </div>
+                      ) : (
+                        <LabelRequestCard
+                          event={event}
+                          onLabeled={(cls) => handleLabeled(event.device_id, cls)}
+                        />
+                      )}
                     </div>
                   </div>
-                </div>
-              );
-            }
+                );
+              }
 
-            return null;
-          })
-        )}
+              if (event.type === 'LOW_CONFIDENCE') {
+                return (
+                  <div key={i} className="flex items-start gap-3 p-3 rounded-xl bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200/50 dark:border-amber-800/40">
+                    <div className="p-2 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0">
+                      <AlertTriangle size={15} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-bold text-amber-700 dark:text-amber-300">Low Confidence Detection</div>
+                      <div className="text-xs text-gray-700 dark:text-gray-300 mt-0.5">
+                        {event.classified_as} — conf {event.confidence?.toFixed(3)} &lt; {event.threshold}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              return null;
+            })
+          )}
+        </div>
       </div>
     </div>
   );
