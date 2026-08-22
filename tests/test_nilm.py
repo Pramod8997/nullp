@@ -17,14 +17,14 @@ def test_sg_filter_preserves_step_edge():
     assert derivative[99] > 30.0, "SG derivative should detect the 200W step"
     assert abs(derivative[50]) < 5.0, "SG derivative should be near 0 away from edge"
 
-# TEST 1B-2: Transient below 50W threshold must NOT trigger classification
+# TEST 1B-2: Transient below 20W threshold must NOT trigger classification
 def test_nilm_below_threshold_no_event():
-    events = detect_transients(power_window=[200.0]*50 + [240.0]*50)
-    assert len(events) == 0, "49W step should not trigger NILM event"
+    events = detect_transients(power_window=[200.0]*50 + [215.0]*50)
+    assert len(events) == 0, "15W step should not trigger NILM event"
 
-# TEST 1B-3: Transient exactly at 50W threshold MUST trigger
+# TEST 1B-3: Transient exactly at 20W threshold MUST trigger
 def test_nilm_exact_threshold_triggers():
-    events = detect_transients(power_window=[200.0]*50 + [250.0]*50)
+    events = detect_transients(power_window=[200.0]*50 + [220.0]*50)
     assert len(events) == 1
 
 # TEST 1B-4: Multiple device events in one window — all detected

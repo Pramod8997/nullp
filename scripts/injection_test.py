@@ -1,6 +1,4 @@
 import asyncio
-import time
-import json
 import logging
 from aiomqtt import Client
 

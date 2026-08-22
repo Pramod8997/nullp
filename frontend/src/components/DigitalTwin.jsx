@@ -38,7 +38,10 @@ const LabelRequestCard = ({ event, onLabeled }) => {
 
       const res = await fetch(`${API_BASE}/api/submit-label`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': import.meta.env.VITE_API_KEY || 'changeme-ems-prod-key'
+        },
         body: JSON.stringify({ device_id: event.device_id, label: trimmed, segments }),
       });
 

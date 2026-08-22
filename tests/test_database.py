@@ -21,7 +21,6 @@ async def test_sqlite_wal_mode():
 # TEST 6-2: CSV fallback activates on simulated DB lock
 @pytest.mark.asyncio
 async def test_csv_fallback_on_db_lock():
-    import tempfile, os
     csv_path = tempfile.mktemp(suffix=".csv")
     session = DBSession(config=load_config(), csv_fallback_path=csv_path,
                         batch_interval_s=0)
@@ -39,7 +38,6 @@ async def test_csv_fallback_on_db_lock():
 # TEST 6-3: CSV replay on restart — records re-inserted without duplicates
 @pytest.mark.asyncio
 async def test_csv_replay_no_duplicates():
-    import tempfile, os
     csv_path = tempfile.mktemp(suffix=".csv")
     db_path  = tempfile.mktemp(suffix=".db")
     

@@ -34,6 +34,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.uv/
 
 # ── Frontend & Node.js ──────────────────────────────────────────────────────
 node_modules/
@@ -78,6 +79,7 @@ nosetests.xml
 dmypy.json
 .ruff_cache/
 **/.ruff_cache/
+.benchmarks/
 
 # ── Databases & Runtime State ───────────────────────────────────────────────
 *.db
@@ -106,8 +108,13 @@ data/processed/
 *.tflite
 *.ckpt
 *.pkl
+*.pickle
+*.joblib
 *.h5
 *.hdf5
+*.npz
+*.parquet
+*.feather
 
 # ── Logs & Telemetry ────────────────────────────────────────────────────────
 *.log
@@ -181,6 +188,7 @@ core.*
 .cursor/
 .claude/
 graphify-out/
+**/graphify-out/
 .system_generated/
 
 # ── Documentation & Checkpoint Markdown ─────────────────────────────────────

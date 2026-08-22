@@ -27,9 +27,3 @@ class ModeClassifier:
 
 
 # Export OpenMax components for pipeline access
-from src.models.protonet import (  # noqa: E402
-    OpenMaxClassifier,
-    fit_weibull,
-    weibull_cdf,
-    WeibullModel,
-)

@@ -27,7 +27,7 @@ import logging
 import asyncio
 import yaml
 import numpy as np
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, List, Tuple
 from collections import deque
 
 import torch

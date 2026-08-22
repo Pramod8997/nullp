@@ -10,11 +10,10 @@ import random
 from typing import List, Dict, Any, Optional, TypedDict
 from contextlib import asynccontextmanager
 
-import numpy as np
 import aiosqlite
 from fastapi import (
     FastAPI, WebSocket, WebSocketDisconnect,
-    HTTPException, Depends, Header, Request,
+    HTTPException, Depends, Header,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse

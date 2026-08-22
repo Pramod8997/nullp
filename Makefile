@@ -3,12 +3,12 @@
 # ═════════════════════════════════════════════════════════════════════════════
 
 PYTHON := $(shell which python3)
-ifneq ($(wildcard venv/bin/python3),)
-	PYTHON := venv/bin/python3
-	PIP := venv/bin/pip
-else ifneq ($(wildcard .venv/bin/python3),)
+ifneq ($(wildcard .venv/bin/python3),)
 	PYTHON := .venv/bin/python3
 	PIP := .venv/bin/pip
+else ifneq ($(wildcard venv/bin/python3),)
+	PYTHON := venv/bin/python3
+	PIP := venv/bin/pip
 else
 	PIP := pip3
 endif
@@ -35,6 +35,8 @@ help:
 	@echo ""
 	@echo "  Development & Run:"
 	@echo "    make run / make dev    - Start full stack (Mosquitto, Pipeline, API, Frontend, Sim)"
+	@echo "    make demo              - Start full software demo (Pipeline, API, Virtual ESP32 Fleet)"
+	@echo "    make hil-test          - Run 10-scenario Hardware-In-The-Loop test suite"
 	@echo "    make dev-backend       - Start FastAPI backend (Port 8000)"
 	@echo "    make dev-frontend      - Start Vite Tailwind frontend (Port 5173)"
 	@echo "    make dev-pipeline      - Start real-time NILM ingestion pipeline"
@@ -101,8 +103,20 @@ dev-frontend:
 dev-pipeline:
 	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/run_pipeline.py
 
+demo:
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/demo_full_system.py
+
+hil-test:
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/hil_hardware_test.py
+
+stress-test:
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/stress_test_hardware_sim.py
+
+sim-test:
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/test_firmware_and_ai_e2e.py
+
 dev-sim:
-	export PYTHONPATH=$(PWD) && $(PYTHON) backend/scripts/simulate_esp32.py
+	export PYTHONPATH=$(PWD) && $(PYTHON) backend/scripts/simulate_esp32.py --all
 
 # ── Data Generation & Training ──────────────────────────────────────────────
 generate_data:

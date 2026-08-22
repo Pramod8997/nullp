@@ -23,14 +23,12 @@ Usage:
 """
 import os
 import sys
-import random
 import argparse
 import logging
 import time
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 # Ensure project root is importable regardless of cwd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -284,7 +282,7 @@ def train(args):
     logger.info(f"  Best validation accuracy: {best_val_acc:.3f} (episode {best_epoch})")
     logger.info(f"  Final validation accuracy: {final_val_acc:.3f}")
     logger.info(f"  Weights saved to: {WEIGHTS_DIR}/")
-    logger.info(f"  Files: protonet.pt, prototype_registry.pt, openmax_weibull.pkl, temperature_scaler.pt")
+    logger.info("  Files: protonet.pt, prototype_registry.pt, openmax_weibull.pkl, temperature_scaler.pt")
     logger.info(f"{'='*60}")
 
     # Report verdict

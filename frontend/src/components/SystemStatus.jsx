@@ -151,13 +151,13 @@ const SystemStatus = ({
               {analytics.total_kwh.toFixed(3)} kWh
             </span>
           </div>
-          {analytics.estimated_cost_usd !== undefined && (
+          {analytics.estimated_cost_inr !== undefined && (
             <div className="flex items-center justify-between">
               <span className="text-xs text-gray-500 dark:text-gray-400 font-medium flex items-center gap-1">
                 <DollarSign size={12} /> Projected Cost
               </span>
               <span className="text-xs font-mono font-bold text-amber-600 dark:text-amber-400">
-                ${analytics.estimated_cost_usd.toFixed(4)}
+                ₹{analytics.estimated_cost_inr.toFixed(2)}
               </span>
             </div>
           )}

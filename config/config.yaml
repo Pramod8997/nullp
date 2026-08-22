@@ -79,18 +79,18 @@ protonet:
   seq_len: 128
   embedding_size: 128
   distance_threshold: 15.0
-  confidence_threshold: 0.90
+  confidence_threshold: 0.70  # Lowered from 0.90 for real-world PZEM noisy data; NEVER_SHED is independent
   openmax_tail_size: 20
   openmax_alpha: 3
 
 analytics:
   tou_pricing:
-    peak:   { hours: [9,10,11,12,13,14,15,16,17,18,19,20], rate: 0.28 }
-    mid:    { hours: [7,8,21,22], rate: 0.18 }
-    off_peak: { hours: [0,1,2,3,4,5,6,23], rate: 0.09 }
+    peak:   { hours: [9,10,11,12,13,14,15,16,17,18,19,20], rate: 8.0 }
+    mid:    { hours: [7,8,21,22], rate: 6.5 }
+    off_peak: { hours: [0,1,2,3,4,5,6,23], rate: 4.0 }
 
 rl:
-  cooldown_seconds: 15.0
+  cooldown_seconds: 300.0  # 5-minute anti-short-cycling lockout (protects compressor motors)
   empathy_pmv_min: -0.5
   empathy_pmv_max: 0.5
   q_table_path: "backend/models/weights/q_table.pkl"
@@ -109,7 +109,7 @@ rl:
 preprocessing:
   sg_window: 11
   sg_poly: 2
-  transient_threshold_w: 50.0
+  transient_threshold_w: 20.0
   transient_window_s: 5
   # Fix §2.3.1: Configurable sample rate (1Hz for single-meter, 10Hz for sub-metered)
   sample_rate_hz: 1

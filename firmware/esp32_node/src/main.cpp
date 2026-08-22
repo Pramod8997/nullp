@@ -2,12 +2,11 @@
  * Module 7: Production ESP32 Firmware — Dual-Core FreeRTOS
  *
  * Edge-hybrid safety architecture for the Smart Home EMS.
+ * PZEM-004T v3.0 UART Edition
  *
  * CORE 0 (High Priority — SafetySamplingTask):
- *   - Continuous ADC sampling at ~500µs intervals
- *   - True RMS computed on 20ms AC wave-cycle boundaries (50Hz India grid)
- *   - 100ms windows (5 full cycles) for published power value
- *   - Edge-local arc-fault proxy (dP/dt > 800 W/cycle)
+ *   - Continuous PZEM polling at 100ms intervals
+ *   - Edge-local arc-fault proxy (dP/dt > 1000 W/s)
  *   - Dynamic inrush suppression via 5-sample sliding baseline
  *   - Immediate relay cutoff — zero network dependency
  *
@@ -35,6 +34,7 @@
 #include <math.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <PZEM004Tv30.h>
 
 // ═══════════════════════════════════════════════════════
 //  CONFIGURATION — CHANGE THESE PER NODE
@@ -43,48 +43,26 @@ const char* DEVICE_ID      = "node_fridge";      // Unique per node
 const char* ssid           = "YOUR_WIFI_SSID";
 const char* password       = "YOUR_WIFI_PASSWORD";
 const char* mqtt_server    = "192.168.1.100";     // EMS Backend IP
+const char* mqtt_user      = "pipeline";          // Broker username (matches mosquitto.conf)
+const char* mqtt_password  = "changeme_pipeline_password"; // Broker password
 const float RATED_WATTS    = 200.0;               // Rated power for this appliance
 const float POWER_FACTOR   = 1.0;                 // PF=1.0 for resistive; 0.85 for motors
 
 // ═══════════════════════════════════════════════════════
 //  HARDWARE PINS & CONSTANTS
 // ═══════════════════════════════════════════════════════
-const int RELAY_PIN    = 5;
-const int SENSOR_PIN   = 34;       // ADC1_CH6 for CT clamp
-const float VOLTAGE    = 230.0;    // Mains voltage (India: 230V)
-const float BURDEN_R   = 33.0;     // Burden resistor (ohms)
-const float CT_RATIO   = 1800.0;   // SCT-013-030: 1800:1 turns ratio
-const float ADC_VREF   = 3.3;      // ESP32 ADC reference voltage
-const int   ADC_MAX    = 4095;     // 12-bit ADC
-const float CRITICAL_PCT = 1.25;   // 125% of rated → hardware cutoff
+const int   RELAY_PIN      = 18;
+const bool  RELAY_ACTIVE_LOW = true;              // Standard optoisolated relays are Active-LOW
+const int   PZEM_RX_PIN    = 16;
+const int   PZEM_TX_PIN    = 17;
+const float VOLTAGE        = 230.0;    // Mains voltage (India: 230V) for reference
+const float CRITICAL_PCT   = 1.25;     // 125% of rated → hardware cutoff
 
-// ═══════════════════════════════════════════════════════
-//  ADC CALIBRATION — Piecewise Polynomial Correction
-//  (Fix §1.3.1 from Feasibility Study)
-//
-//  The ESP32 ADC is notoriously non-linear, especially
-//  below 0.1V and above 3.1V. This 3rd-order polynomial
-//  maps raw ADC readings → corrected voltage, compensating
-//  for the ADC transfer function curve.
-//
-//  Coefficients derived from ESP32 ADC characterization:
-//    V_corrected = a0 + a1*raw + a2*raw² + a3*raw³
-//
-//  Set ADC_CALIBRATION_ENABLED = false to bypass.
-// ═══════════════════════════════════════════════════════
-const bool  ADC_CALIBRATION_ENABLED = true;
-const float ADC_CAL_A0 = -0.000362f;    // offset correction
-const float ADC_CAL_A1 =  0.001112f;    // linear term (mV per raw count)
-const float ADC_CAL_A2 = -1.630e-07f;   // quadratic correction
-const float ADC_CAL_A3 =  2.053e-11f;   // cubic correction
-
-// Dead-zone filter: readings below this are clamped to 0.0
-// to prevent phantom load false positives from ADC noise
-// (Fix §1.3.1 — ESP32 ADC noise floor at very low currents)
-const float ADC_NOISE_FLOOR_W = 3.0f;
+// PZEM Instance
+PZEM004Tv30 pzem(Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
 
 // ── Edge Arc-Fault Detection Constants ──
-const float EDGE_ROC_THRESHOLD = 800.0;  // W/cycle — rapid dP/dt trip
+const float EDGE_ROC_THRESHOLD = 1000.0; // W/s — rapid dP/dt trip
 const int   BASELINE_WINDOW    = 5;      // Sliding baseline sample count
 const float BASELINE_INRUSH_CEIL = 50.0; // Baseline avg must be below this for inrush suppression
 const float INRUSH_HEADROOM    = 100.0;  // Extra W above baseline avg to tolerate during inrush
@@ -94,14 +72,15 @@ const unsigned long SAFETY_LOCKOUT_MS = 300000;  // 5-minute relay lockout after
 
 // ═══════════════════════════════════════════════════════
 //  SHARED STATE (Core 0 ↔ Core 1)
-//  portMUX spinlock: lightweight, no scheduler overhead.
-//  volatile ensures compiler doesn't optimize away reads.
 // ═══════════════════════════════════════════════════════
 portMUX_TYPE sharedMux = portMUX_INITIALIZER_UNLOCKED;
 
 volatile float sharedPowerWatts  = 0.0;
-volatile bool  sharedArcFault    = false;   // Flag from Core 0 → Core 1 for alert publishing
-volatile float sharedArcFaultRoC = 0.0;     // The dP/dt value that triggered the trip
+volatile float sharedVoltage     = 230.0;
+volatile float sharedCurrent     = 0.0;
+volatile float sharedPf          = 1.0;
+volatile bool  sharedArcFault    = false;
+volatile float sharedArcFaultRoC = 0.0;
 
 // ═══════════════════════════════════════════════════════
 //  CORE 1 STATE (Arduino loop — not shared)
@@ -109,162 +88,111 @@ volatile float sharedArcFaultRoC = 0.0;     // The dP/dt value that triggered th
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+char activeDeviceId[32]    = "node_fridge";
 bool relayLocked           = false;
 unsigned long lockStartMs  = 0;
 unsigned long lastMsgMs    = 0;
+unsigned long lastTelemetryMs = 0;
 unsigned long lastServerHB = 0;
 
 char topicPower[64];
+char topicTelemetry[64];
 char topicCommand[64];
 char topicStatus[64];
+char topicAck[64];
 
 // ═══════════════════════════════════════════════════════
-//  ADC CALIBRATION FUNCTION
-//  Maps raw ADC reading → corrected voltage (V)
-//  using piecewise polynomial curve fitting.
+//  RELAY HELPER
 // ═══════════════════════════════════════════════════════
-float calibrateADC(int raw) {
-    if (!ADC_CALIBRATION_ENABLED) {
-        return ((float)raw / (float)ADC_MAX) * ADC_VREF;
+void setRelay(bool on) {
+    if (RELAY_ACTIVE_LOW) {
+        digitalWrite(RELAY_PIN, on ? LOW : HIGH);
+    } else {
+        digitalWrite(RELAY_PIN, on ? HIGH : LOW);
     }
-    float r = (float)raw;
-    // V = a0 + a1*r + a2*r² + a3*r³
-    float voltage = ADC_CAL_A0
-                  + ADC_CAL_A1 * r
-                  + ADC_CAL_A2 * r * r
-                  + ADC_CAL_A3 * r * r * r;
-    // Clamp to valid range [0, ADC_VREF]
-    if (voltage < 0.0f) voltage = 0.0f;
-    if (voltage > ADC_VREF) voltage = ADC_VREF;
-    return voltage;
 }
 
 // ═══════════════════════════════════════════════════════
 //  CORE 0: HIGH-PRIORITY SAFETY SAMPLING TASK
-//
-//  Runs pinned to Core 0 at priority 2.
-//  Continuously samples ADC, computes true RMS on 20ms
-//  AC wave-cycle boundaries (50Hz), and evaluates
-//  edge-local arc-fault proxy with dynamic inrush
-//  suppression via a sliding baseline average.
 // ═══════════════════════════════════════════════════════
 void SafetySamplingTask(void* pvParameters) {
-    // ── Per-cycle accumulation state ──
-    float sumSqCycle     = 0.0;
-    int   samplesCycle   = 0;
-    unsigned long cycleStartUs = micros();
-
-    // ── Multi-cycle RMS accumulation (5 cycles = 100ms) ──
-    float sumSqWindow    = 0.0;
-    int   samplesWindow  = 0;
-    int   completedCycles = 0;
-    const int CYCLES_PER_WINDOW = 5;  // 5 × 20ms = 100ms
-
-    // ── Arc-fault state ──
     float lastWatts = 0.0;
     float baselineRing[BASELINE_WINDOW];
     int   baselineIdx   = 0;
     int   baselineFill  = 0;
     for (int i = 0; i < BASELINE_WINDOW; i++) baselineRing[i] = 0.0;
+    
+    unsigned long lastReadMs = millis();
 
     for (;;) {
-        // ── Sample ADC ──
-        int raw = analogRead(SENSOR_PIN);
-        // Apply piecewise polynomial ADC calibration (§1.3.1 fix)
-        float voltRaw = calibrateADC(raw);
-        float centered = voltRaw - (ADC_VREF / 2.0f);  // Center around midpoint
-        float current = (centered / BURDEN_R) * CT_RATIO;
-        sumSqCycle += current * current;
-        samplesCycle++;
+        float powerWatts = pzem.power();
+        float pzemVoltage = pzem.voltage();
+        float pzemCurrent = pzem.current();
+        float pzemPf = pzem.pf();
 
-        // ── Check for 20ms AC wave-cycle boundary (50Hz) ──
-        unsigned long nowUs = micros();
-        unsigned long elapsedUs = nowUs - cycleStartUs;
+        unsigned long nowMs = millis();
+        float dt = (nowMs - lastReadMs) / 1000.0f; 
+        lastReadMs = nowMs;
 
-        if (elapsedUs >= 20000) {  // 20ms = one full 50Hz cycle
-            // Accumulate this cycle into the multi-cycle window
-            sumSqWindow  += sumSqCycle;
-            samplesWindow += samplesCycle;
-            completedCycles++;
+        if (isnan(powerWatts) || isnan(pzemVoltage) || isnan(pzemCurrent) || isnan(pzemPf)) {
+            // Read failure, skip this cycle
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
 
-            // Reset per-cycle accumulators
-            sumSqCycle   = 0.0;
-            samplesCycle = 0;
-            cycleStartUs = nowUs;
+        // ── Calculate historical sliding baseline average ──
+        float baselineAvg = 0.0;
+        if (baselineFill > 0) {
+            for (int i = 0; i < baselineFill; i++) baselineAvg += baselineRing[i];
+            baselineAvg /= (float)baselineFill;
+        }
 
-            // ── After 5 complete cycles (100ms), compute final RMS ──
-            if (completedCycles >= CYCLES_PER_WINDOW) {
-                float rmsAmps = sqrt(sumSqWindow / (float)samplesWindow);
-                float powerWatts = rmsAmps * VOLTAGE * POWER_FACTOR;
+        // ── Edge Arc-Fault Proxy Detection (dP/dt in W/s) ──
+        if (dt > 0.0f && (powerWatts > lastWatts)) {
+            float rateOfChange = (powerWatts - lastWatts) / dt;
+            bool isNormalInrush = (baselineAvg < BASELINE_INRUSH_CEIL)
+                               && (lastWatts < (baselineAvg + INRUSH_HEADROOM));
 
-                // Dead-zone filter: clamp sub-threshold readings to zero
-                // to prevent ADC noise from triggering phantom load alerts
-                // (§1.3.1 fix — ADC noise floor)
-                if (powerWatts < ADC_NOISE_FLOOR_W) {
-                    powerWatts = 0.0f;
-                }
+            if (rateOfChange > EDGE_ROC_THRESHOLD && !isNormalInrush) {
+                // ⚡ IMMEDIATE PHYSICAL RELAY CUTOFF — NO NETWORK DEPENDENCY
+                setRelay(false);
 
-                // ── Update sliding baseline ──
-                baselineRing[baselineIdx] = powerWatts;
-                baselineIdx = (baselineIdx + 1) % BASELINE_WINDOW;
-                if (baselineFill < BASELINE_WINDOW) baselineFill++;
-
-                float baselineAvg = 0.0;
-                for (int i = 0; i < baselineFill; i++) baselineAvg += baselineRing[i];
-                baselineAvg /= (float)baselineFill;
-
-                // ── Edge Arc-Fault Proxy Detection (dP/dt) ──
-                float rateOfChange = fabs(powerWatts - lastWatts);
-
-                // Dynamic inrush suppression:
-                // Only suppress if the baseline is genuinely low (appliance cold-start)
-                // AND the previous reading was within normal inrush headroom of baseline.
-                // If a 150W cooler is already running, baseline > 50W → inrush check fails
-                // → arc-fault detection remains armed (correct behavior).
-                bool isNormalInrush = (baselineAvg < BASELINE_INRUSH_CEIL)
-                                   && (lastWatts < (baselineAvg + INRUSH_HEADROOM));
-
-                if (rateOfChange > EDGE_ROC_THRESHOLD && !isNormalInrush) {
-                    // ⚡ IMMEDIATE PHYSICAL RELAY CUTOFF — NO NETWORK DEPENDENCY
-                    digitalWrite(RELAY_PIN, LOW);
-
-                    // Signal Core 1 to publish alert (best-effort)
-                    taskENTER_CRITICAL(&sharedMux);
-                    sharedArcFault    = true;
-                    sharedArcFaultRoC = rateOfChange;
-                    taskEXIT_CRITICAL(&sharedMux);
-
-                    Serial.printf("[CORE0] ⚡ EDGE ARC-FAULT! dP/dt=%.0fW/cycle "
-                                  "(threshold: %.0f). Relay CUTOFF.\n",
-                                  rateOfChange, EDGE_ROC_THRESHOLD);
-                }
-
-                // ── Overcurrent Cutoff (% of rated) ──
-                float criticalWatts = RATED_WATTS * CRITICAL_PCT;
-                if (powerWatts > criticalWatts) {
-                    digitalWrite(RELAY_PIN, LOW);
-                    Serial.printf("[CORE0] ⚡ OVERCURRENT! %.1fW > %.1fW. Relay CUTOFF.\n",
-                                  powerWatts, criticalWatts);
-                }
-
-                lastWatts = powerWatts;
-
-                // ── Write shared power under spinlock ──
                 taskENTER_CRITICAL(&sharedMux);
-                sharedPowerWatts = powerWatts;
+                sharedArcFault    = true;
+                sharedArcFaultRoC = rateOfChange;
                 taskEXIT_CRITICAL(&sharedMux);
 
-                // Reset multi-cycle accumulators
-                sumSqWindow     = 0.0;
-                samplesWindow   = 0;
-                completedCycles = 0;
+                Serial.printf("[CORE0] ⚡ EDGE ARC-FAULT! dP/dt=%.0fW/s "
+                              "(threshold: %.0f). Relay CUTOFF.\n",
+                              rateOfChange, EDGE_ROC_THRESHOLD);
             }
         }
 
-        // ~500µs between samples — use portYIELD to prevent TWDT starvation
-        // on Core 0, while maintaining sub-ms sampling granularity.
-        delayMicroseconds(500);
-        portYIELD();  // Patch 11: Yield CPU to prevent FreeRTOS Idle Task starvation
+        // ── Overcurrent Cutoff (% of rated) ──
+        // Allow brief starting inrush if baseline was idle, otherwise trip on sustained overload
+        float criticalWatts = RATED_WATTS * CRITICAL_PCT;
+        if (powerWatts > criticalWatts && !isNormalInrush) {
+            setRelay(false);
+            Serial.printf("[CORE0] ⚡ OVERCURRENT! %.1fW > %.1fW. Relay CUTOFF.\n",
+                          powerWatts, criticalWatts);
+        }
+
+        // ── Update sliding baseline ring buffer with current sample ──
+        baselineRing[baselineIdx] = powerWatts;
+        baselineIdx = (baselineIdx + 1) % BASELINE_WINDOW;
+        if (baselineFill < BASELINE_WINDOW) baselineFill++;
+
+        lastWatts = powerWatts;
+
+        // ── Write shared measurements under spinlock ──
+        taskENTER_CRITICAL(&sharedMux);
+        sharedPowerWatts = powerWatts;
+        sharedVoltage    = pzemVoltage;
+        sharedCurrent    = pzemCurrent;
+        sharedPf         = pzemPf;
+        taskEXIT_CRITICAL(&sharedMux);
+
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -272,11 +200,8 @@ void SafetySamplingTask(void* pvParameters) {
 //  MQTT CALLBACK — Relay Commands from Pipeline (Core 1)
 // ═══════════════════════════════════════════════════════
 void callback(char* topic, byte* payload, unsigned int length) {
-    // Any message from server = heartbeat
     lastServerHB = millis();
 
-    // Fix: Bounded static buffer prevents stack overflow from oversized payloads
-    // on the small FreeRTOS task stack.
     static const unsigned int MAX_MQTT_PAYLOAD = 256;
     if (length > MAX_MQTT_PAYLOAD) {
         Serial.printf("[MQTT] Payload too large (%u bytes), dropping.\n", length);
@@ -288,16 +213,19 @@ void callback(char* topic, byte* payload, unsigned int length) {
     String message = String(msg);
 
     if (String(topic) == String(topicCommand)) {
-        if (message == "ON" && !relayLocked) {
-            digitalWrite(RELAY_PIN, HIGH);
-            Serial.println("[RELAY] ON via server command");
+        if (message == "ON") {
+            if (!relayLocked) {
+                setRelay(true);
+                Serial.println("[RELAY] ON via server command");
+                client.publish(topicAck, "ON_CONFIRMED");
+            } else {
+                Serial.println("[RELAY] ON rejected — relay locked");
+                client.publish(topicAck, "LOCKOUT_NACK");
+            }
         } else if (message == "OFF") {
-            digitalWrite(RELAY_PIN, LOW);
+            setRelay(false);
             Serial.println("[RELAY] OFF via server command");
-            // Publish ACK (WS-5.1)
-            char ackTopic[64];
-            snprintf(ackTopic, sizeof(ackTopic), "home/plug/%s/ack", DEVICE_ID);
-            client.publish(ackTopic, "OFF_CONFIRMED");
+            client.publish(topicAck, "OFF_CONFIRMED");
         } else if (message == "WARNING") {
             Serial.println("[SAFETY] Warning received from server");
         }
@@ -309,31 +237,15 @@ void callback(char* topic, byte* payload, unsigned int length) {
 // ═══════════════════════════════════════════════════════
 void setup() {
     Serial.begin(115200);
+    
+    // Initialize PZEM Serial
+    Serial2.begin(9600, SERIAL_8N1, PZEM_RX_PIN, PZEM_TX_PIN);
+
     pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, LOW);  // Start with relay OFF for safety
-
-    // Build topic strings
-    snprintf(topicPower,   sizeof(topicPower),   "home/sensor/%s/power",   DEVICE_ID);
-    snprintf(topicCommand, sizeof(topicCommand), "home/plug/%s/command",   DEVICE_ID);
-    snprintf(topicStatus,  sizeof(topicStatus),  "home/sensor/%s/status",  DEVICE_ID);
-
-    // Connect WiFi
-    WiFi.begin(ssid, password);
-    Serial.print("[WiFi] Connecting");
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
-
-    // Configure MQTT
-    client.setServer(mqtt_server, 1883);
-    client.setCallback(callback);
-    client.setKeepAlive(15);
+    setRelay(false); // Start with relay OFF for safety
 
     // ═══ Launch Core 0 Safety Sampling Task ═══
-    // Priority 2 (above default Arduino loop priority 1)
-    // Stack size 4096 bytes, pinned to Core 0
+    // Launched BEFORE WiFi so safety works offline
     xTaskCreatePinnedToCore(
         SafetySamplingTask,   // Task function
         "SafetySampling",     // Name
@@ -344,25 +256,69 @@ void setup() {
         0                     // Core 0
     );
     Serial.println("[INIT] Core 0: SafetySamplingTask launched (priority 2)");
+
+    // Connect WiFi with timeout
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(ssid, password);
+    Serial.print("[WiFi] Connecting");
+    unsigned long wifiStart = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - wifiStart < 30000)) {
+        delay(500);
+        Serial.print(".");
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+        Serial.println("\n[WiFi] Connection timeout. Proceeding offline.");
+    }
+
+    // Auto-provision Device ID if left blank or set to "auto"
+    if (strcmp(DEVICE_ID, "") == 0 || strcmp(DEVICE_ID, "auto") == 0) {
+        uint8_t mac[6];
+        WiFi.macAddress(mac);
+        snprintf(activeDeviceId, sizeof(activeDeviceId), "esp32_%02X%02X%02X", mac[3], mac[4], mac[5]);
+    } else {
+        strncpy(activeDeviceId, DEVICE_ID, sizeof(activeDeviceId) - 1);
+        activeDeviceId[sizeof(activeDeviceId) - 1] = '\0';
+    }
+
+    // Build topic strings dynamically from activeDeviceId
+    snprintf(topicPower,     sizeof(topicPower),     "home/sensor/%s/power",     activeDeviceId);
+    snprintf(topicTelemetry, sizeof(topicTelemetry), "home/sensor/%s/telemetry", activeDeviceId);
+    snprintf(topicCommand,   sizeof(topicCommand),   "home/plug/%s/command",     activeDeviceId);
+    snprintf(topicStatus,    sizeof(topicStatus),    "home/sensor/%s/status",    activeDeviceId);
+    snprintf(topicAck,       sizeof(topicAck),       "home/plug/%s/ack",         activeDeviceId);
+
+    Serial.printf("[INIT] Device ID: %s\n", activeDeviceId);
+
+    // Configure MQTT
+    client.setServer(mqtt_server, 1883);
+    client.setCallback(callback);
+    client.setKeepAlive(15);
+    
     Serial.println("[INIT] Core 1: MQTT + Telemetry (Arduino loop)");
 }
 
 // ═══════════════════════════════════════════════════════
 //  MQTT RECONNECT (Core 1)
 // ═══════════════════════════════════════════════════════
-unsigned long lastReconnectAttempt = 0;  // Patch 12: Non-blocking reconnect timer
+unsigned long lastReconnectAttempt = 0;
 
 void reconnectMQTT() {
-    // Patch 12: Non-blocking reconnect — returns immediately if not time yet
+    if (WiFi.status() != WL_CONNECTED) return;
+    
     if (millis() - lastReconnectAttempt < 5000) {
-        return;  // Not time to retry yet
+        return;
     }
     lastReconnectAttempt = millis();
 
-    Serial.printf("[MQTT] Connecting as %s...\n", DEVICE_ID);
-    if (client.connect(DEVICE_ID)) {
+    Serial.printf("[MQTT] Connecting as %s...\n", activeDeviceId);
+    // Connect with auth credentials and Last Will & Testament (LWT)
+    if (client.connect(activeDeviceId, mqtt_user, mqtt_password, topicStatus, 1, true, "OFFLINE")) {
         Serial.println("[MQTT] Connected");
         client.subscribe(topicCommand);
+        // Announce online status
+        client.publish(topicStatus, "ONLINE", true);
         lastServerHB = millis();
     } else {
         Serial.printf("[MQTT] Failed rc=%d, will retry in 5s\n", client.state());
@@ -384,7 +340,7 @@ void loop() {
     powerWatts = sharedPowerWatts;
     taskEXIT_CRITICAL(&sharedMux);
 
-    // ── 5-Minute Anti-Thrashing Lockout (upgraded from 5s) ──
+    // ── 5-Minute Anti-Thrashing Lockout ──
     if (relayLocked && (millis() - lockStartMs > SAFETY_LOCKOUT_MS)) {
         relayLocked = false;
         Serial.println("[SAFETY] 5-minute lockout complete. Relay unlocked.");
@@ -404,11 +360,11 @@ void loop() {
     if (arcFaultTripped) {
         relayLocked = true;
         lockStartMs = millis();
-        // Best-effort alert publish (safety already acted on Core 0)
+        // Best-effort alert publish
         if (client.connected()) {
             char alertMsg[80];
             snprintf(alertMsg, sizeof(alertMsg),
-                     "EDGE_ARC_FAULT:dP/dt=%.0fW/cycle", arcRoC);
+                     "EDGE_ARC_FAULT:dP/dt=%.0fW/s", arcRoC);
             client.publish(topicStatus, alertMsg);
         }
     }
@@ -439,11 +395,28 @@ void loop() {
         }
     }
 
-    // ── Publish Power at 1Hz (plain float, not JSON) ──
+    // ── Publish Fast Power at 1Hz (plain float for NILM transient detection) ──
     if (millis() - lastMsgMs > 1000) {
         lastMsgMs = millis();
         char payload[16];
         dtostrf(powerWatts, 6, 2, payload);
         client.publish(topicPower, payload);
+    }
+
+    // ── Publish Rich Electrical Diagnostics at 0.1Hz (every 10s JSON) ──
+    if (millis() - lastTelemetryMs > 10000) {
+        lastTelemetryMs = millis();
+        float v, i, pf;
+        taskENTER_CRITICAL(&sharedMux);
+        v  = sharedVoltage;
+        i  = sharedCurrent;
+        pf = sharedPf;
+        taskEXIT_CRITICAL(&sharedMux);
+
+        char jsonPayload[128];
+        snprintf(jsonPayload, sizeof(jsonPayload),
+                 "{\"v\":%.1f,\"i\":%.2f,\"w\":%.1f,\"pf\":%.2f}",
+                 v, i, powerWatts, pf);
+        client.publish(topicTelemetry, jsonPayload);
     }
 }

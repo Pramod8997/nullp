@@ -10,7 +10,7 @@ from httpx import AsyncClient, ASGITransport
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.api.main import app, system_state, state_lock
+from src.api.main import app
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────

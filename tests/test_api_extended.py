@@ -10,7 +10,7 @@ from httpx import AsyncClient as OrigAsyncClient, ASGITransport
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.api.main import app, manager, system_state
+from src.api.main import app, manager
 
 # Ensure app.state.broadcast is set to manager.broadcast
 app.state.broadcast = manager.broadcast

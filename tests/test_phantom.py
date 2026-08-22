@@ -1,4 +1,3 @@
-import pytest
 from src.pipeline.phantom_tracker import PhantomTracker
 
 

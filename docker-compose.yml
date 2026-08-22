@@ -10,9 +10,9 @@ services:
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
     restart: always
-    # Issue #25: Health check for Mosquitto
+    # Health check — uses credentials since allow_anonymous=false
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
+      test: ["CMD", "mosquitto_sub", "-u", "pipeline", "-P", "${MQTT_PASSWORD:-changeme_pipeline_password}", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -22,6 +22,8 @@ services:
     command: python scripts/run_pipeline.py
     environment:
       - MQTT_BROKER=mosquitto
+      - MQTT_USERNAME=${MQTT_USERNAME:-pipeline}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-changeme_pipeline_password}
       - PYTHONPATH=/app
     depends_on:
       mosquitto:
@@ -41,15 +43,16 @@ services:
       - "8000:8000"
     environment:
       - MQTT_BROKER=mosquitto
+      - MQTT_USERNAME=${MQTT_USERNAME:-pipeline}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-changeme_pipeline_password}
       - PYTHONPATH=/app
-      # Issue #7 & #8: Auth and CORS configuration
+      # Auth and CORS configuration
       - EMS_API_KEY=${EMS_API_KEY:-changeme-ems-prod-key}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
     depends_on:
       mosquitto:
         condition: service_healthy
     restart: always
-    # Issue #25: Health check for API service
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -59,3 +62,16 @@ services:
       - ./config:/app/config
       - ./data:/app/data
       - ./src:/app/src
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://ems-api:8000
+      - VITE_API_KEY=${EMS_API_KEY:-changeme-ems-prod-key}
+    depends_on:
+      - ems-api
+    restart: always

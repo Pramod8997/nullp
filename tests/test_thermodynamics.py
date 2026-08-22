@@ -1,4 +1,3 @@
-import pytest
 from hypothesis import given, strategies as st
 from src.models.thermodynamics import (
     compute_pmv,

@@ -215,16 +215,48 @@ async def simulate_device(client: aiomqtt.Client, cfg: dict):
             payload = f"{power:.2f}"
             await client.publish(topic, payload=payload)
 
+            # Publish 10s diagnostic telemetry
+            if tick % 10 == 0:
+                telemetry_topic = f"home/sensor/{device_id}/telemetry"
+                voltage = 230.0 + random.uniform(-4.0, 4.0)
+                current = (power / voltage) if voltage > 0 else 0.0
+                pf = min(0.99, max(0.70, random.gauss(0.95, 0.05)))
+                diag_payload = json.dumps({"v": round(voltage, 1), "i": round(current, 2), "w": round(power, 1), "pf": round(pf, 2)})
+                await client.publish(telemetry_topic, payload=diag_payload)
+
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Error in {device_id} loop: {e}")
 
 
+async def handle_relay_commands(client: aiomqtt.Client):
+    """Listen for server relay commands and respond with hardware ACKs."""
+    cmd_topic = "home/plug/+/command"
+    await client.subscribe(cmd_topic)
+    logger.info(f"👂 Simulator listening for relay commands on {cmd_topic}")
+    async for message in client.messages:
+        topic_str = str(message.topic)
+        payload_str = message.payload.decode("utf-8", errors="replace").strip()
+        parts = topic_str.split("/")
+        if len(parts) >= 3:
+            dev_id = parts[2]
+            ack_topic = f"home/plug/{dev_id}/ack"
+            if payload_str == "ON":
+                logger.info(f"[SIM RELAY] Turned ON {dev_id} via server command")
+                await client.publish(ack_topic, "ON_CONFIRMED")
+            elif payload_str == "OFF":
+                logger.info(f"[SIM RELAY] Turned OFF {dev_id} via server command")
+                await client.publish(ack_topic, "OFF_CONFIRMED")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Mock ESP32 1Hz Data Generator (10 devices)")
-    parser.add_argument("--broker", type=str, default="localhost", help="MQTT Broker address")
-    parser.add_argument("--port", type=int, default=1883, help="MQTT Broker port")
+    parser.add_argument("--broker", type=str, default=os.getenv("MQTT_BROKER", "localhost"), help="MQTT Broker address")
+    parser.add_argument("--port", type=int, default=int(os.getenv("MQTT_PORT", "1883")), help="MQTT Broker port")
+    parser.add_argument("--username", type=str, default=os.getenv("MQTT_USERNAME", "pipeline"), help="MQTT Username")
+    parser.add_argument("--password", type=str, default=os.getenv("MQTT_PASSWORD", "changeme_pipeline_password"), help="MQTT Password")
+    parser.add_argument("--all", action="store_true", default=True, help="Simulate all devices regardless of simulated flag in config.yaml")
     args = parser.parse_args()
 
     shutdown_event = asyncio.Event()
@@ -244,41 +276,52 @@ async def main():
 
     while not shutdown_event.is_set():
         try:
-            async with aiomqtt.Client(args.broker, port=args.port) as client:
-                # WS-1/2: Only simulate devices marked as simulated in config
-                try:
-                    with open("config/config.yaml", "r") as f:
-                        sys_config = yaml.safe_load(f)
-                        sim_flags = {
-                            k: v.get("simulated", True) 
-                            for k, v in sys_config.get("devices", {}).items()
-                        }
-                except Exception as e:
-                    logger.warning(f"Could not load config.yaml ({e}), simulating all devices.")
-                    sim_flags = {}
-
-                active_devices = [d for d in DEVICES if sim_flags.get(d['id'], True)]
+            async with aiomqtt.Client(
+                args.broker,
+                port=args.port,
+                username=args.username,
+                password=args.password
+            ) as client:
+                # Load config flags or simulate all if --all flag
+                if args.all:
+                    active_devices = DEVICES
+                else:
+                    try:
+                        with open("config/config.yaml", "r") as f:
+                            sys_config = yaml.safe_load(f)
+                            sim_flags = {
+                                k: v.get("simulated", True) 
+                                for k, v in sys_config.get("devices", {}).items()
+                            }
+                    except Exception as e:
+                        logger.warning(f"Could not load config.yaml ({e}), simulating all devices.")
+                        sim_flags = {}
+                    active_devices = [d for d in DEVICES if sim_flags.get(d['id'], True)]
 
                 logger.info(f"✅ Simulator connected to {args.broker}:{args.port}")
                 logger.info(f"   Simulating Devices ({len(active_devices)}): {[d['id'] for d in active_devices]}")
 
+                # Announce all devices online
+                for d in active_devices:
+                    status_topic = f"home/sensor/{d['id']}/status"
+                    await client.publish(status_topic, "ONLINE")
+
                 tasks = [asyncio.create_task(simulate_device(client, cfg)) for cfg in active_devices]
+                relay_task = asyncio.create_task(handle_relay_commands(client))
+                tasks.append(relay_task)
                 shutdown_waiter = asyncio.create_task(shutdown_event.wait())
 
                 try:
-                    # Wait until shutdown signal or a device task crashes
                     done, pending = await asyncio.wait(
                         [shutdown_waiter, *tasks],
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 finally:
-                    # Always cancel all pending tasks to avoid leaks
                     for t in tasks:
                         if not t.done():
                             t.cancel()
                     if not shutdown_waiter.done():
                         shutdown_waiter.cancel()
-                    # Wait for cancellation to complete
                     await asyncio.gather(*tasks, shutdown_waiter, return_exceptions=True)
                 break
 

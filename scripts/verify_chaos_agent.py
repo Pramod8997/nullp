@@ -10,7 +10,6 @@ Tests every adversarial vector that the audit identified.
 import sys
 import os
 import math
-import asyncio
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))

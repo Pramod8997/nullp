@@ -18,7 +18,7 @@ import time
 import os
 import yaml
 from dataclasses import dataclass, field
-from typing import Callable, Awaitable, Dict, Any, Optional, List
+from typing import Callable, Awaitable, Dict, Any, Optional
 from src.hardware.mqtt import aiomqtt
 
 logger = logging.getLogger(__name__)
@@ -305,8 +305,8 @@ class FleetDiagnosticsMonitor:
             with open("safety_events.log", "a") as f:
                 f.write(f"{time.time()},{level},{device_id},"
                         f"{watts},{pct_or_roc}\n")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to write safety event log: {e}")
 
     async def _log_event_async(self, level: str, device_id: str,
                                watts: float, pct_or_roc: float) -> None:

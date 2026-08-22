@@ -12,7 +12,6 @@ import sys
 import os
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -143,7 +142,7 @@ base_signal[30:90] = 1200.0  # Kettle-like profile
 
 augmented = torch.stack([realistic_augment(base_signal) for _ in range(100)])
 variance = augmented.var(dim=0).mean().item()
-print(f"  Base signal variance: 0.0 (fixed profile)")
+print("  Base signal variance: 0.0 (fixed profile)")
 print(f"  Augmented variance:   {variance:.2f}")
 
 if variance > 100.0:

@@ -2,14 +2,17 @@ import re
 import aiomqtt
 import asyncio
 import logging
-from typing import Callable, Awaitable, Optional, Union, Any, List, Set, Dict
+from typing import Callable, Awaitable, Optional, Union, Any, List, Set
 
 logger = logging.getLogger(__name__)
 
 class MQTTClientManager:
-    def __init__(self, broker: str, port: int = 1883):
+    def __init__(self, broker: str, port: int = 1883,
+                 username: Optional[str] = None, password: Optional[str] = None):
         self.broker = broker
         self.port = port
+        self.username = username
+        self.password = password
         self.client: Optional[aiomqtt.Client] = None
         self._read_callback: Optional[Callable[[str, Union[str, bytes, bytearray, int, float, None]], Awaitable[None]]] = None
         self._connected: bool = True
@@ -26,7 +29,10 @@ class MQTTClientManager:
         # Reconnect loop
         while True:
             try:
-                async with aiomqtt.Client(self.broker, port=self.port) as client:
+                async with aiomqtt.Client(
+                    self.broker, port=self.port,
+                    username=self.username, password=self.password
+                ) as client:
                     self.client = client
                     self._connected = True
                     logger.info(f"Connected to MQTT broker at {self.broker}:{self.port}")
@@ -51,15 +57,46 @@ class MQTTClientManager:
                 logger.info("MQTT client task cancelled.")
                 break
 
-    async def publish_command(self, write_topic: str, payload: str) -> None:
-        if not self.client:
-            logger.error("MQTT client not connected, cannot publish.")
-            return
-        try:
-            await self.client.publish(write_topic, payload=payload, qos=1)
-            logger.debug(f"Published to {write_topic}: {payload}")
-        except Exception as e:
-            logger.error(f"Failed to publish to {write_topic}: {e}")
+    async def publish_command(self, write_topic: str, payload: str,
+                              retries: int = 3, retry_delay: float = 1.0) -> None:
+        """Publish a relay command with retry logic for reliability.
+        
+        Safety-critical relay commands (ON/OFF) must not be silently lost
+        during momentary WiFi dropouts. Retries up to `retries` times
+        with exponential backoff.
+        """
+        for attempt in range(retries):
+            if not self.client:
+                if attempt < retries - 1:
+                    logger.warning(
+                        f"MQTT not connected, retry {attempt+1}/{retries} "
+                        f"for {write_topic} in {retry_delay}s"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # exponential backoff
+                    continue
+                logger.error(
+                    f"MQTT client not connected after {retries} retries, "
+                    f"relay command LOST: {write_topic} = {payload}"
+                )
+                return
+            try:
+                await self.client.publish(write_topic, payload=payload, qos=1)
+                logger.debug(f"Published to {write_topic}: {payload}")
+                return  # Success
+            except Exception as e:
+                if attempt < retries - 1:
+                    logger.warning(
+                        f"Publish failed (attempt {attempt+1}/{retries}): {e}. "
+                        f"Retrying in {retry_delay}s"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error(
+                        f"Failed to publish to {write_topic} after {retries} "
+                        f"attempts: {e}"
+                    )
 
 
 def topic_matches_sub(sub: str, topic: str) -> bool:

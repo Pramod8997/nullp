@@ -7,6 +7,8 @@ import time
 import math
 from collections import deque
 import statistics
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
 
 class SoftAnomalyWatchdog:
     def __init__(self, window_size: int = 60, z_score_threshold: float = 3.0):
@@ -70,9 +72,6 @@ class SoftAnomalyWatchdog:
         history.append(reading)
         
         return z_score > self.z_score_threshold
-
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
 
 @dataclass
 class WatchdogEvent:

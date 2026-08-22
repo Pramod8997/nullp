@@ -92,13 +92,13 @@ from src.pipeline.safety import SafetyMonitor
 from src.rl.agent import TabularQLearningAgent, PolicyPromotionGate
 
 # ML & Pipeline Modules
-from src.models.thermodynamics import ThermodynamicsModel as DigitalTwinEnv, PMVThermodynamics
+from src.models.thermodynamics import ThermodynamicsModel as DigitalTwinEnv
 from src.models.protonet import (
     CNN1DEncoder, TemperatureScaler, WEibullOpenMax,
     SupportSetManager, ProtoNet, PrototypeRegistry, OpenMaxWeibull
 )
 from src.models.calibration import TemperatureScaler as CalibratedTemperatureScaler
-from src.pipeline.aggregate_nilm import NILMTransientDetector
+from src.pipeline.aggregate_nilm import NILMTransientDetector, TRANSIENT_THRESHOLD_W
 from src.pipeline.delta_stability import DeltaStabilityAnalyzer
 from src.pipeline.phantom_tracker import PhantomTracker
 from src.pipeline.watchdog import SoftAnomalyWatchdog
@@ -206,7 +206,7 @@ class EMSOrchestrator:
         self.nilm_detector = NILMTransientDetector(
             sg_window=pre_cfg.get("sg_window", 7),
             sg_polyord=pre_cfg.get("sg_poly", 2),
-            threshold=pre_cfg.get("transient_threshold_w", 50.0),
+            threshold=pre_cfg.get("transient_threshold_w", TRANSIENT_THRESHOLD_W),
             window_size=pre_cfg.get("transient_window_s", 5),
             embed_window=128,
         )
@@ -324,7 +324,7 @@ class EMSOrchestrator:
                 if os.path.exists(omw_path):
                     self.weibull = OpenMaxWeibull(num_classes=10)
                     self.weibull.load(omw_path)
-                    logger.info(f"✅ OpenMax Weibull loaded")
+                    logger.info("✅ OpenMax Weibull loaded")
             except Exception as e:
                 logger.warning(f"OpenMax Weibull load failed: {e}")
 
@@ -376,7 +376,7 @@ class EMSOrchestrator:
             scaler_path = os.path.join(weights_dir, "temperature_scaler.pth")
             if os.path.exists(scaler_path) and not hasattr(self, 'calibrated_scaler'):
                 self.temp_scaler.load(scaler_path)
-                logger.info(f"✅ Legacy temperature scaler loaded")
+                logger.info("✅ Legacy temperature scaler loaded")
         except Exception as e:
             logger.warning(f"Legacy T-scaler load failed: {e}")
 
@@ -544,6 +544,15 @@ class EMSOrchestrator:
                 })
                 return
 
+            if topic.endswith("/status"):
+                logger.warning(f"Safety event received from {device_id}: {payload_str}")
+                await self._broadcast_event({
+                    "type": "SAFETY_EVENT",
+                    "device_id": device_id,
+                    "message": f"Status Update: {payload_str}",
+                })
+                return
+
             # Bug 3.1 fix: Handle label submissions via MQTT
             # (bridging REST API → MQTT → pipeline for ProtoNet registry updates)
             if "/label" in topic:
@@ -558,7 +567,26 @@ class EMSOrchestrator:
                     logger.error(f"Failed to parse label MQTT message: {e}")
                 return
 
-            power_watts = float(payload_str) if payload_str else 0.0
+            # Dual-format payload extraction (plain float or JSON)
+            power_watts = 0.0
+            stripped_payload = payload_str.strip()
+            if stripped_payload.startswith("{") and stripped_payload.endswith("}"):
+                try:
+                    data = json.loads(stripped_payload)
+                    if isinstance(data, dict):
+                        power_watts = float(data.get("power", data.get("watts", data.get("W", data.get("value", 0.0)))))
+                    else:
+                        power_watts = float(data)
+                except Exception as parse_err:
+                    logger.warning(f"🚫 Failed to extract power from JSON payload on {topic}: {parse_err}")
+                    return
+            else:
+                try:
+                    power_watts = float(stripped_payload) if stripped_payload else 0.0
+                except ValueError:
+                    logger.warning(f"🚫 Non-numeric payload on {topic}: '{payload_str}'")
+                    return
+
             # Fix: Sanitize NaN/Inf payloads to prevent ML embedding corruption
             # and SQLite data poisoning from faulty sensors
             import math
@@ -616,7 +644,7 @@ class EMSOrchestrator:
                 self.nilm_detectors[device_id] = NILMTransientDetector(
                     sg_window=pre_cfg.get("sg_window", 7),
                     sg_polyord=pre_cfg.get("sg_poly", 2),
-                    threshold=pre_cfg.get("transient_threshold_w", 50.0),
+                    threshold=pre_cfg.get("transient_threshold_w", TRANSIENT_THRESHOLD_W),
                     window_size=pre_cfg.get("transient_window_s", 5),
                     embed_window=128,
                 )
@@ -888,14 +916,19 @@ class EMSOrchestrator:
                         f" | Promoted={'YES' if self.promo_gate.is_promoted else 'SHADOW'}"
                     )
 
-                    if action == "SHED" and class_name not in self.agent.NEVER_SHED:
+                    # Defense-in-depth: check BOTH class_name AND device_id against NEVER_SHED
+                    device_is_critical = (
+                        device_id in self.agent.NEVER_SHED
+                        or any(k in device_id for k in ['fridge', 'freezer', 'pc'])
+                    )
+                    if action == "SHED" and class_name not in self.agent.NEVER_SHED and not device_is_critical:
                         if self.promo_gate.is_promoted:
                             # LIVE MODE: Actually send relay command
                             await self.mqtt.publish_command(
                                 f"home/plug/{device_id}/command", "OFF"
                             )
                         else:
-                            logger.info(f"  ↳ Shadow mode: SHED logged but NOT executed")
+                            logger.info("  ↳ Shadow mode: SHED logged but NOT executed")
                         await self._broadcast_event({
                             "type": "RL_ACTION",
                             "device_id": device_id,
@@ -1083,18 +1116,19 @@ class EMSOrchestrator:
                 self.config['mqtt']['topics']['reads'],
                 "home/plug/+/ack",
                 "home/ml/label",  # Bug 3.1 fix: Subscribe to label topic
+                "home/sensor/+/status",
             ])
         )
 
         logger.info("═══════════════════════════════════════════")
         logger.info("  🏠 EMS Pipeline Orchestrator ONLINE")
-        logger.info(f"  Safety Layer: ✅ (parallel task)")
-        logger.info(f"  ProtoNet: " + ("✅" if self.encoder else "⚠️ (disabled)"))
-        logger.info(f"  OpenMax: " + ("✅" if getattr(self.weibull, '_weibull', None) else "⚠️"))
+        logger.info("  Safety Layer: ✅ (parallel task)")
+        logger.info("  ProtoNet: " + ("✅" if self.encoder else "⚠️ (disabled)"))
+        logger.info("  OpenMax: " + ("✅" if getattr(self.weibull, '_weibull', None) else "⚠️"))
         logger.info(f"  Temp Scaler: T={self.temp_scaler.temperature.item():.4f}")
         logger.info(f"  Confidence Gate: {self.confidence_threshold}")
-        logger.info(f"  Delta Stability: ✅")
-        logger.info(f"  RL Agent: ✅ | Empathy Gate: ✅")
+        logger.info("  Delta Stability: ✅")
+        logger.info("  RL Agent: ✅ | Empathy Gate: ✅")
         logger.info("═══════════════════════════════════════════")
 
         try:

@@ -1,4 +1,3 @@
-import pytest
 import torch
 from src.models.calibration import temperature_scale, confidence_gate
 
@@ -37,7 +36,7 @@ def test_confidence_gate_blocks_rl_below_threshold():
     T = 1.0
     probs = temperature_scale(logits, T=T)
     confidence = probs.max().item()
-    assume(confidence < 0.90)
+    assert confidence < 0.90
     result = confidence_gate(confidence, threshold=0.90)
     assert result.action == "SKIP_RL"
     assert result.event_type == "LOW_CONFIDENCE"

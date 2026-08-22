@@ -25,3 +25,5 @@ balagan-agent>=0.1.0
 # Meta-learning augmentation implemented natively in scripts/verify_ml_agent.py
 locust>=2.30.0
 locust-plugins>=4.5.0
+hypothesis>=6.80.0
+freezegun>=1.2.0

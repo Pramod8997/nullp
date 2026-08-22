@@ -1,16 +1,14 @@
-import asyncio
 import json
 import os
-import shutil
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Skip the entire module if playwright is not installed (e.g., in CI backend jobs)
-pytest.importorskip("playwright")
-
-from playwright.async_api import Page
+try:
+    from playwright.async_api import Page
+except ImportError:
+    Page = object
 
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

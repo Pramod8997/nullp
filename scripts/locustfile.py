@@ -1,6 +1,5 @@
 import time
 import random
-import json
 from locust import task, events, User, between
 import paho.mqtt.client as mqtt
 

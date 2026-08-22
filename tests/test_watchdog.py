@@ -1,5 +1,5 @@
 import pytest
-from src.pipeline.watchdog import Watchdog, WatchdogEvent
+from src.pipeline.watchdog import Watchdog
 
 # TEST 1D-1: z-score is 0 for a steady signal
 def test_watchdog_zscore_steady_signal():

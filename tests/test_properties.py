@@ -1,6 +1,5 @@
 import math
 import numpy as np
-import pytest
 from hypothesis import given, strategies as st, assume
 
 from src.models.protonet import euclidean_distance_squared

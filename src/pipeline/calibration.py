@@ -1,11 +1,5 @@
 import numpy as np
 from typing import List
-from src.models.calibration import (
-    temperature_scale,
-    confidence_gate,
-    ConfidenceGateResult,
-    TemperatureScaler,
-)
 
 def compute_ece(confidences: List[float], correct_labels: List[bool], n_bins: int = 10) -> float:
     """

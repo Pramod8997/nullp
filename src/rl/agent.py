@@ -1,4 +1,5 @@
 import math
+from datetime import date
 import time
 import logging
 import pickle
@@ -6,9 +7,20 @@ import os
 import yaml
 import numpy as np
 from collections import defaultdict
-from typing import Dict, Tuple, Any, Optional, List
+from typing import Dict, Any, Optional, List
 from src.models.thermodynamics import pmv_model
 from src.rl.dqn_agent import ReplayBuffer, DQNAgent, Experience
+
+__all__ = [
+    "TabularQLearningAgent",
+    "QLearningAgent",
+    "PolicyPromotionGate",
+    "load_config",
+    "DEVICE_LOCKOUT_SECONDS",
+    "ReplayBuffer",
+    "DQNAgent",
+    "Experience",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +167,8 @@ class TabularQLearningAgent:
         self.lockout_duration = self.cooldown
 
         self.last_action_time = 0.0
+        # Episode-level epsilon decay: one decay per calendar day
+        self._last_decay_date: Optional[str] = None
         self.twin = pmv_model
 
         # Shadow gate improvement tracker
@@ -417,8 +431,13 @@ class TabularQLearningAgent:
         td_error = td_target - self.q_table[state_key][action]
         self.q_table[state_key][action] += self.alpha * td_error
 
-        # Epsilon decay after each update
-        self.decay_epsilon()
+        # Epsilon decay per calendar day (episode), NOT per step.
+        # At 1Hz, per-step decay exhausts exploration in <1 hour.
+        # Per-day decay lets the agent explore across full diurnal cycles.
+        today = date.today().isoformat()
+        if today != self._last_decay_date:
+            self._last_decay_date = today
+            self.decay_epsilon()
 
         # Log to CSV (synchronous — caller should use log_action_async from async context)
         self._log_action_sync(state_key, action, reward, next_state_key)

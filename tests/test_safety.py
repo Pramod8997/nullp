@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.pipeline.safety import SafetyMonitor, SafetyEvent, load_config, slow_rl_agent
+from src.pipeline.safety import SafetyMonitor, load_config, slow_rl_agent
 from src.rl.agent import QLearningAgent
 
 

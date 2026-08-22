@@ -9,7 +9,9 @@ Downloads the zip from Colab then run:
     python3 scripts/import_colab_weights.py ~/Downloads/ems_weights.zip
 """
 
-import sys, zipfile, json, os, shutil
+import sys
+import zipfile
+import json
 from pathlib import Path
 
 WEIGHTS_DIR  = Path('backend/models/weights')

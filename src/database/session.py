@@ -1,11 +1,15 @@
 import aiosqlite
 import asyncio
 import csv
+import datetime
 import hashlib
+import json
 import logging
 import os
+import tempfile
+import yaml
 import numpy as np
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Union, Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,7 @@ class DatabaseSession:
         self._conn = await aiosqlite.connect(self.db_path)
         await self._conn.execute("PRAGMA journal_mode=WAL;")
         await self._conn.execute("PRAGMA synchronous=NORMAL;")
+        await self._conn.execute("PRAGMA busy_timeout=5000;")  # 5s retry on locked DB
         # Phase 2 (WS-6.3): Use autoincrement ID to avoid PK collision
         # when two messages arrive with identical time.time() values
         await self._conn.execute(
@@ -99,20 +104,23 @@ class DatabaseSession:
 
                 if batch and self._conn:
                     try:
+                        from collections import defaultdict
+                        query_groups = defaultdict(list)
                         for query, params in batch:
-                            await self._conn.execute(query, params)
+                            query_groups[query].append(params)
+                        for query, param_list in query_groups.items():
+                            if len(param_list) == 1:
+                                await self._conn.execute(query, param_list[0])
+                            else:
+                                await self._conn.executemany(query, param_list)
                         await self._conn.commit()
                         logger.debug(f"Flushed {len(batch)} records to database.")
                     except Exception as db_err:
-                        # Bug 4.1 fix: When the actual DB write fails, fall back
-                        # to CSV. insert_measurement never throws (it just queues),
-                        # so CSV fallback must happen HERE where the real write is.
                         logger.error(f"DB write error in flush loop: {db_err}")
                         await self._csv_fallback_batch_async(batch)
 
             except asyncio.CancelledError:
-                # Bug 4.2 fix: Drain ALL remaining items from the queue
-                # before exiting, so no data is lost on shutdown
+                # Drain ALL remaining items from the queue before exiting
                 while not self._write_queue.empty():
                     try:
                         batch.append(self._write_queue.get_nowait())
@@ -120,8 +128,15 @@ class DatabaseSession:
                         break
                 if batch and self._conn:
                     try:
+                        from collections import defaultdict
+                        query_groups = defaultdict(list)
                         for query, params in batch:
-                            await self._conn.execute(query, params)
+                            query_groups[query].append(params)
+                        for query, param_list in query_groups.items():
+                            if len(param_list) == 1:
+                                await self._conn.execute(query, param_list[0])
+                            else:
+                                await self._conn.executemany(query, param_list)
                         await self._conn.commit()
                         logger.info(f"Flushed {len(batch)} records during shutdown.")
                     except Exception as shutdown_err:
@@ -342,12 +357,6 @@ class DatabaseSession:
         logger.info("Database connection closed gracefully.")
 
 
-import datetime
-import json
-import tempfile
-from typing import Union, Any
-
-
 def load_config(config_path: Optional[str] = None) -> Dict:
     if config_path and os.path.exists(config_path):
         import yaml
@@ -409,6 +418,7 @@ class DBSession:
             self._conn = await aiosqlite.connect(self.db_path)
             await self._conn.execute("PRAGMA journal_mode=WAL;")
             await self._conn.execute("PRAGMA synchronous=NORMAL;")
+            await self._conn.execute("PRAGMA busy_timeout=5000;")  # 5s retry on locked DB
             await self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS power_log (

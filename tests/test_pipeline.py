@@ -63,6 +63,7 @@ class TestWatchdog:
 
     def test_normal_variance_ok(self):
         """Normal variance should not trigger anomaly."""
+        np.random.seed(42)
         watchdog = SoftAnomalyWatchdog(window_size=60, z_score_threshold=3.0)
         for _ in range(15):
             watchdog.check_reading("test", 100.0 + np.random.normal(0, 2))
@@ -105,7 +106,7 @@ class TestAnalytics:
         engine.record_usage("fridge", 150.0, duration_hours=1.0)
         summary = engine.get_daily_summary()
         assert summary["total_kwh"] > 0
-        assert summary["estimated_cost_usd"] > 0
+        assert summary["estimated_cost_inr"] > 0
 
     def test_empty_day(self):
         engine = AnalyticsEngine(cost_per_kwh=0.15)

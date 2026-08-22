@@ -15,7 +15,7 @@ async def test_kwh_accumulation_1kw_1hour():
     kwh = engine.get_kwh("device")
     assert abs(kwh - 1.0) < 0.01
 
-# TEST 1E-2: Cost at peak rate — 1 kWh at $0.28 = $0.28
+# TEST 1E-2: Cost at peak rate — 1 kWh at ₹8.0 = ₹8.0
 @freeze_time("2024-01-15 14:00:00")  # Peak period
 @pytest.mark.asyncio
 async def test_cost_peak_rate():
@@ -23,9 +23,9 @@ async def test_cost_peak_rate():
     for _ in range(3600):
         await engine.record("device", watts=1000.0)
     cost = engine.get_cost("device")
-    assert abs(cost - 0.28) < 0.005
+    assert abs(cost - 8.0) < 0.05
 
-# TEST 1E-3: Cost at off-peak rate — 1 kWh at $0.09 = $0.09
+# TEST 1E-3: Cost at off-peak rate — 1 kWh at ₹4.0 = ₹4.0
 @freeze_time("2024-01-15 02:00:00")  # Off-peak
 @pytest.mark.asyncio
 async def test_cost_offpeak_rate():
@@ -33,7 +33,7 @@ async def test_cost_offpeak_rate():
     for _ in range(3600):
         await engine.record("device", watts=1000.0)
     cost = engine.get_cost("device")
-    assert abs(cost - 0.09) < 0.005
+    assert abs(cost - 4.0) < 0.05
 
 # TEST 1E-4: Midnight rollover — daily kWh resets at 00:00
 @pytest.mark.asyncio
@@ -59,4 +59,5 @@ def test_tou_reward_peak_vs_offpeak():
     peak_cost = compute_tou_cost(watts=1000.0, seconds=1, period="peak")
     offpeak_cost = compute_tou_cost(watts=1000.0, seconds=1, period="off-peak")
     assert peak_cost > offpeak_cost
-    assert abs(peak_cost / offpeak_cost - 0.28/0.09) < 0.01  # ratio must match
+    assert abs(peak_cost / offpeak_cost - 8.0/4.0) < 0.01  # ratio must match INR rates
+

@@ -753,7 +753,9 @@ def compute_prototype(embeddings: Union[List[np.ndarray], np.ndarray]) -> np.nda
 
 def euclidean_distance_squared(a: np.ndarray, b: np.ndarray) -> float:
     """Compute squared Euclidean distance between two vectors."""
-    diff = np.asarray(a) - np.asarray(b)
+    a_arr = np.clip(np.asarray(a, dtype=np.float64), -1e150, 1e150)
+    b_arr = np.clip(np.asarray(b, dtype=np.float64), -1e150, 1e150)
+    diff = a_arr - b_arr
     return float(np.sum(diff ** 2))
 
 

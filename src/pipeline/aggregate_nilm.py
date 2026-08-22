@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 WINDOW_SIZE           = 5       # seconds (matches 1 Hz data → 5 samples)
 SG_WINDOW             = 7       # Savitzky-Golay window (must be odd, > WINDOW_SIZE)
 SG_POLYORD            = 2       # polynomial order
-TRANSIENT_THRESHOLD_W = 50.0   # ±50 W triggers event
+TRANSIENT_THRESHOLD_W = 20.0   # ±20 W — lowered from 50W to detect LED/laptop-class devices
 
 
 class NILMTransientDetector:
@@ -79,9 +79,12 @@ class NILMTransientDetector:
         self.sg_window = scaled_sg if scaled_sg % 2 == 1 else scaled_sg + 1
         self.sg_window = max(self.sg_window, sg_polyord + 2)
 
-        # Scale threshold: at higher sample rates, per-sample changes are smaller
-        # Keep threshold in W/sec units by dividing by sample rate
-        self.scaled_threshold = threshold / self.sample_rate_hz
+        # Scale threshold: at higher sample rates, per-sample changes are smaller.
+        # Additionally, a sharp physical step of Delta Watts smoothed by a quadratic
+        # Savitzky-Golay filter of window W has a peak derivative of ~ Delta / 3.0.
+        # We account for this smoothing factor so a physical step >= threshold W triggers.
+        self.sg_deriv_factor = max(1.0, (self.sg_window - 1) / 2.0)
+        self.scaled_threshold = (threshold / self.sg_deriv_factor) / self.sample_rate_hz
 
         self._buffer: list = []            # rolling power samples
         self._cooldown = 0                 # prevent consecutive triggers
@@ -89,7 +92,7 @@ class NILMTransientDetector:
         logger.info(
             f"NILMTransientDetector initialized: {self.sample_rate_hz}Hz, "
             f"SG_window={self.sg_window}, derivative_window={self.window_size}, "
-            f"threshold={self.scaled_threshold:.1f} W/sample"
+            f"threshold={self.scaled_threshold:.1f} W/sample (physical step: {threshold:.1f}W)"
         )
 
     def push(self, power_w: float):
@@ -116,7 +119,7 @@ class NILMTransientDetector:
         # Check last window_size derivatives
         recent = deriv[-self.window_size:]
         if self._cooldown == 0 and np.any(np.abs(recent) >= self.scaled_threshold):
-            self._cooldown = self.embed_window // 2
+            self._cooldown = 5 * self.sample_rate_hz  # 5s cooldown (was embed_window//2 = 64s)
             peak_idx = len(self._buffer) - 1
             # Fix: Since peak_idx is the most recent sample, we can't look ahead.
             # We must either delay the decision, or take the last embed_window samples.

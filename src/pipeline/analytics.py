@@ -25,18 +25,18 @@ def compute_tou_cost(
         rate: Optional explicit rate override ($/kWh).
         
     Returns:
-        float: Cost in USD.
+        float: Cost in INR.
     """
     if rate is None:
         p = period.lower().replace("-", "_").replace(" ", "_")
         if "peak" in p and "off" not in p and "mid" not in p:
-            rate = 0.28
+            rate = 8.0
         elif "mid" in p:
-            rate = 0.18
+            rate = 6.5
         elif "off" in p:
-            rate = 0.09
+            rate = 4.0
         else:
-            rate = 0.15
+            rate = 6.0
 
     kwh = (watts / 1000.0) * (seconds / 3600.0)
     return kwh * rate
@@ -45,7 +45,7 @@ def compute_tou_cost(
 class AnalyticsEngine:
     def __init__(
         self,
-        cost_per_kwh: float = 0.15,
+        cost_per_kwh: float = 6.0,
         config: Optional[dict] = None,
         config_path: Optional[str] = "config/config.yaml"
     ):
@@ -53,7 +53,7 @@ class AnalyticsEngine:
         Initialize the Analytics Engine.
         
         Args:
-            cost_per_kwh: Fallback electricity tariff in dollars per kWh.
+            cost_per_kwh: Fallback electricity tariff in INR per kWh.
             config: Optional configuration dictionary.
             config_path: Path to YAML config file.
         """
@@ -203,7 +203,7 @@ class AnalyticsEngine:
             "date": date_str,
             "device_usage_kwh": day_data,
             "total_kwh": round(total_kwh, 3),
-            "estimated_cost_usd": round(total_cost, 2)
+            "estimated_cost_inr": round(total_cost, 2)
         }
 
 

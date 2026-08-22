@@ -21,7 +21,6 @@ import logging
 import signal
 
 import h5py
-import numpy as np
 
 # Ensure project root is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -33,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 async def replay(hdf5_path: str, broker: str = "localhost", port: int = 1883,
+                 username: str = None, password: str = None,
                  speed: float = 1.0, loop_forever: bool = False):
     """
     Replay HDF5 appliance data as MQTT messages.
@@ -41,12 +41,17 @@ async def replay(hdf5_path: str, broker: str = "localhost", port: int = 1883,
         hdf5_path:    Path to HDF5 file
         broker:       MQTT broker hostname
         port:         MQTT broker port
+        username:     MQTT username
+        password:     MQTT password
         speed:        Playback speed multiplier (10 = 10x faster)
         loop_forever: If True, restart from beginning when data exhausted
     """
     if not os.path.exists(hdf5_path):
         logger.error(f"HDF5 file not found: {hdf5_path}")
         return
+
+    username = username or os.getenv("MQTT_USERNAME", "pipeline")
+    password = password or os.getenv("MQTT_PASSWORD", "changeme_pipeline_password")
 
     shutdown = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -66,7 +71,9 @@ async def replay(hdf5_path: str, broker: str = "localhost", port: int = 1883,
 
     while not shutdown.is_set():
         try:
-            async with aiomqtt.Client(broker, port=port) as client:
+            async with aiomqtt.Client(
+                broker, port=port, username=username, password=password
+            ) as client:
                 logger.info(f"✅ Replay connected to {broker}:{port}")
                 logger.info(f"   File: {hdf5_path}")
                 logger.info(f"   Speed: {speed}x (delay: {delay:.3f}s)")
@@ -156,14 +163,18 @@ def main():
                         help="MQTT broker port")
     parser.add_argument("--speed", type=float, default=1.0,
                         help="Playback speed multiplier (e.g., 10 = 10x faster)")
-    parser.add_argument("--loop", action="store_true",
-                        help="Loop forever (restart when data exhausted)")
+    parser.add_argument("--username", type=str, default=os.getenv("MQTT_USERNAME", "pipeline"),
+                        help="MQTT broker username")
+    parser.add_argument("--password", type=str, default=os.getenv("MQTT_PASSWORD", "changeme_pipeline_password"),
+                        help="MQTT broker password")
     args = parser.parse_args()
 
     asyncio.run(replay(
         hdf5_path=args.file,
         broker=args.broker,
         port=args.port,
+        username=args.username,
+        password=args.password,
         speed=args.speed,
         loop_forever=args.loop,
     ))
