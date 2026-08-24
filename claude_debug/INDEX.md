@@ -28,7 +28,7 @@ All documents in this folder (`claude_debug/`) provide zero-gap, token-efficient
 ## Reference Knowledge Base & Pre-built Graphs
 
 Before asking broad architectural questions, query the pre-indexed AST knowledge graph:
-* **Knowledge Graph Directory:** `graphify-out/` (2,050 nodes, 4,418 edges, 147 communities)
+* **Knowledge Graph Directory:** `graphify-out/` (2,266 nodes, 4,625 edges, 164 communities)
 * **CLI Query Tool:** `graphify query "<question>"`
 * **CLI Path Tool:** `graphify path "<nodeA>" "<nodeB>"`
 * **Architecture Report:** [`graphify-out/GRAPH_REPORT.md`](file:///home/pramodsb/Downloads/mjr/graphify-out/GRAPH_REPORT.md)
@@ -57,6 +57,9 @@ python -m pytest tests/test_hil_uart_corruption.py \
                  tests/test_ml_nilm_math_stress.py \
                  tests/test_security_penetration.py \
                  tests/test_chaos_engineering.py -v --tb=short
+
+# Run Full Software Demo (Broker + Demo Pipeline + API + Fleet)
+make demo
 
 # Update Code Graph after modifying files
 graphify update .

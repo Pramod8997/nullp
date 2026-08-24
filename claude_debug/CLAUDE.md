@@ -46,7 +46,11 @@ python -m pytest tests/test_hil_uart_corruption.py \
                  tests/test_security_penetration.py \
                  tests/test_chaos_engineering.py -v --tb=short
 
-# 6. Keep Graph Synchronized
+# 6. Run Full System Software Demo
+make demo                                      # Full demo stack with consumer electronics fleet
+python scripts/demo_full_system.py --demo      # Direct launcher
+
+# 7. Keep Graph Synchronized
 graphify update .
 ```
 

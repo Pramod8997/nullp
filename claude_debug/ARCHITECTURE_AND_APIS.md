@@ -284,3 +284,61 @@ def temperature_scale(logits: torch.Tensor, temperature: float = 1.0) -> torch.T
 def confidence_gate(probabilities: torch.Tensor, threshold: float = 0.90) -> str: ...
 # Returns "PASS_RL" if max(prob) >= threshold, else "SKIP_RL"
 ```
+
+---
+
+## 4. Pipeline Orchestration & Simulation Layer (`scripts/`)
+
+### `EMSOrchestrator` (`scripts/run_pipeline.py`)
+Central orchestrator managing parallel safety tasks, ProtoNet + heuristic classification, PMV thermal simulation, and RL policy actions.
+
+```python
+class EMSOrchestrator:
+    def __init__(
+        self,
+        config: Optional[Dict] = None,
+        stage_hook: Optional[Callable[[str], None]] = None,
+        rl_hook: Optional[Callable[[], None]] = None,
+    ) -> None: ...
+
+    async def run(self) -> None: ...
+    def shutdown(self) -> None: ...
+    def handle_label_submitted(self, class_name: str, segments_list: list) -> None: ...
+    async def process_raw_mqtt(self, topic: str, payload: Union[str, bytes, bytearray, dict, float, int]) -> PipelineResult: ...
+    async def process(self, event: Any) -> PipelineResult: ...
+
+    # Attributes:
+    config: Dict
+    safety: SafetyMonitor
+    env: DigitalTwinEnv
+    phantom_tracker: PhantomTracker
+    watchdog: SoftAnomalyWatchdog
+    analytics: AnalyticsEngine
+    heuristic_clf: HeuristicApplianceClassifier
+    encoder: Optional[ProtoNet]
+    prototype_registry: Optional[PrototypeRegistry]
+    weibull: OpenMaxWeibull
+    calibrated_scaler: Optional[CalibratedTemperatureScaler]
+    nilm_detectors: Dict[str, NILMTransientDetector]
+    agent: TabularQLearningAgent
+```
+
+### CLI Execution Modes:
+* **Standard Profile (3500W ceiling):** `python scripts/run_pipeline.py`
+* **Demo Profile (600W bench ceiling, 7 classes):** `python scripts/run_pipeline.py --config config/config.demo.yaml`
+
+---
+
+### `ESP32 Telemetry Simulator` (`backend/scripts/simulate_esp32.py`)
+Mock 1Hz sensor telemetry generator for virtual hardware fleets.
+
+```python
+# Hardware Profiles:
+DEVICES: List[Dict]       # 10 household appliances (fridge, microwave, kettle, hvac, tv, washer, dryer, dishwasher, oven, lighting)
+DEMO_DEVICES: List[Dict]  # 5 benchtop electronics (node_laptop, node_desktop, node_monitor, node_projector, node_charger)
+```
+
+### CLI Execution Modes:
+* **Standard Fleet:** `python backend/scripts/simulate_esp32.py --all`
+* **Demo Electronics Fleet:** `python backend/scripts/simulate_esp32.py --demo`
+

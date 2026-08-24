@@ -41,7 +41,8 @@ Never invent APIs. Refer to `claude_debug/ARCHITECTURE_AND_APIS.md`:
 3. Run Real Data Suite: `python -m pytest tests/test_real_data_and_ml_fallback.py -v`
 4. Run Core Suites: `python -m pytest tests/test_hil_uart_corruption.py tests/test_relay_safety_boot_brownout.py tests/test_ml_nilm_math_stress.py tests/test_security_penetration.py tests/test_chaos_engineering.py -v --tb=short`
 5. Run Physical Harness: `python scripts/real_world_physical_stress.py && python scripts/hil_hardware_test.py`
-6. Keep Graph Synced: `graphify update .` (AST-only, run after any file edit)
+6. Run Software Demo: `make demo` (or `python scripts/demo_full_system.py --demo`)
+7. Keep Graph Synced: `graphify update .` (AST-only, run after any file edit)
 
 Context References (Read only when needed in `claude_debug/`):
 - Architecture/APIs: `claude_debug/ARCHITECTURE_AND_APIS.md`
