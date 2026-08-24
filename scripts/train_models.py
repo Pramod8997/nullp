@@ -25,6 +25,7 @@ import os
 import sys
 import argparse
 import logging
+import json
 import time
 import numpy as np
 import torch
@@ -119,6 +120,61 @@ def evaluate(model, val_data, n_episodes=200, rng=None):
     return np.mean(accs) if accs else 0.0
 
 
+# ── Real-domain evaluation ────────────────────────────────────────────────────
+@torch.no_grad()
+def evaluate_per_class(model, registry, eval_data: dict) -> dict:
+    """
+    Nearest-prototype classification over a *fixed* class set, scored per class.
+
+    Unlike episodic accuracy (which samples N classes at a time and therefore
+    reports an easier task), this is the closed-set metric that matches how the
+    deployed pipeline actually classifies: one embedding vs all prototypes.
+    """
+    model.eval()
+    class_names = registry.class_names()
+    if len(class_names) < 2:
+        return {}
+
+    protos = torch.stack([registry.prototypes[c][0] for c in class_names]).to(DEVICE)
+    name_to_idx = {c: i for i, c in enumerate(class_names)}
+
+    y_true, y_pred = [], []
+    for cls, segs in eval_data.items():
+        if cls not in name_to_idx or len(segs) == 0:
+            continue
+        x = torch.tensor(np.asarray(segs, dtype=np.float32)).to(DEVICE)
+        emb = model.embed(x)                                   # (B, D)
+        d = torch.cdist(emb, protos, p=2) ** 2                 # (B, C)
+        pred = d.argmin(dim=1).cpu().numpy()
+        y_true.extend([name_to_idx[cls]] * len(pred))
+        y_pred.extend(pred.tolist())
+
+    if not y_true:
+        return {}
+
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    overall = float((y_true == y_pred).mean())
+
+    per_class_f1 = {}
+    for cls, i in name_to_idx.items():
+        tp = int(((y_pred == i) & (y_true == i)).sum())
+        fp = int(((y_pred == i) & (y_true != i)).sum())
+        fn = int(((y_pred != i) & (y_true == i)).sum())
+        if tp + fn == 0:
+            continue
+        prec = tp / (tp + fp) if (tp + fp) else 0.0
+        rec = tp / (tp + fn) if (tp + fn) else 0.0
+        per_class_f1[cls] = (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
+
+    return {
+        'overall_accuracy': overall,
+        'macro_f1': float(np.mean(list(per_class_f1.values()))) if per_class_f1 else 0.0,
+        'per_class_f1': {k: round(v, 4) for k, v in sorted(per_class_f1.items())},
+        'n_samples': int(len(y_true)),
+    }
+
+
 # ── Training ──────────────────────────────────────────────────────────────────
 def train(args):
     t0 = time.time()
@@ -134,10 +190,28 @@ def train(args):
 
     train_data, val_data = dataset.get_train_val_split(val_fraction=0.2)
 
+    # Unseen-house holdout: the metric that actually predicts field behaviour.
+    house_train, house_val, house_info = dataset.get_house_holdout_split(
+        holdout_frac=args.house_holdout)
+    if house_val and not args.no_house_holdout:
+        # Train only on the training houses so the holdout stays untouched.
+        # ev_charger has no real coverage in either dataset, so its synthetic
+        # windows are carried over from the merged split.
+        for cls, segs in train_data.items():
+            if dataset.provenance.get(cls) == 'synthetic':
+                house_train.setdefault(cls, segs)
+        train_data, val_data = house_train, house_val
+        logger.info(f"Using UNSEEN-HOUSE holdout: train={house_info['train_houses']} "
+                    f"val={house_info['holdout_houses']}")
+    else:
+        logger.warning("Unseen-house holdout unavailable — falling back to a random "
+                       "split. Reported accuracy will be optimistic.")
+
     logger.info(f"Train classes: {list(train_data.keys())}")
     logger.info(f"Val classes:   {list(val_data.keys())}")
     for cls in sorted(train_data.keys()):
-        logger.info(f"  {cls}: train={len(train_data[cls])}, val={len(val_data[cls])}")
+        logger.info(f"  {cls}: train={len(train_data[cls])}, "
+                    f"val={len(val_data.get(cls, []))}")
 
     if len(train_data) < 2:
         logger.error("Need at least 2 classes to train ProtoNet. Aborting.")
@@ -285,13 +359,53 @@ def train(args):
     logger.info("  Files: protonet.pt, prototype_registry.pt, openmax_weibull.pkl, temperature_scaler.pt")
     logger.info(f"{'='*60}")
 
-    # Report verdict
-    if final_val_acc >= 0.80:
-        logger.info("✅ VERDICT: Model generalizes well (val_acc >= 80%)")
-    elif final_val_acc >= 0.60:
-        logger.warning("⚠️ VERDICT: Moderate generalization (60-80%) — consider more data")
+    # ── Closed-set evaluation on UNSEEN houses (the deployment-relevant score) ──
+    closed = evaluate_per_class(model, registry, val_data)
+    if closed:
+        logger.info(f"\nClosed-set nearest-prototype eval on held-out data "
+                    f"({closed['n_samples']} windows):")
+        logger.info(f"  overall_accuracy = {closed['overall_accuracy']:.4f}")
+        logger.info(f"  macro_f1         = {closed['macro_f1']:.4f}")
+        for cls, f1 in closed['per_class_f1'].items():
+            flag = '  <-- WEAK' if f1 < 0.60 else ''
+            logger.info(f"    {cls:18s} F1 = {f1:.4f}{flag}")
+
+    # ── Persist an honest training report ──
+    report = {
+        'trained_at_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'sources': args.sources,
+        'episodes_run': ep,
+        'device': DEVICE,
+        'episodic_val_accuracy': round(float(final_val_acc), 4),
+        'best_episodic_val_accuracy': round(float(best_val_acc), 4),
+        'evaluation_protocol': ('unseen_house_holdout'
+                                if (house_val and not args.no_house_holdout)
+                                else 'random_split'),
+        'house_split': house_info,
+        'class_provenance': dataset.provenance,
+        'real_windows_total': int(sum(len(v) for v in dataset.real_data.values())),
+        'closed_set_eval': closed,
+    }
+    try:
+        os.makedirs('training_results', exist_ok=True)
+        with open('training_results/training_report.json', 'w') as fh:
+            json.dump(report, fh, indent=2)
+        logger.info("Report written to training_results/training_report.json")
+    except Exception as e:
+        logger.warning(f"Could not write training report: {e}")
+
+    # Report verdict — judged on the unseen-house closed-set macro F1 when
+    # available, since episodic N-way accuracy overstates deployed performance.
+    verdict_metric = closed.get('macro_f1', final_val_acc) if closed else final_val_acc
+    metric_name = 'unseen-house macro F1' if closed else 'episodic val acc'
+    if verdict_metric >= 0.80:
+        logger.info(f"✅ VERDICT: Model generalizes well ({metric_name}={verdict_metric:.3f})")
+    elif verdict_metric >= 0.60:
+        logger.warning(f"⚠️ VERDICT: Moderate generalization ({metric_name}={verdict_metric:.3f}) "
+                       f"— usable with the confidence gate at 0.90; weak classes listed above")
     else:
-        logger.error("❌ VERDICT: Poor generalization (< 60%) — needs custom dataset or architecture changes")
+        logger.error(f"❌ VERDICT: Poor generalization ({metric_name}={verdict_metric:.3f}) "
+                     f"— the heuristic fallback matters; do not trust per-appliance billing")
 
 
 if __name__ == '__main__':
@@ -304,5 +418,9 @@ if __name__ == '__main__':
                         help='Max samples per class')
     parser.add_argument('--patience', type=int, default=10,
                         help='Early stopping patience (in 500-episode eval intervals)')
+    parser.add_argument('--house-holdout', type=float, default=0.3,
+                        help='Fraction of real windows reserved as unseen houses')
+    parser.add_argument('--no-house-holdout', action='store_true',
+                        help='Use a random split instead (optimistic; not for reporting)')
     args = parser.parse_args()
     train(args)

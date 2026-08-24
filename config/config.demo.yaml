@@ -1,0 +1,90 @@
+# Demo profile — consumer-electronics bench loads
+#
+# Use when the loads plugged into the relay are a laptop, projector, monitor or
+# desktop rather than a kettle/HVAC. The default config/config.yaml has a
+# 3500 W aggregate ceiling, which ~400 W of demo load can never approach, so
+# the safety cutoff would look broken (it never fires) with the default file.
+#
+#   python scripts/run_pipeline.py --config config/config.demo.yaml
+#
+# Anything not overridden here mirrors config/config.yaml.
+
+app:
+  name: "Digital Twin EMS — Demo Profile"
+  debug: true
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  qos_safety: 1
+  qos_telemetry: 0
+  topics:
+    reads: "home/sensor/+/power"
+    writes: "home/plug/+/command"
+    events: "home/ui/events"
+
+database:
+  path: "data/ems_state.db"
+  fallback_csv: "data/fallback_measurements.csv"
+  retention_days: 30
+
+protonet:
+  seq_len: 128
+  embedding_size: 128
+  distance_threshold: 15.0
+  confidence_threshold: 0.90
+  # Demo-profile weights: consumer-electronics class set trained by
+  # scripts/train_demo_models.py. The general 10-class model spans 3 W-3.5 kW
+  # and is weakest exactly in this band.
+  weights_path: "backend/models/weights_demo/protonet.pt"
+
+# Real measured draw of typical bench loads, for reference:
+#   phone charger      3-10 W    <- below the 20 W event threshold; see note
+#   computer monitor   20-40 W
+#   laptop charger     30-90 W
+#   desktop computer   80-350 W
+#   projector          200-400 W (lamp) / 30-50 W (LED)
+devices:
+  node_laptop:    { simulated: false, rated: 90,  tier0: false }
+  node_projector: { simulated: false, rated: 400, tier0: false }
+  node_monitor:   { simulated: false, rated: 40,  tier0: false }
+  node_desktop:   { simulated: false, rated: 350, tier0: false }
+  node_charger:   { simulated: false, rated: 10,  tier0: false }
+
+appliances:
+  - laptop
+  - desktop_computer
+  - monitor
+  - projector
+  - tv
+  - router
+  - phone_charger
+
+# Scaled so the safety path is actually demonstrable at bench power levels.
+# 600 W ceiling: a laptop + projector + monitor together (~530 W) sits in the
+# warning band, and adding the desktop trips CRITICAL.
+system_safety:
+  max_aggregate_wattage: 600.0
+  warning_pct: 1.10
+  critical_pct: 1.25
+  laptop:           { max_w: 120, tier0: false }
+  desktop_computer: { max_w: 400, tier0: false }
+  monitor:          { max_w: 60,  tier0: false }
+  projector:        { max_w: 450, tier0: false }
+  tv:               { max_w: 300, tier0: false }
+  router:           { max_w: 30,  tier0: true }   # keep the network up
+  phone_charger:    { max_w: 25,  tier0: false }
+
+system:
+  max_tracked_devices: 200
+  device_ttl_seconds: 3600
+
+# ── Demo caveats ─────────────────────────────────────────────────────────────
+# 1. A phone charger will NOT generate a classification event.
+#    TRANSIENT_THRESHOLD_W is 20 W (src/pipeline/aggregate_nilm.py:27) and a
+#    3-10 W charger is below it. It is also at/below the 100 A CT's 4.6 W start
+#    current. Demo the charger as a standby/phantom load via PhantomTracker
+#    instead of expecting identification.
+# 2. Fit the PZEM-004T v3.0 **10 A direct-connect** variant, not the 100 A CT
+#    variant — see claude_debug/HARDWARE_READINESS_CHECKLIST.md §0.5.
+# 3. Size the load-branch fuse to ~2-3 A for these loads, not 16 A.

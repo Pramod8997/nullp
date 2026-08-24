@@ -7,6 +7,11 @@ numpy>=1.24.0
 scipy>=1.11.0
 pandas>=2.0.0
 h5py>=3.8.0
+# Registers the Blosc HDF5 filters that nilmtk-format UK-DALE / REDD tables are
+# compressed with. Without it h5py raises "can't open directory
+# (/usr/local/lib/plugin)" and data/nilmtk_reader.py silently yields zero real
+# windows, leaving the ProtoNet trained on synthetic data only.
+hdf5plugin>=4.1.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 pytest>=7.0.0

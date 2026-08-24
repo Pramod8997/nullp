@@ -10,6 +10,11 @@ from src.pipeline.phantom_tracker import PhantomTracker
 from src.pipeline.analytics import AnalyticsEngine, compute_tou_cost
 from src.pipeline.calibration import compute_ece
 from src.pipeline.classifier import ModeClassifier
+from src.pipeline.heuristic_fallback import (
+    HeuristicApplianceClassifier,
+    HeuristicResult,
+    ApplianceRule,
+)
 from src.pipeline.failure_matrix import FailureMatrix
 from src.pipeline.temporal_validator import TemporalValidator
 from src.pipeline.stages import (
