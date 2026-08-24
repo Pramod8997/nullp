@@ -131,6 +131,11 @@ data/processed/
 *.npz
 *.parquet
 *.feather
+*.tar.gz
+*.tgz
+*.gz
+*.7z
+*.rar
 
 # ── Logs & Telemetry ────────────────────────────────────────────────────────
 *.log
@@ -239,6 +244,7 @@ id_rsa*
 .openhands/
 .continue/
 .chatgpt/
+.web-artifacts/
 graphify-out/
 **/graphify-out/
 .system_generated/

@@ -4,6 +4,7 @@ Simulates 10 devices with realistic power profiles, duty cycles, and noise.
 Publishes at 1 Hz to MQTT topic: home/sensor/{device_id}/power
 """
 import asyncio
+import json
 import random
 import logging
 import argparse
