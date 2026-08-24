@@ -228,6 +228,47 @@ class SoftAnomalyWatchdog:
 
 ---
 
+### `HeuristicApplianceClassifier` (`src/pipeline/heuristic_fallback.py`)
+Deterministic nearest-centroid power-signature fallback classifier (zero torch dependency).
+
+```python
+class HeuristicApplianceClassifier:
+    def __init__(
+        self,
+        rules: Optional[Sequence[ApplianceRule]] = None,
+        on_threshold_w: float = 20.0,
+        max_confidence: float = 0.75,
+        centroids: Optional[Dict[str, Sequence[float]]] = None,
+        feature_scales: Optional[Sequence[float]] = None,
+    ) -> None: ...
+
+    def classify(self, window: Sequence[float]) -> HeuristicResult: ...
+    def extract_features(self, window: Sequence[float]) -> Dict[str, float]: ...
+    def feature_vector(self, f: Dict[str, float]) -> np.ndarray: ...
+
+    # Attributes:
+    rules: List[ApplianceRule]
+    on_threshold_w: float
+    max_confidence: float          # Capped at 0.75 (never reaches 0.90 RL gate)
+    centroids: Dict[str, np.ndarray]
+    feature_scales: np.ndarray
+
+@dataclass
+class HeuristicResult:
+    appliance: str
+    confidence: float              # <= 0.75
+    degraded: bool = True          # Always True
+    source: str = "heuristic_fallback"
+    features: Dict[str, float]
+    runner_up: Optional[str] = None
+```
+
+❌ **DO NOT USE:**
+* `clf.predict()` $\rightarrow$ Use `clf.classify(window)`
+* `clf.infer()` $\rightarrow$ Use `clf.classify(window)`
+
+---
+
 ## 3. Models & Calibration (`src/models/`)
 
 ### `TemperatureScaler` (`src/models/calibration.py`)

@@ -46,6 +46,7 @@ class SystemOrchestrator:
     def __init__(self):
         self.processes = []
         self.running = True
+        self.demo_mode = '--demo' in sys.argv or os.environ.get('EMS_DEMO', '') == '1'
 
     def check_broker(self) -> bool:
         """Check if Mosquitto broker is reachable on port 1883."""
@@ -116,10 +117,10 @@ class SystemOrchestrator:
                 time.sleep(1.5)
 
         # Step 2: Start Pipeline Orchestrator
-        self.start_process(
-            [sys.executable, "scripts/run_pipeline.py"],
-            "Pipeline Orchestrator"
-        )
+        pipeline_cmd = [sys.executable, "scripts/run_pipeline.py"]
+        if self.demo_mode:
+            pipeline_cmd.extend(["--config", "config/config.demo.yaml"])
+        self.start_process(pipeline_cmd, "Pipeline Orchestrator")
         time.sleep(1.5)
 
         # Step 3: Start FastAPI Backend
@@ -129,18 +130,20 @@ class SystemOrchestrator:
         )
         time.sleep(1.5)
 
-        # Step 4: Start ESP32 Virtual Hardware Simulator (10 Nodes)
-        self.start_process(
-            [sys.executable, "backend/scripts/simulate_esp32.py", "--all"],
-            "Virtual ESP32 Fleet (10 Nodes)"
-        )
+        # Step 4: Start ESP32 Virtual Hardware Simulator
+        sim_cmd = [sys.executable, "backend/scripts/simulate_esp32.py"]
+        if self.demo_mode:
+            sim_cmd.append("--demo")
+        else:
+            sim_cmd.append("--all")
+        self.start_process(sim_cmd, "Virtual Hardware Fleet")
         time.sleep(1.0)
 
         print("\n" + "═" * 78)
         print(" 🌐 SYSTEM ACCESS URLS:")
         print("   • React 19 Frontend Dashboard:  http://localhost:5173")
         print("   • FastAPI Swagger API Docs:     http://localhost:8000/docs")
-        print("   • Live WebSockets Stream:       ws://localhost:8000/ws/stream")
+        print("   • Live WebSockets Stream:       ws://localhost:8000/ws")
         print("   • REST Healthcheck:             http://localhost:8000/health")
         print("═" * 78)
         print(" 💡 To start the React frontend in another terminal:")
@@ -160,6 +163,13 @@ class SystemOrchestrator:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Full-System EMS Demo")
+    parser.add_argument("--demo", action="store_true",
+                        help="Run in demo mode with consumer electronics")
+    args = parser.parse_args()
+    if args.demo:
+        os.environ['EMS_DEMO'] = '1'
     orchestrator = SystemOrchestrator()
     try:
         orchestrator.run()

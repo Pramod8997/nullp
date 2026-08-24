@@ -9,15 +9,21 @@
 ## 1. Physical Architecture & Schematic Overview
 
 ```
-[ 230V AC Mains In (L) ] ──[ 0.5A Fuse ]──┬──[ HLK-5M05 AC-L ]
-                                          ├──[ 10D471K MOV ]──[ Mains (N) ]
-                                          └──[ Relay COM ] ──┬──[ Relay NO ]──> [ Appliance Load ]
-                                                             │
-                                                    [ RC Snubber: 100Ω 2W ]
-                                                             │
-                                                    [ 0.1µF 275VAC X2 Cap ]
-                                                             │
-                                                             └── (across COM & NO)
+[ 230V AC Mains In (L) ] ──┬──[ 0.5A Slow-Blow Fuse ]──[ HLK-5M05 AC-L ]
+                           ├──[ 10D471K MOV ]──────────[ Mains (N) ]
+                           └──[ 16A MCB / Load Fuse ]──[ Relay COM ] ──┬──[ Relay NO ]──> [ Appliance Load (L) ]
+                                                                       │
+                                                              [ RC Snubber: 100Ω 2W ]
+                                                                       │
+                                                              [ 0.1µF 275VAC X2 Cap ]
+                                                                       │
+                                                                       └── (across COM & NO)
+
+[ 230V AC Mains In (N) ] ──────────────────────────────────────────────┬────────────────> [ Appliance Load (N) ]
+                                                                       └──[ HLK-5M05 AC-N ]
+
+[ Protective Earth (PE)] ───────────────────────────────────────────────────────────────> [ Appliance Load (PE) ]
+(Bonded directly to DIN rail enclosure earth block; NEVER switched through relay)
 
 [ HLK-5M05 DC Out +5V ] ──┬──[ 1000µF 16V Low-ESR Cap ]──┬──> [ ESP32 VIN (5V) ]
                           └──[ 100nF Ceramic Cap      ]──┼──> [ Relay VCC (+5V) ]
@@ -29,11 +35,11 @@
                                       [ Drain: 2N7000        ] ────> [ Relay Module "IN" Pin ]
                                       [ Source: 2N7000       ] ────> [ Common Ground ]
 
-[ ESP32 GPIO 16 (RX2)  ] <───────────────────────────────────────── [ PZEM-004T TX ]
+[ ESP32 GPIO 16 (RX2)  ] <───────────────────────────────────────── [ PZEM-004T TX ] (Verify 3.3V level)
 [ ESP32 GPIO 17 (TX2)  ] ─────────────────────────────────────────> [ PZEM-004T RX ]
 
-[ 100A CT Clamp ] ────────────────────────────────────────────────> [ PZEM-004T CT Input Terminals ]
-(Clamped ONLY on Live conductor)
+[ 100A CT / 10A Shunt ] ───────────────────────────────────────────> [ PZEM-004T Input Terminals ]
+(CT Clamped ONLY on Live conductor; or 10A direct shunt variant for bench loads <400W)
 ```
 
 ---

@@ -104,7 +104,7 @@ dev-pipeline:
 	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/run_pipeline.py
 
 demo:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/demo_full_system.py
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/demo_full_system.py --demo
 
 hil-test:
 	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/hil_hardware_test.py

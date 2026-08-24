@@ -106,6 +106,7 @@ from src.pipeline.temporal_validator import TemporalValidator
 from src.pipeline.analytics import AnalyticsEngine
 from src.pipeline.failure_matrix import FailureMatrix
 from src.pipeline.classifier import ModeClassifier
+from src.pipeline.heuristic_fallback import HeuristicApplianceClassifier
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -192,6 +193,9 @@ class EMSOrchestrator:
             alpha=proto_cfg.get("openmax_alpha", 3)
         )
         self._load_ml_models(proto_cfg)
+
+        # ── Heuristic Fallback (zero-torch, deterministic) ──
+        self.heuristic_clf = HeuristicApplianceClassifier()
 
         # ── Delta Stability Analyzer ──
         ds_cfg = self.config.get("delta_stability", {})
@@ -458,6 +462,11 @@ class EMSOrchestrator:
                               If provided, bypasses the legacy rolling window.
         """
         if self.encoder is None:
+            # Heuristic fallback when ProtoNet is unavailable
+            if filtered_segment is not None:
+                result = self.heuristic_clf.classify(filtered_segment)
+                if result.appliance != "unknown":
+                    return result.appliance, result.confidence, {}
             return "pending", 0.0, {}
 
         # Use NILM-filtered segment when available (§2.1 fix)
@@ -804,17 +813,29 @@ class EMSOrchestrator:
                 # End unknown device flow
                 
             elif confidence < self.confidence_threshold:
-                # ── LOW CONFIDENCE GATE ──
-                logger.info(f"⚠️ Low confidence ({confidence:.3f}) for {class_name} on {device_id}. Skipping RL.")
-                await self._broadcast_event({
-                    "type": "LOW_CONFIDENCE",
-                    "device_id": device_id,
-                    "classified_as": class_name,
-                    "confidence": round(confidence, 3),
-                    "threshold": self.confidence_threshold,
-                    "message": f"Classification uncertain ({confidence:.2f} < {self.confidence_threshold})",
-                })
-                # Skip RL — uncertain classification
+                # ── LOW CONFIDENCE GATE → HEURISTIC FALLBACK ──
+                heuristic_used = False
+                if filtered_segment is not None:
+                    h_result = self.heuristic_clf.classify(filtered_segment)
+                    if h_result.appliance != "unknown" and h_result.confidence > confidence:
+                        class_name = h_result.appliance
+                        confidence = h_result.confidence
+                        self.device_classifications[device_id] = class_name
+                        self.last_known_confidences[device_id] = confidence
+                        heuristic_used = True
+                        logger.info(f"🔧 Heuristic fallback: {device_id} → {class_name} (conf={confidence:.3f}, degraded=True)")
+                
+                if not heuristic_used:
+                    logger.info(f"⚠️ Low confidence ({confidence:.3f}) for {class_name} on {device_id}. Skipping RL.")
+                    await self._broadcast_event({
+                        "type": "LOW_CONFIDENCE",
+                        "device_id": device_id,
+                        "classified_as": class_name,
+                        "confidence": round(confidence, 3),
+                        "threshold": self.confidence_threshold,
+                        "message": f"Classification uncertain ({confidence:.2f} < {self.confidence_threshold})",
+                    })
+                    # Skip RL — uncertain classification
 
             else:
                 # ══════════════════════════════════════════════════════
@@ -1059,7 +1080,11 @@ class EMSOrchestrator:
                 return
 
             self.prototype_registry.add_class(class_name, segs)
-            registry_path = 'backend/models/weights/prototype_registry.pt'
+            # Use the active weights directory (respects demo config)
+            proto_cfg = self.config.get("protonet", {})
+            weights_path = proto_cfg.get("weights_path", "")
+            weights_dir = os.path.dirname(weights_path) if weights_path else "backend/models/weights"
+            registry_path = os.path.join(weights_dir, "prototype_registry.pt")
             os.makedirs(os.path.dirname(registry_path), exist_ok=True)
             self.prototype_registry.save(registry_path)
             logger.info(
@@ -1275,7 +1300,13 @@ FullPipeline = EMSOrchestrator
 
 
 async def main() -> None:
-    orchestrator = EMSOrchestrator()
+    import argparse
+    parser = argparse.ArgumentParser(description="EMS Pipeline Orchestrator")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to YAML config file (e.g. config/config.demo.yaml)")
+    args = parser.parse_args()
+    config = load_config(args.config)
+    orchestrator = EMSOrchestrator(config=config)
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
     _shutting_down = False

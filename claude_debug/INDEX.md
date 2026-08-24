@@ -19,7 +19,9 @@ All documents in this folder (`claude_debug/`) provide zero-gap, token-efficient
 | **4. Technical Review** | [`TECHNICAL_REVIEW.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/TECHNICAL_REVIEW.md) | Deep system architecture, FreeRTOS state machines, real-data NILM pipeline, centroid fallback. |
 | **5. API Cheatsheet** | [`ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md) | Exhaustive class/method signatures to prevent token-wasting API hallucinations. |
 | **6. Hardware Audit** | [`HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md) | 6 physical hazards, MOSFET level shifting, RC snubber, 10A PZEM selection, PE earth wiring, and BOM. |
-| **7. Real-World Physical Testing** | [`REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/REAL_WORLD_TESTING_PLAN.md) | 8 physical bench tests (Variac brownouts, inductive arcing, thermal rise, THD noise). |
+| **7. Hardware Readiness Checklist** | [`HARDWARE_READINESS_CHECKLIST.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_READINESS_CHECKLIST.md) | Pre-procurement BOM order checklist, 3 schematic blocking fixes, staged bring-up gates. |
+| **8. Real-World Physical Testing** | [`REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/REAL_WORLD_TESTING_PLAN.md) | 8 physical bench tests (Variac brownouts, inductive arcing, thermal rise, THD noise). |
+| **9. Debug Verification Status** | [`debug_status.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/debug_status.md) | 467/467 regression verification, 7/7 physical stress, 10/10 HIL, and modified tracked files review. |
 
 ---
 

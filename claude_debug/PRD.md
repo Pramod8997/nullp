@@ -67,11 +67,13 @@ The Smart Home EMS is an industrial-grade, edge-hybrid smart energy monitoring a
 | **FR-ML-04** | **Temperature Scaling & Confidence Gating** | `TemperatureScaler` applies post-hoc logit scaling ($T \ge 0.05$ clamp); `confidence_gate` passes actions to RL agent only if confidence $\ge 0.90$. |
 | **FR-ML-05** | **Rolling Z-Score Anomaly Watchdog** | `SoftAnomalyWatchdog` tracks rolling 30-sample mean/std; flags deviations $\ge 3.0\sigma$ while guarding against zero std floor ($10^{-6}$). |
 | **FR-ML-06** | **RL Demand-Response Actor** | RL agent sheds non-critical loads (e.g., EV charger, dishwasher) when aggregate demand approaches $3,500\text{W}$ while preserving Tier-0 critical loads (e.g., fridge). |
+| **FR-ML-07** | **Deterministic Heuristic Fallback** | `HeuristicApplianceClassifier` provides zero-torch nearest-centroid classification (confidence capped at 0.75, `degraded=True`) if ProtoNet weights or runtime are unavailable. |
 
 ---
 
-## 4. Supported Appliance Classes (UK-DALE / Phase 1)
+## 4. Supported Appliance Classes
 
+### 4.1 Standard Full-House Set (10 Classes)
 1. `fridge` (Rated: 200W, Max: 300W, Tier-0: True)
 2. `microwave` (Rated: 1200W, Max: 1500W, Tier-0: False)
 3. `kettle` (Rated: 2500W, Max: 2500W, Tier-0: False)
@@ -83,11 +85,21 @@ The Smart Home EMS is an industrial-grade, edge-hybrid smart energy monitoring a
 9. `ev_charger` (Rated: 3500W, Max: 3800W, Tier-0: False)
 10. `laptop` (Rated: 65W, Max: 150W, Tier-0: False)
 
+### 4.2 Benchtop Electronics Demo Set (7 Classes — `config.demo.yaml`)
+1. `laptop` (Rated: 45–90W)
+2. `desktop_computer` (Rated: 100–350W)
+3. `monitor` (Rated: 25–50W)
+4. `projector` (Rated: 200–350W)
+5. `tv` (Rated: 80–150W)
+6. `router` (Rated: 10–25W)
+7. `phone_charger` (Rated: 3–15W, Standby / Phantom tracking)
+
 ---
 
 ## 5. Non-Functional Requirements
 
 * **Safety Latency:** Edge overcurrent cutoff must execute in $<100\text{ms}$ (single FreeRTOS cycle).
 * **Memory Bounds:** Python buffer queues (`deque`) and Ring Buffers must maintain hard `maxlen` bounds (`3 * embed_window = 384` samples) to permit 24/7/365 uninterrupted execution.
-* **Test Coverage:** 100% pass rate across 433 unit, integration, HIL, security, and chaos tests.
+* **Test Coverage:** 100% pass rate across 467 unit, integration, HIL, security, chaos, real-data NILM, and heuristic fallback tests.
 * **Mains Isolation:** 230V AC mains traces must maintain $\ge 6.3\text{mm}$ creepage clearance from 3.3V/5V DC planes.
+* **Disaggregation Transparency:** Advisory classification outputs confidence and degraded tags, with unseen-house cross-validation reported in `training_results/training_report.json`.
