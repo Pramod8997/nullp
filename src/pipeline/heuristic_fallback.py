@@ -108,6 +108,23 @@ FEATURE_SCALES: Tuple[float, ...] = (0.2063, 0.2233, 1.0000, 0.0272, 0.0474)
 # {class_name: centroid vector} — written by scripts/fit_heuristic_centroids.py.
 # Empty means "not fitted yet"; the classifier then falls back to band rules
 # alone, which still works but scores materially worse.
+#
+# 🔴 This dict is MERGED across profiles, and must stay that way. It holds the
+# household class set (fitted from the default window cache) AND the
+# consumer-electronics set (fitted from the `_demo` cache) side by side, because
+# there is more than one deployment profile:
+#
+#   config/config.yaml           -> household, 3.5 kW ceiling
+#   config/config.demo.yaml      -> simulated consumer-electronics fleet, 600 W
+#   config/config.hardware.yaml  -> the physical rig, 250 W, laptop + charger
+#
+# When only the household classes were present, the centroid path -- which
+# `classify()` prefers over the band rules -- could not emit `phone_charger` at
+# all, so the physical rig's second appliance was unclassifiable in the very
+# degraded mode that HARDWARE_FINAL_SPEC.md §7 requires to work (protonet.pt
+# deleted). fit_heuristic_centroids.py therefore merges its results in rather
+# than overwriting the dict. Restrict what a given deployment may emit with
+# `allowed_classes=`, not by deleting centroids.
 CLASS_CENTROIDS: Dict[str, Tuple[float, ...]] = {
     'dishwasher': (2.2810, 2.3802, 0.7500, 0.0132, 0.0265),
     'fridge': (2.0934, 2.1732, 0.7500, 0.0367, 0.0441),
@@ -139,6 +156,18 @@ DEFAULT_RULES: List[ApplianceRule] = [
                   duty=(0.20, 1.0), overshoot=(1.0, 3.0),  volatility=(0.0, 0.7)),
     ApplianceRule("tv",               steady_w=(30, 250),    peak_w=(40, 600),
                   duty=(0.25, 1.0), overshoot=(1.0, 3.5),  volatility=(0.0, 0.8)),
+    # Purely resistive filament lamp — the physical rig's calibration reference
+    # and the ballast that makes the 312 W CRITICAL trip reachable
+    # (HARDWARE_FINAL_SPEC.md BOM item 19, D8, bring-up stages 5 and 7).
+    #
+    # It is separable from a laptop at the same wattage by shape alone, not by
+    # power: PF = 1, a dead-flat steady state, and no SMPS soft-start, so both
+    # overshoot and volatility sit far tighter than any switch-mode load. The
+    # cold-filament inrush is ~10x for a few milliseconds and is invisible at
+    # the PZEM's ~500 ms register refresh, which is why overshoot stays ~1.0.
+    # Band spans 60 W and 100 W lamps plus Indian mains swing (P scales as V^2).
+    ApplianceRule("incandescent_lamp", steady_w=(45, 140),   peak_w=(50, 165),
+                  duty=(0.30, 1.0), overshoot=(1.0, 1.25), volatility=(0.0, 0.10)),
     # Household appliances (standard profile)
     ApplianceRule("fridge",           steady_w=(50, 300),    peak_w=(80, 1200),
                   duty=(0.10, 1.0), overshoot=(1.2, 8.0),  volatility=(0.05, 1.4)),
@@ -171,14 +200,50 @@ class HeuristicApplianceClassifier:
                  on_threshold_w: float = ON_THRESHOLD_W,
                  max_confidence: float = MAX_HEURISTIC_CONFIDENCE,
                  centroids: Optional[Dict[str, Sequence[float]]] = None,
-                 feature_scales: Optional[Sequence[float]] = None):
-        self.rules = list(rules) if rules else list(DEFAULT_RULES)
+                 feature_scales: Optional[Sequence[float]] = None,
+                 allowed_classes: Optional[Sequence[str]] = None):
+        """
+        Args:
+            allowed_classes: Restrict output to this class set, e.g. the
+                `appliances:` list from config/config.hardware.yaml. Classes
+                outside it are dropped from BOTH the centroid and the band-rule
+                path before scoring, so a class no socket on the rig can present
+                is never the answer. None (default) allows every class.
+
+                Filtering at construction rather than post-hoc matters: the
+                runner-up and the confidence margin are both computed over the
+                surviving classes, so a suppressed class cannot silently damp
+                the confidence of the one that is actually plugged in.
+        """
+        self.allowed_classes = set(allowed_classes) if allowed_classes else None
+
+        rule_src = list(rules) if rules else list(DEFAULT_RULES)
+        if self.allowed_classes is not None:
+            kept = [r for r in rule_src if r.name in self.allowed_classes]
+            if kept:
+                rule_src = kept
+            else:
+                logger.warning(
+                    "allowed_classes=%s matched no rule; keeping the full rule "
+                    "set rather than leaving the classifier with nothing to "
+                    "score.", sorted(self.allowed_classes))
+        self.rules = rule_src
+
         self.on_threshold_w = on_threshold_w
         self.max_confidence = max_confidence
 
         src = centroids if centroids is not None else CLASS_CENTROIDS
         self.centroids = {k: np.asarray(v, dtype=np.float64)
                           for k, v in (src or {}).items()}
+        if self.allowed_classes is not None:
+            kept_c = {k: v for k, v in self.centroids.items()
+                      if k in self.allowed_classes}
+            # An empty result means this profile's classes were never fitted.
+            # Keeping the unfiltered centroids would let the preferred centroid
+            # path answer with a class the profile forbids, so drop to the band
+            # rules (already filtered) instead.
+            self.centroids = kept_c
+
         self.feature_scales = np.asarray(
             feature_scales if feature_scales is not None else FEATURE_SCALES,
             dtype=np.float64)

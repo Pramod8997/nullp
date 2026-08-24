@@ -96,7 +96,18 @@ def fit(data: dict, on_threshold_w: float):
 
 
 def patch_module(centroids: dict, scales: np.ndarray) -> None:
-    """Rewrite FEATURE_SCALES and CLASS_CENTROIDS in the fallback module."""
+    """
+    Merge FEATURE_SCALES and CLASS_CENTROIDS into the fallback module.
+
+    MERGE, not replace. There is more than one deployment profile and each has
+    its own window cache: the default cache carries the household classes, the
+    `_demo` cache carries the consumer-electronics classes the physical rig
+    actually presents (laptop, phone_charger). Overwriting meant whichever
+    profile was fitted last was the only one the fallback could emit -- and
+    since classify() prefers the centroid path over the band rules, fitting the
+    household set alone left `phone_charger` unreachable on the real hardware.
+    Newly fitted classes win; classes absent from this run are preserved.
+    """
     src = open(MODULE_PATH).read()
 
     scales_txt = ("FEATURE_SCALES: Tuple[float, ...] = ("
@@ -104,9 +115,19 @@ def patch_module(centroids: dict, scales: np.ndarray) -> None:
     src, n1 = re.subn(r"FEATURE_SCALES: Tuple\[float, \.\.\.\] = \([^)]*\)",
                       scales_txt, src, count=1)
 
+    merged = dict(_existing_centroids())
+    overlap = sorted(set(merged) & set(centroids))
+    merged.update({k: np.asarray(v) for k, v in centroids.items()})
+    if overlap:
+        logger.info(f"refitted {len(overlap)} existing class(es): {', '.join(overlap)}")
+    preserved = sorted(set(merged) - set(centroids))
+    if preserved:
+        logger.info(f"preserved {len(preserved)} class(es) from other profiles: "
+                    f"{', '.join(preserved)}")
+
     lines = ["CLASS_CENTROIDS: Dict[str, Tuple[float, ...]] = {"]
-    for cls in sorted(centroids):
-        vals = ", ".join(f"{v:.4f}" for v in centroids[cls])
+    for cls in sorted(merged):
+        vals = ", ".join(f"{v:.4f}" for v in np.asarray(merged[cls]).ravel())
         lines.append(f"    {cls!r}: ({vals}),")
     lines.append("}")
     cent_txt = "\n".join(lines)
@@ -121,7 +142,8 @@ def patch_module(centroids: dict, scales: np.ndarray) -> None:
         return
 
     open(MODULE_PATH, 'w').write(src)
-    logger.info(f"Patched {MODULE_PATH}: {len(centroids)} centroids")
+    logger.info(f"Patched {MODULE_PATH}: {len(merged)} centroids "
+                f"({len(centroids)} from this run)")
 
 
 def main():

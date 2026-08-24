@@ -39,31 +39,49 @@
 // ═══════════════════════════════════════════════════════
 //  CONFIGURATION — CHANGE THESE PER NODE
 // ═══════════════════════════════════════════════════════
-// Single aggregate sense point for the demo bench rig: one PZEM measures the
-// whole 4-way strip and NILM disaggregates it.
-// See claude_debug/HARDWARE_FINAL_SPEC.md (scope S1/S2).
+// Single aggregate sense point: ONE PZEM measures ONE IS 1293 6 A socket, and a
+// 3-pin earthed multi-plug adapter in that socket puts the laptop brick and the
+// phone charger behind the same shunt at the same time. That simultaneity is
+// what NILM disaggregates -- one load at a time would be single-appliance
+// classification, not disaggregation.
+// See claude_debug/HARDWARE_FINAL_SPEC.md (scope S1/S2/S5, decision D12').
 const char* DEVICE_ID      = "node_bench_agg";   // Unique per node
 const char* ssid           = "YOUR_WIFI_SSID";
 const char* password       = "YOUR_WIFI_PASSWORD";
 const char* mqtt_server    = "192.168.1.100";     // EMS Backend IP
 const char* mqtt_user      = "pipeline";          // Broker username (matches mosquitto.conf)
 const char* mqtt_password  = "changeme_pipeline_password"; // Broker password
-// 600 W demo envelope -> CRITICAL_PCT 1.25 trips the relay at 750 W (3.26 A @ 230 V),
-// which stays below the 5 A load fuse. Coordination ladder: HARDWARE_FINAL_SPEC.md D8.
-const float RATED_WATTS    = 600.0;               // Rated power for this node
+// 250 W prototype envelope -> CRITICAL_PCT 1.25 trips the relay at 312 W
+// (1.36 A @ 230 V), which stays 3.7x below the 5 A load fuse so the relay always
+// acts first. Coordination ladder: HARDWARE_FINAL_SPEC.md D8.
+//
+// Do NOT restore 600 W here. At 600 W the trip is 750 W = 3.26 A, and one socket
+// carrying a laptop + phone charger draws only 150-320 W -- the cutoff could
+// never fire, making the headline safety feature undemonstrable in hardware.
+// That is blocking issue B-9; the 600 W ceiling belongs to the *simulated*
+// `make demo` fleet in config/config.demo.yaml, which has no hardware.
+const float RATED_WATTS    = 250.0;               // Rated power for this node
 const float POWER_FACTOR   = 1.0;                 // Reference only; PZEM reports measured PF
 
 // ═══════════════════════════════════════════════════════
 //  HARDWARE PINS & CONSTANTS
 // ═══════════════════════════════════════════════════════
 const int   RELAY_PIN      = 18;
-// NET polarity at the GPIO, not at the relay module. The module input IS
-// active-LOW, but GPIO 18 drives it through an INVERTING open-drain MOSFET
-// (BSS138: GPIO HIGH -> drain to GND -> relay IN LOW -> relay CLOSED), so the
-// two inversions cancel and the pin is active-HIGH.
+// NET polarity at the GPIO. Under HARDWARE_FINAL_SPEC.md D3' there are now ZERO
+// inversions in the chain: the relay module jumper is set to H (high-trigger)
+// and GPIO 18 drives the opto LED directly (~2.1 mA), so active-HIGH is the
+// literal reading. A 100 kOhm IN->GND pull-down holds the input at 0 V while
+// GPIO 18 is high-impedance during reset/boot, so OPEN is the only boot state.
+//
+// (The superseded D3 got to the same constant the long way round: an inverting
+// BSS138 feeding an active-LOW module input, two inversions cancelling. The
+// BSS138 is SOT-23 SMD and was deleted as unsolderable by hand -- B-10.)
+//
 // Setting this true energised the load at boot and made every safety cutoff
-// CLOSE the relay. See claude_debug/HARDWARE_FINAL_SPEC.md D4/D5 (B-7).
-// Only set true if the MOSFET inverter is removed and GPIO 18 drives relay IN directly.
+// CLOSE the relay. See HARDWARE_FINAL_SPEC.md D4/D5 (B-7). Do not reintroduce.
+// Set true ONLY if the D5 purchase-contingency fallback was taken (module has
+// no H/L jumper -> run module VCC at 3.3 V, JD-VCC at 5 V, and move the 100 kOhm
+// to a pull-UP). Re-run bring-up Stage 2 and confirm OPEN-at-boot if you do.
 const bool  RELAY_ACTIVE_LOW = false;
 const int   PZEM_RX_PIN    = 16;
 const int   PZEM_TX_PIN    = 17;
@@ -159,11 +177,17 @@ void SafetySamplingTask(void* pvParameters) {
             baselineAvg /= (float)baselineFill;
         }
 
+        // ── Inrush suppression flag ──
+        // Declared at task scope: the dP/dt path below consults it, and it must
+        // remain in scope afterwards. (It was previously declared inside the
+        // dP/dt `if` block yet read by the overcurrent check below it, which
+        // does not compile.)
+        bool isNormalInrush = (baselineAvg < BASELINE_INRUSH_CEIL)
+                           && (lastWatts < (baselineAvg + INRUSH_HEADROOM));
+
         // ── Edge Arc-Fault Proxy Detection (dP/dt in W/s) ──
         if (dt > 0.0f && (powerWatts > lastWatts)) {
             float rateOfChange = (powerWatts - lastWatts) / dt;
-            bool isNormalInrush = (baselineAvg < BASELINE_INRUSH_CEIL)
-                               && (lastWatts < (baselineAvg + INRUSH_HEADROOM));
 
             if (rateOfChange > EDGE_ROC_THRESHOLD && !isNormalInrush) {
                 // ⚡ IMMEDIATE PHYSICAL RELAY CUTOFF — NO NETWORK DEPENDENCY
@@ -181,9 +205,15 @@ void SafetySamplingTask(void* pvParameters) {
         }
 
         // ── Overcurrent Cutoff (% of rated) ──
-        // Allow brief starting inrush if baseline was idle, otherwise trip on sustained overload
+        // UNCONDITIONAL. Inrush suppression deliberately does NOT gate this
+        // path: it exists to stop a motor's starting surge from reading as an
+        // arc fault on the dP/dt channel, and under HARDWARE_FINAL_SPEC.md D11'
+        // there is no inductive load left in scope at all (SMPS bricks plus a
+        // resistive lamp). A sustained draw above 125% of rated must open the
+        // relay on the very first sample that sees it -- D8 makes the relay the
+        // functional protective element, ahead of the 5 A fuse at 3.7x margin.
         float criticalWatts = RATED_WATTS * CRITICAL_PCT;
-        if (powerWatts > criticalWatts && !isNormalInrush) {
+        if (powerWatts > criticalWatts) {
             setRelay(false);
             Serial.printf("[CORE0] ⚡ OVERCURRENT! %.1fW > %.1fW. Relay CUTOFF.\n",
                           powerWatts, criticalWatts);

@@ -166,6 +166,9 @@ Thumbs.db
 !.vscode/extensions.json
 !.vscode/settings.json
 .idea/
+.zed/
+*.sublime-project
+*.sublime-workspace
 *.code-workspace
 *.swp
 *.swo
@@ -199,6 +202,9 @@ core.*
 .antigravity/
 .cursor/
 .claude/
+.copilot/
+.windsurf/
+.aider*
 graphify-out/
 **/graphify-out/
 .system_generated/
