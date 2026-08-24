@@ -17,8 +17,9 @@ Repo: /home/pramodsb/Downloads/mjr | Baseline: 467/467 Tests Passing (100%).
 ### 2. CURRENT STATE & ARTIFACTS
 - Real Data Ingestion: `data/nilmtk_reader.py` (14,033 labelled windows from UK-DALE & REDD with Blosc decompression & protocol-1 pickle metadata parsing).
 - Demo Weights: `backend/models/weights_demo/` (ProtoNet trained across 8000 episodes on real data with unseen-house holdout, 74.0% val acc, 7 classes).
-- Heuristic Fallback: `src/pipeline/heuristic_fallback.py` (Deterministic nearest-centroid classifier using 9 real-data fitted centroids, max confidence 0.75, zero torch dependency).
-- Demo Config: `config/config.demo.yaml` (600W ceiling for bench loads: laptop, desktop, monitor, projector, tv, router, phone_charger).
+- Heuristic Fallback: `src/pipeline/heuristic_fallback.py` (Deterministic nearest-centroid classifier using 9 real-data fitted centroids + 15 appliance envelopes, max confidence 0.75, zero torch dependency).
+- Demo Config: `config/config.demo.yaml` (600W ceiling for bench loads: laptop 30-200W, desktop 80-350W, monitor 20-60W, projector 30-400W, tv 50-250W, router 5-25W, phone_charger/powerbank 5-120W).
+- Low-Accounting & Charging Truths: Loads < 20W (trickle/standby phone/powerbank 3-10W) are tracked via `PhantomTracker`; Fast-charging/USB-PD (18-120W) cross the 20W step-change threshold and trigger active NILM transient detection.
 
 ### 3. EXACT API CONTRACTS (ANTI-HALLUCINATION)
 Never invent APIs. Refer to `claude_debug/ARCHITECTURE_AND_APIS.md`:

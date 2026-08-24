@@ -86,13 +86,13 @@ The Smart Home EMS is an industrial-grade, edge-hybrid smart energy monitoring a
 10. `laptop` (Rated: 65W, Max: 150W, Tier-0: False)
 
 ### 4.2 Benchtop Electronics Demo Set (7 Classes — `config.demo.yaml`)
-1. `laptop` (Rated: 45–90W)
-2. `desktop_computer` (Rated: 100–350W)
-3. `monitor` (Rated: 25–50W)
-4. `projector` (Rated: 200–350W)
-5. `tv` (Rated: 80–150W)
-6. `router` (Rated: 10–25W)
-7. `phone_charger` (Rated: 3–15W, Standby / Phantom tracking)
+1. `laptop` (Rated: 30–200W; ultrabooks 30–65W, workstation/gaming 70–200W)
+2. `desktop_computer` (Rated: 80–350W)
+3. `monitor` (Rated: 20–60W)
+4. `projector` (Rated: 30–400W; LED 30–50W, lamp 200–400W)
+5. `tv` (Rated: 50–250W)
+6. `router` (Rated: 5–25W, Tier-0 Critical Network Node)
+7. `phone_charger` (Rated: 5–120W; 3–10W trickle/standby tracked via `PhantomTracker`, 18–120W USB-PD / powerbanks classified via NILM + ProtoNet / heuristic fallback)
 
 ---
 

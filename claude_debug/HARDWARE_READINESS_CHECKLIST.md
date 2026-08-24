@@ -249,4 +249,7 @@ Classes: `laptop`, `desktop_computer`, `monitor`, `projector`, `tv`, `router`, `
 
 **`projector` caveat:** UK-DALE contains exactly one projector meter in one house, so that class cannot be validated on an unseen house. Its score is optimistic; say so if asked.
 
-**Phone charger:** it will not be identified, by design. A 3–10 W load sits below the 20 W event threshold and inside the sensor's own noise. Demo it as a **standby/phantom load** via `PhantomTracker` instead.
+**Phone chargers & Powerbanks (5–120 W):**
+- Trickle and standby loads (3–10 W) sit below the 20 W transient threshold (`TRANSIENT_THRESHOLD_W = 20.0 W`) and are tracked continuously as **standby/phantom load** via `PhantomTracker`.
+- Fast chargers, USB-PD power supplies, and high-capacity powerbanks (18–120 W) cross the 20 W step-change threshold, triggering active `NILMTransientDetector` event detection and classification via `ProtoNet` and `HeuristicApplianceClassifier`.
+

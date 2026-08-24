@@ -16,6 +16,7 @@
 4. **Zero API Hallucinations:** Never invent class names or method signatures. Consult [`claude_debug/ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md).
 5. **AST Synchronization:** After modifying any code file, execute `graphify update .` (AST-only, zero API cost).
 6. **No Regressions:** Verify with `python -m pytest tests/ -q` (baseline is **467 passing tests**).
+7. **Device Power Regimes & Low-Accounting Loads:** Phones/powerbanks in trickle/standby (3–10W) are tracked via `PhantomTracker`; fast charging / USB-PD (18–120W) cross the 20W transient threshold and trigger active NILM classification. Laptops span 30–200W (ultrabooks to gaming/workstation). Projectors span 30–400W.
 
 ---
 

@@ -33,10 +33,14 @@
 - **Dynamic Prototype Registry Path**: Updated `handle_label_submitted()` to write new labels to the active `weights_dir` (e.g. `weights_demo/`) rather than hardcoded `weights/`.
 
 ### 2. [`backend/scripts/simulate_esp32.py`](file:///home/pramodsb/Downloads/mjr/backend/scripts/simulate_esp32.py)
-- Added `DEMO_DEVICES` (Laptop 65W, Desktop 250W, Monitor 35W, Projector 300W burst, Charger 7W phantom) matching `config/config.demo.yaml`.
+- Added `DEMO_DEVICES` (Laptop 120W / 70–200W span, Desktop 250W, Monitor 35W, Projector 300W burst, Charger 45W / 10–120W USB-PD span) matching `config/config.demo.yaml`.
 - Added `--demo` flag to simulate consumer electronics instead of high-power kitchen loads that would immediately trip the 600W bench safety ceiling.
 
-### 3. [`scripts/demo_full_system.py`](file:///home/pramodsb/Downloads/mjr/scripts/demo_full_system.py) & [`Makefile`](file:///home/pramodsb/Downloads/mjr/Makefile)
+### 3. [`src/pipeline/heuristic_fallback.py`](file:///home/pramodsb/Downloads/mjr/src/pipeline/heuristic_fallback.py)
+- Expanded `DEFAULT_RULES` with envelopes for `phone_charger` (5–125W), `router` (5–35W), `monitor` (15–80W), `laptop` (15–220W), `desktop_computer` (50–450W), `projector` (30–450W).
+- Ensures seamless fallback classification across the entire consumer electronics power band (phones, powerbanks, ultrabooks, gaming laptops, projectors).
+
+### 4. [`scripts/demo_full_system.py`](file:///home/pramodsb/Downloads/mjr/scripts/demo_full_system.py) & [`Makefile`](file:///home/pramodsb/Downloads/mjr/Makefile)
 - Added `--demo` CLI flag support (and `EMS_DEMO=1` environment variable).
 - Launches `run_pipeline.py --config config/config.demo.yaml` and `simulate_esp32.py --demo` when `--demo` is active.
 - Fixed printed WebSocket URL to `ws://localhost:8000/ws`.

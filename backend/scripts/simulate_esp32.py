@@ -100,33 +100,33 @@ DEVICES = [
 # Demo bench-load device profiles matching config/config.demo.yaml
 DEMO_DEVICES = [
     {
-        "id": "node_laptop", "rated": 65.0, "var": 8.0,
-        "spike_prob": 0.0, "cutoff": 600.0,
+        "id": "node_laptop", "rated": 120.0, "var": 25.0,
+        "spike_prob": 0.005, "cutoff": 600.0,
         "cycle": False, "on_prob": 0.003, "off_prob": 0.001,
         "phantom": 3.0,
     },
     {
-        "id": "node_desktop", "rated": 250.0, "var": 30.0,
-        "spike_prob": 0.0, "cutoff": 600.0,
+        "id": "node_desktop", "rated": 250.0, "var": 35.0,
+        "spike_prob": 0.002, "cutoff": 600.0,
         "cycle": False, "on_prob": 0.002, "off_prob": 0.001,
         "phantom": 5.0,
     },
     {
-        "id": "node_monitor", "rated": 35.0, "var": 3.0,
+        "id": "node_monitor", "rated": 35.0, "var": 5.0,
         "spike_prob": 0.0, "cutoff": 600.0,
         "cycle": False, "on_prob": 0.003, "off_prob": 0.001,
         "phantom": 2.0,
     },
     {
-        "id": "node_projector", "rated": 300.0, "var": 15.0,
+        "id": "node_projector", "rated": 300.0, "var": 20.0,
         "spike_prob": 0.0, "cutoff": 600.0,
         "cycle": False, "burst": True,
         "burst_power": 300.0, "burst_prob": 0.01, "burst_duration": 120,
         "phantom": 1.5,
     },
     {
-        "id": "node_charger", "rated": 7.0, "var": 1.5,
-        "spike_prob": 0.0, "cutoff": 600.0,
+        "id": "node_charger", "rated": 45.0, "var": 15.0,
+        "spike_prob": 0.005, "cutoff": 600.0,
         "cycle": False, "on_prob": 0.005, "off_prob": 0.002,
         "phantom": 2.0,
     },
