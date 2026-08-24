@@ -39,20 +39,32 @@
 // ═══════════════════════════════════════════════════════
 //  CONFIGURATION — CHANGE THESE PER NODE
 // ═══════════════════════════════════════════════════════
-const char* DEVICE_ID      = "node_fridge";      // Unique per node
+// Single aggregate sense point for the demo bench rig: one PZEM measures the
+// whole 4-way strip and NILM disaggregates it.
+// See claude_debug/HARDWARE_FINAL_SPEC.md (scope S1/S2).
+const char* DEVICE_ID      = "node_bench_agg";   // Unique per node
 const char* ssid           = "YOUR_WIFI_SSID";
 const char* password       = "YOUR_WIFI_PASSWORD";
 const char* mqtt_server    = "192.168.1.100";     // EMS Backend IP
 const char* mqtt_user      = "pipeline";          // Broker username (matches mosquitto.conf)
 const char* mqtt_password  = "changeme_pipeline_password"; // Broker password
-const float RATED_WATTS    = 200.0;               // Rated power for this appliance
-const float POWER_FACTOR   = 1.0;                 // PF=1.0 for resistive; 0.85 for motors
+// 600 W demo envelope -> CRITICAL_PCT 1.25 trips the relay at 750 W (3.26 A @ 230 V),
+// which stays below the 5 A load fuse. Coordination ladder: HARDWARE_FINAL_SPEC.md D8.
+const float RATED_WATTS    = 600.0;               // Rated power for this node
+const float POWER_FACTOR   = 1.0;                 // Reference only; PZEM reports measured PF
 
 // ═══════════════════════════════════════════════════════
 //  HARDWARE PINS & CONSTANTS
 // ═══════════════════════════════════════════════════════
 const int   RELAY_PIN      = 18;
-const bool  RELAY_ACTIVE_LOW = true;              // Standard optoisolated relays are Active-LOW
+// NET polarity at the GPIO, not at the relay module. The module input IS
+// active-LOW, but GPIO 18 drives it through an INVERTING open-drain MOSFET
+// (BSS138: GPIO HIGH -> drain to GND -> relay IN LOW -> relay CLOSED), so the
+// two inversions cancel and the pin is active-HIGH.
+// Setting this true energised the load at boot and made every safety cutoff
+// CLOSE the relay. See claude_debug/HARDWARE_FINAL_SPEC.md D4/D5 (B-7).
+// Only set true if the MOSFET inverter is removed and GPIO 18 drives relay IN directly.
+const bool  RELAY_ACTIVE_LOW = false;
 const int   PZEM_RX_PIN    = 16;
 const int   PZEM_TX_PIN    = 17;
 const float VOLTAGE        = 230.0;    // Mains voltage (India: 230V) for reference

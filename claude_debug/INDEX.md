@@ -18,10 +18,11 @@ All documents in this folder (`claude_debug/`) provide zero-gap, token-efficient
 | **3. Product Requirements** | [`PRD.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/PRD.md) | Product Requirements Document (Functional & Non-Functional specifications, 10-appliance + demo class sets). |
 | **4. Technical Review** | [`TECHNICAL_REVIEW.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/TECHNICAL_REVIEW.md) | Deep system architecture, FreeRTOS state machines, real-data NILM pipeline, centroid fallback. |
 | **5. API Cheatsheet** | [`ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md) | Exhaustive class/method signatures to prevent token-wasting API hallucinations. |
-| **6. Hardware Audit** | [`HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md) | 6 physical hazards, MOSFET level shifting, RC snubber, 10A PZEM selection, PE earth wiring, and BOM. |
-| **7. Hardware Readiness Checklist** | [`HARDWARE_READINESS_CHECKLIST.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_READINESS_CHECKLIST.md) | Pre-procurement BOM order checklist, 3 schematic blocking fixes, staged bring-up gates. |
-| **8. Real-World Physical Testing** | [`REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/REAL_WORLD_TESTING_PLAN.md) | 8 physical bench tests (Variac brownouts, inductive arcing, thermal rise, THD noise). |
-| **9. Debug Verification Status** | [`debug_status.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/debug_status.md) | 467/467 regression verification, 7/7 physical stress, 10/10 HIL, and modified tracked files review. |
+| **6. 🔒 FINAL Hardware Spec** | [`HARDWARE_FINAL_SPEC.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_FINAL_SPEC.md) | **AUTHORITATIVE.** Locked physical build: single aggregate node, ~600 W consumer electronics, India 230 V. Final BOM, coordination ladder, bring-up gates, B-0…B-7 ledger. |
+| **7. Hazard Analysis** | [`HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md) | 6 physical hazard root causes: MOSFET level shifting, RC snubber, brownout, PZEM refresh latency, creepage, inverter dynamics. **BOM superseded by the spec.** |
+| **8. Readiness Checklist** | [`HARDWARE_READINESS_CHECKLIST.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_READINESS_CHECKLIST.md) | Original pre-procurement review and blocking-issue analysis. **All issues resolved; order tables superseded by the spec.** |
+| **9. Real-World Physical Testing** | [`REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/REAL_WORLD_TESTING_PLAN.md) | 8 physical bench tests (Variac brownouts, inductive arcing, thermal rise, THD noise). |
+| **10. Debug Verification Status** | [`debug_status.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/debug_status.md) | 467/467 regression verification, 7/7 physical stress, 10/10 HIL, and modified tracked files review. |
 
 ---
 

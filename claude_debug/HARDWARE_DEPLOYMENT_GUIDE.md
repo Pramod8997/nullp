@@ -1,8 +1,22 @@
 # Real-World Hardware Deployment & Electrical Safety Guide
 
 > **Project:** Smart Home Energy Monitoring & Edge Safety Platform (EMS)  
-> **Target Hardware:** ESP32 DevKit V1 + PZEM-004T v3.0 + 30A SLA Relay Module + HLK-5M05  
-> **Status:** Production Hardware Audit Completed
+> **Status:** Hazard analysis — retained as the root-cause reference.
+
+> ⚠️ **The BOM (§3) and schematic (§1) below are SUPERSEDED.**
+> The build was scoped to a single-node ~600 W consumer-electronics demo rig, which
+> changes the sensor, relay, fusing and wire gauge. Order and wire from
+> **[`HARDWARE_FINAL_SPEC.md`](./HARDWARE_FINAL_SPEC.md)** — it is authoritative.
+> Read this document for **why** each hazard exists; read the spec for **what to build**.
+>
+> | Superseded here | Now |
+> | :--- | :--- |
+> | 100 A CT PZEM | PZEM-004T v3.0 **10 A direct-connect** (no CT) |
+> | SLA-05VDC-SL-C 30 A relay | **SRD-05VDC-SL-C 10 A** |
+> | 16 A MCB, 2.5 mm² wire | **5 A ceramic fuse, 1.0 mm² wire** |
+> | 2N7000 | **BSS138** + mandatory **100 kΩ gate pull-down** |
+> | Hazard 5 trace sizing (2 oz Cu, >12 mm) | N/A at 5 A — but **≥6.3 mm creepage still applies** |
+
 
 ---
 

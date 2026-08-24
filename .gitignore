@@ -104,8 +104,10 @@ mosquitto/log/
 
 # ── Machine Learning Weights, Tensors & Large Datasets ──────────────────────
 backend/models/weights/
+backend/models/weights_demo/
 backend/models/ems_weights/
 backend/models/weights_backup_*/
+backend/models/*.zip
 backend/data/*.h5
 data/real/*.h5
 data/real/*.npy

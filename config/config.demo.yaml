@@ -46,11 +46,19 @@ protonet:
 #   projector                  30-400 W  (LED 30-50W, lamp 200-400W)
 #   router                     5-25 W
 devices:
-  node_laptop:    { simulated: false, rated: 200, tier0: false }
-  node_projector: { simulated: false, rated: 400, tier0: false }
-  node_monitor:   { simulated: false, rated: 60,  tier0: false }
-  node_desktop:   { simulated: false, rated: 350, tier0: false }
-  node_charger:   { simulated: false, rated: 120, tier0: false }
+  # PHYSICAL: declared here only so `make demo` does not warn about an unknown
+  # node id if the real board is on the broker. The real one-port rig should be
+  # run from config/config.hardware.yaml, which has the correct 250 W ceiling.
+  # See claude_debug/HARDWARE_FINAL_SPEC.md (scope S2/S5, decision D8).
+  node_bench_agg: { simulated: false, rated: 250, tier0: false }
+
+  # SIMULATED: the `make demo` software fleet, published by
+  # backend/scripts/simulate_esp32.py DEMO_DEVICES. No hardware exists for these.
+  node_laptop:    { simulated: true, rated: 200, tier0: false }
+  node_projector: { simulated: true, rated: 400, tier0: false }
+  node_monitor:   { simulated: true, rated: 60,  tier0: false }
+  node_desktop:   { simulated: true, rated: 350, tier0: false }
+  node_charger:   { simulated: true, rated: 120, tier0: false }
 
 appliances:
   - laptop
@@ -64,6 +72,11 @@ appliances:
 # Scaled so the safety path is actually demonstrable at bench power levels.
 # 600 W ceiling: a laptop + projector + monitor together (~530 W) sits in the
 # warning band, and adding the desktop trips CRITICAL.
+#
+# NOTE: this ceiling serves the SIMULATED fleet below (~1130 W of profiles in
+# backend/scripts/simulate_esp32.py). The physical one-port rig draws only
+# 150-320 W and needs a 250 W ceiling to trip at all -- it has its own file,
+# config/config.hardware.yaml. Do not merge the two.
 system_safety:
   max_aggregate_wattage: 600.0
   warning_pct: 1.10
@@ -87,5 +100,8 @@ system:
 #    - Fast chargers / USB-PD (18 W - 120 W) cross the 20 W step-change threshold
 #      and trigger active NILM transient detection + ProtoNet/heuristic classification.
 # 2. Fit the PZEM-004T v3.0 **10 A direct-connect** variant, not the 100 A CT
-#    variant — see claude_debug/HARDWARE_READINESS_CHECKLIST.md §0.5.
-# 3. Size the load-branch fuse to ~2-3 A for these loads, not 16 A.
+#    variant — see claude_debug/HARDWARE_FINAL_SPEC.md D1.
+# 3. Load-branch fuse is **5 A**, not 2-3 A. At the 125% CRITICAL trip the branch
+#    draws 750 W = 3.26 A @ 230 V (4.17 A at a 180 V brownout, since SMPS loads are
+#    constant-power and draw MORE current as voltage sags). A 2-3 A fuse would blow
+#    before the relay could ever demonstrate a cutoff. See HARDWARE_FINAL_SPEC.md D8.

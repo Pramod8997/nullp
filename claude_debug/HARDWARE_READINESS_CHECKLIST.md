@@ -2,7 +2,23 @@
 
 > **Companion to:** [`HARDWARE_DEPLOYMENT_GUIDE.md`](./HARDWARE_DEPLOYMENT_GUIDE.md)
 > **Purpose:** Pre-procurement review, order list, and staged bring-up gate before any mains is applied.
-> **Status:** ⚠️ **3 blocking issues found — resolve before ordering.** See also §0.5 if the demo loads are a laptop / phone / projector.
+
+> ✅ **All blocking issues raised here are now RESOLVED. Scope is decided.**
+> Order and wire from **[`HARDWARE_FINAL_SPEC.md`](./HARDWARE_FINAL_SPEC.md)** — it is
+> authoritative and supersedes the order tables below. Build: **single aggregate node,
+> ~600 W consumer electronics, India 230 V.**
+>
+> Two corrections to this document's own recommendations:
+> * **§0.5's "2 A or 3 A" load fuse was wrong** — it anti-coordinates with the 600 W /
+>   125 % CRITICAL trip recommended in §7. At 750 W the branch draws 3.26 A (4.17 A in a
+>   180 V brownout, since SMPS loads are constant-power), so a 2–3 A fuse blows *before*
+>   the relay can ever demonstrate a cutoff. **Use 5 A** — spec §D8.
+> * **Two new blocking issues were found** that this checklist did not catch:
+>   **B-5** (`firmware/.../README_PHASE2.md` documented an entirely different analog-CT
+>   sensor chain on GPIO 34/5) and **B-7** (`RELAY_ACTIVE_LOW = true` inverted the relay
+>   once the MOSFET level shifter was added — boot energised the load and safety cutoffs
+>   *closed* the relay). Both are fixed; see spec §4 and §D5.
+
 
 ---
 

@@ -1,0 +1,75 @@
+# Physical prototype profile — the ONE real ESP32 + PZEM node, ONE 6 A socket
+#
+# This is the file to run when the hardware rig is powered. It is NOT
+# config/config.demo.yaml: that file's 600 W ceiling serves the ~1130 W
+# simulated fleet in backend/scripts/simulate_esp32.py, and would put the
+# physical CRITICAL trip at 750 W -- unreachable for a laptop + phone charger,
+# so the relay cutoff would look broken by never firing.
+#
+#   python scripts/run_pipeline.py --config config/config.hardware.yaml
+#
+# Anything not overridden here mirrors config/config.yaml.
+# Hardware of record: claude_debug/HARDWARE_FINAL_SPEC.md (scope S1-S5).
+
+app:
+  name: "Digital Twin EMS — Physical Prototype (1 node, 1 port)"
+  debug: true
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  qos_safety: 1
+  qos_telemetry: 0
+  topics:
+    reads: "home/sensor/+/power"
+    writes: "home/plug/+/command"
+    events: "home/ui/events"
+
+database:
+  path: "data/ems_state.db"
+  fallback_csv: "data/fallback_measurements.csv"
+  retention_days: 30
+
+protonet:
+  seq_len: 128
+  embedding_size: 128
+  distance_threshold: 15.0
+  confidence_threshold: 0.90
+  # Consumer-electronics class set from scripts/train_demo_models.py. The general
+  # 10-class model spans 3 W-3.5 kW and is weakest exactly in this band.
+  weights_path: "backend/models/weights_demo/protonet.pt"
+
+devices:
+  # The ONLY node. One ESP32, one relay, one IS 1293 6 A socket. A 3-pin
+  # multi-plug adapter in that socket puts the laptop and the phone charger on
+  # the same PZEM shunt at once -- that simultaneity is what gives NILM
+  # something to disaggregate. One device at a time is single-appliance
+  # classification, not disaggregation, and does not exercise
+  # OverlapAwareNILMDetector.
+  node_bench_agg: { simulated: false, rated: 250, tier0: false }
+
+# Only the two classes the prototype can physically produce. The trained model
+# still has all 7 heads; restricting the list here keeps the UI from advertising
+# appliances that no socket on this rig can ever present.
+appliances:
+  - laptop
+  - phone_charger
+
+# 250 W ceiling, sized so the cutoff is reachable with the loads on hand:
+#   laptop 65 W + USB-PD charger 120 W + 100 W lamp = 285 W -> WARNING (275 W)
+#   anything further                                        -> CRITICAL (312 W) -> relay opens
+#
+# Coordination ladder stays monotonic (HARDWARE_FINAL_SPEC.md D8):
+#   250 W nominal -> WARN 275 W -> TRIP 312 W (1.36 A) -> 5 A fuse (1150 W)
+#   -> 10 A relay/PZEM (2300 W) -> 13 A wire
+# The 5 A fuse sits 3.7x above the trip, so the relay always acts first --
+# that ordering is the whole point and must not be re-tuned casually.
+system_safety:
+  max_aggregate_wattage: 250.0
+  warning_pct: 1.10
+  critical_pct: 1.25
+  # Per-device ceilings. run_pipeline.py:165 reads ONLY this mapping -- top-level
+  # `laptop: {max_w: ...}` siblings (as written in config.demo.yaml) are inert.
+  device_wattage_limits:
+    default: 250.0
+    node_bench_agg: 250.0
