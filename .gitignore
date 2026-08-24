@@ -35,37 +35,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 .uv/
+pip-log.txt
+pip-delete-this-directory.txt
 
-# ── Temporary Scratch & One-off Fix Scripts ─────────────────────────────────
-fix_*.py
-scratch/
-**/scratch/
-test_requirements.json
-parse_prompt.py
-make_pdf.py
-make_detailed_pdf.py
-
-# ── Frontend & Node.js ──────────────────────────────────────────────────────
-node_modules/
-**/node_modules/
-frontend/dist/
-frontend/dist-ssr/
-frontend/.vite/
-.vite/
-dist/
-dist-ssr/
-*.local
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-.pnp
-.pnp.js
-.eslintcache
-*.tsbuildinfo
-
-# ── Testing, Profiling & Coverage ───────────────────────────────────────────
+# ── Testing, Profiling & Type Checking ──────────────────────────────────────
 .pytest_cache/
 **/.pytest_cache/
 .hypothesis/
@@ -82,13 +55,41 @@ nosetests.xml
 *.lcov
 .tox/
 .nox/
-.cache
+.cache/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+.pyre/
+.pytype/
 .ruff_cache/
 **/.ruff_cache/
 .benchmarks/
+
+# ── Frontend, Node.js & Web ─────────────────────────────────────────────────
+node_modules/
+**/node_modules/
+dist/
+dist-ssr/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+.vite/
+**/frontend/.vite/
+.parcel-cache/
+.turbo/
+.next/
+.nuxt/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnp
+.pnp.js
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
 
 # ── Databases & Runtime State ───────────────────────────────────────────────
 *.db
@@ -97,6 +98,7 @@ dmypy.json
 *.db-shm
 *.db-wal
 *.db-journal
+*.rdb
 data/ems_state.db*
 data/fallback_measurements.csv
 mosquitto/data/
@@ -108,6 +110,7 @@ backend/models/weights_demo/
 backend/models/ems_weights/
 backend/models/weights_backup_*/
 backend/models/*.zip
+!backend/models/ems_weights.zip
 backend/data/*.h5
 data/real/*.h5
 data/real/*.npy
@@ -137,22 +140,30 @@ rl_action_log.csv
 safety_events.log
 training_results/
 
-# ── Firmware & Embedded (ESP32 / PlatformIO) ────────────────────────────────
+# ── Firmware & Embedded (ESP32 / PlatformIO / CMake) ────────────────────────
 .pio/
 **/.pio/
 .pioenvs/
 **/.pioenvs/
 .piolibdeps/
 **/.piolibdeps/
+.clangd/
+.ccls-cache/
+.espressif/
 firmware/**/build/
 firmware/build/
+cmake-build-*/
 *.bin
 *.elf
 *.map
 *.hex
 *.o
+*.obj
 *.a
+*.lib
 *.d
+sdkconfig.old
+sdkconfig.ci
 
 # ── OS & IDE Artifacts ──────────────────────────────────────────────────────
 .DS_Store
@@ -162,18 +173,28 @@ firmware/build/
 .Trashes
 ehthumbs.db
 Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 .vscode/
-!.vscode/extensions.json
-!.vscode/settings.json
 .idea/
 .zed/
+.fleet/
+.history/
 *.sublime-project
 *.sublime-workspace
 *.code-workspace
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
 *.swp
 *.swo
 *.sw?
+.*.swp
+.*.swo
 *~
+#*#
+.#*
 *.tmp
 *.temp
 *.bak
@@ -189,15 +210,23 @@ core.*
 .env.development.local
 .env.test.local
 .env.production.local
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+id_rsa*
 !.env.example
 !.env.template
+!.env.sample
 
 # ── Jupyter Notebooks ───────────────────────────────────────────────────────
 .jupyter
 .ipynb_checkpoints/
 */.ipynb_checkpoints/*
 
-# ── AI Agents, Scratch & Knowledge Graph ────────────────────────────────────
+# ── AI Agents, LLM Tools & Knowledge Graphs ─────────────────────────────────
 .gemini/
 .antigravity/
 .cursor/
@@ -205,11 +234,21 @@ core.*
 .copilot/
 .windsurf/
 .aider*
+.cline/
+.roo/
+.openhands/
+.continue/
+.chatgpt/
 graphify-out/
 **/graphify-out/
 .system_generated/
 
-# ── Ephemeral Checkpoints & Prompts ─────────────────────────────────────────
+# ── Ephemeral Checkpoints, Scripts & Prompts ────────────────────────────────
+fix_*.py
+scratch/
+**/scratch/
+make_pdf.py
+make_detailed_pdf.py
 e.md
 SESSION_CHECKPOINT.md
 PROJECT_HANDOVER.md
@@ -218,7 +257,7 @@ nullp_exhaustive_test_prompt.md
 Project_Overview.pdf
 *.pdf
 
-# ── Preserve Project Documentation & Claude Context ─────────────────────────
+# ── Preserve Project Documentation, Specs & Assets ──────────────────────────
 !README.md
 !README.MD
 !readme.md
@@ -231,9 +270,15 @@ Project_Overview.pdf
 !frontend/README.md
 !firmware/**/README*.md
 !docs/**/*.md
+!docs/**/*.pdf
+!docs/screenshots/*
 !claude_debug/
 !claude_debug/**/*
 !claude_context/
 !claude_context/**/*
-!.github/**/*.md
-!.agents/**/*.md
+!.github/**/*
+!.agents/**/*
+!parse_prompt.py
+!test_requirements.json
+!frontend/public/**/*
+!frontend/src/assets/**/*
