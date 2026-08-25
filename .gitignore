@@ -267,6 +267,7 @@ prompt.md
 FAST_FIX_*.md
 Project_Overview.pdf
 *.pdf
+*.md
 
 # ── Preserve Project Documentation, Specs & Assets ──────────────────────────
 !README.md
