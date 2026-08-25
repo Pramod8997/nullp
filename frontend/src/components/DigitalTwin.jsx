@@ -26,12 +26,18 @@ const LabelRequestCard = ({ event, onLabeled }) => {
     setError('');
 
     try {
-      const segments = event.embedding && event.embedding.length === 128
-        ? [event.embedding]
-        : null;
+      // Enrollment needs the raw 128-sample POWER windows, in watts, that the
+      // pipeline captured for this device — NOT event.embedding. Both are
+      // length-128 float arrays, so submitting the embedding passed every
+      // validation and then had the CNN run over it as though it were a power
+      // trace, producing a prototype built from nonsense. `segments` is the
+      // field that carries watts; `embedding` is for display/clustering only.
+      const segments = Array.isArray(event.segments)
+        ? event.segments.filter((s) => Array.isArray(s) && s.length === 128)
+        : [];
 
-      if (!segments) {
-        setError('No embedding data in event. Retrying next cycle.');
+      if (segments.length === 0) {
+        setError('No power-window data in event yet. Retrying next cycle.');
         setLoading(false);
         return;
       }

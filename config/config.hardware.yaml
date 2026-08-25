@@ -35,9 +35,44 @@ protonet:
   embedding_size: 128
   distance_threshold: 15.0
   confidence_threshold: 0.90
+  # See config.demo.yaml for why this is a separate quantity from
+  # confidence_threshold: it gates the agreement of two independent channels,
+  # not a single softmax. Below it the load is reported unrecognised and the
+  # operator is asked for a label — which on the physical rig is the *expected*
+  # path for the phone charger, since no fitted constant can stand in for a
+  # modern USB-PD charger (no such data exists in UK-DALE).
+  recognition_threshold: 0.45
+  heuristic_min_confidence: 0.55
   # Consumer-electronics class set from scripts/train_demo_models.py. The general
   # 10-class model spans 3 W-3.5 kW and is weakest exactly in this band.
   weights_path: "backend/models/weights_demo/protonet.pt"
+  # ⚠ NO `registry_path` HERE, DELIBERATELY — and that means this rig does NOT
+  # recognise its loads yet.
+  #
+  # Without the key the shipped UK-DALE registry is used, and that artifact
+  # cannot represent this rig's loads: measured on
+  # data/real/cache/ukdale_windows_demo.npz its `laptop` prototype is a 21 W
+  # netbook (p50, p90 = 45 W) and its `phone_charger` has ZERO windows above the
+  # 20 W on-threshold. A 65 W laptop and a 120 W USB-PD charger are out of
+  # family for both, so every bench window comes back "unrecognised" and routes
+  # to the LABEL_REQUEST loop. That is the honest answer, not a defect.
+  #
+  # To make the rig recognise its own loads, capture real PZEM windows and enrol:
+  #   1. run each load alone on the bench, save 128-sample power windows (watts)
+  #      per class into an .npz keyed by class name — see
+  #      claude_debug/REAL_WORLD_TESTING_PLAN.md;
+  #   2. python scripts/enroll_demo_devices.py --capture bench.npz \
+  #        --out backend/models/weights_demo/prototype_registry_bench.pt
+  #   3. set registry_path to that file.
+  # Enrolling from the SIMULATOR profiles (the demo default) would be a lie here:
+  # it would make the dashboard show confident labels that no physical
+  # measurement supports. Four-class recognition on this rig is
+  # NOT PHYSICALLY VERIFIED until step 1 is actually performed on hardware.
+  #
+  # The alternative needing no capture is already live: let the operator label
+  # each load once through the dashboard. handle_label_submitted enrols it with
+  # the envelope measured on the real device, which is strictly better evidence
+  # than any pre-seeded band.
 
 devices:
   # The ONLY node. One ESP32, one relay, one IS 1293 6 A socket. A 3-pin

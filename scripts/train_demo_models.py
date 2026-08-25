@@ -167,8 +167,27 @@ def train_demo(args):
         registry.add_class(cls, segs[:K_SHOT * 2])
     registry.save(f'{WEIGHTS_DIR}/prototype_registry.pt')
     logger.info(f"Prototype Registry saved ({len(registry.class_names())} classes)")
+    # This registry alone does NOT make the demo recognise its devices. Its
+    # `laptop` prototype is UK-DALE's 21 W netbook (p50) and `phone_charger` has
+    # no windows above the 20 W on-threshold, so the demo fleet's 120 W laptop
+    # and 45 W USB-PD charger are out of family for both — measured 0/96 recall.
+    # config.demo.yaml therefore reads `prototype_registry_enrolled.pt`, which is
+    # a separate file precisely so re-running this trainer cannot clobber it.
+    logger.info("NEXT STEP: python scripts/enroll_demo_devices.py  "
+                "(writes prototype_registry_enrolled.pt — the demo profile reads "
+                "that file, not this one)")
 
     # ── OpenMax Weibull tails ──
+    # ⚠️ This writes a HALF-POPULATED artifact, deliberately left as-is.
+    # `fit(idx, distances)` is the indexed API: it fills `_weibull[idx]` only.
+    # The runtime consumer (`OpenMaxWeibull.compute_open_set_prob`) reads
+    # `_weibull_by_name`, so the saved pkl leaves open-set rejection inert.
+    # Not repaired here because the channel is unreachable in every profile
+    # (see `SupportSetManager.classify`) AND because the metric below is
+    # *squared* L2 while the consumer queries plain L2 — populating names from
+    # these distances would mis-calibrate rather than fix. The operative reject
+    # channel is the physical envelope gate in `EMSOrchestrator._classify_device`.
+    # Full reasoning: claude_debug/ML_PIPELINE_FIX_2026-08-25.md §2.2 / §5.3.
     openmax = OpenMaxWeibull(num_classes=len(all_data))
     with torch.no_grad():
         for idx, (cls, segs) in enumerate(all_data.items()):

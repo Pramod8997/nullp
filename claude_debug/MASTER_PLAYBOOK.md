@@ -16,7 +16,6 @@
 4. **Zero API Hallucinations:** Never invent class names or method signatures. Consult [`claude_debug/ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md).
 5. **AST Synchronization:** After modifying any code file, execute `graphify update .` (AST-only, zero API cost).
 6. **No Regressions:** Verify with `python -m pytest tests/ -q` (baseline is **511 passing tests**).
-7. **Device Power Regimes & Low-Accounting Loads:** Phones/powerbanks in trickle/standby (3–10W) are tracked via `PhantomTracker`; fast charging / USB-PD (18–120W) cross the 20W transient threshold and trigger active NILM classification. Laptops span 30–200W (ultrabooks to gaming/workstation). Projectors span 30–400W.
 
 ---
 
@@ -50,11 +49,7 @@ python -m pytest tests/test_hil_uart_corruption.py \
                  tests/test_security_penetration.py \
                  tests/test_chaos_engineering.py -v --tb=short
 
-# 6. Run Full System Software Demo
-make demo                                      # Full demo stack with consumer electronics fleet
-python scripts/demo_full_system.py --demo      # Direct launcher
-
-# 7. Keep Graph Synchronized
+# 6. Keep Graph Synchronized
 graphify update .
 ```
 
@@ -125,8 +120,7 @@ graph TD
 * 📄 [`claude_debug/PRD.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/PRD.md) — Product Requirements Document
 * 📄 [`claude_debug/TECHNICAL_REVIEW.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/TECHNICAL_REVIEW.md) — Technical Review & FreeRTOS Diagrams
 * 📄 [`claude_debug/ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md) — Complete API Cheatsheet
-* 📄 [`claude_debug/HARDWARE_FINAL_SPEC.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_FINAL_SPEC.md) — 🔒 **AUTHORITATIVE Physical Hardware Spec** (locked BOM, single aggregate node, ~600 W, India 230 V)
-* 📄 [`claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md) — Real-World Hardware Hazards (BOM superseded by the spec)
+* 📄 [`claude_debug/HARDWARE_FINAL_SPEC.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_FINAL_SPEC.md) — 🔒 **AUTHORITATIVE Physical Hardware Spec.** Locked build: single aggregate node, ~600 W consumer electronics, India 230 V. PZEM 10 A direct-connect, SRD 10 A relay, BSS138 + 100 kΩ pull-down, 5 A load fuse. Relay net polarity is **ACTIVE-HIGH** (`RELAY_ACTIVE_LOW = false`).
+* 📄 [`claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md) — Real-World Hardware Hazards & Schematics (BOM superseded by the spec)
 * 📄 [`claude_debug/HARDWARE_READINESS_CHECKLIST.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_READINESS_CHECKLIST.md) — Pre-Procurement Review & Bring-Up Gate (order tables superseded by the spec)
 * 📄 [`claude_debug/REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/REAL_WORLD_TESTING_PLAN.md) — 8 Physical Bench Tests & Protocols
-* 📄 [`claude_debug/debug_status.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/debug_status.md) — Regression & Verification Status Report

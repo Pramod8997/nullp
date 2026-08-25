@@ -16,7 +16,7 @@ class ESP32FirmwareNode:
         self,
         device_id: str,
         rated_watts: float = 200.0,
-        relay_active_low: bool = True,
+        relay_active_low: bool = False,   # tracks RELAY_ACTIVE_LOW at main.cpp:85
         mqtt_publish_fn: Optional[Callable[[str, str], Coroutine]] = None,
     ) -> None: ...
 
@@ -28,7 +28,9 @@ class ESP32FirmwareNode:
     # Attributes (Safe to access):
     device_id: str
     rated_watts: float
-    gpio18_relay_state: bool       # True = ON, False = OFF
+    gpio18_relay_state: bool       # Logical relay state: True = ON, False = OFF
+    gpio18_level: bool             # Read-only property: electrical pin level
+                                   # (True = HIGH). Inverted when relay_active_low.
     relay_locked: bool             # True when in 300s cooldown
     lock_start_time: float         # time.time() of trip
     safety_lockout_seconds: float  # Default: 300.0
@@ -240,18 +242,45 @@ class HeuristicApplianceClassifier:
         max_confidence: float = 0.75,
         centroids: Optional[Dict[str, Sequence[float]]] = None,
         feature_scales: Optional[Sequence[float]] = None,
+        allowed_classes: Optional[Sequence[str]] = None,   # e.g. config `appliances:`
+        reject_radius: float = 6.0,                        # CENTROID_REJECT_RADIUS
     ) -> None: ...
 
     def classify(self, window: Sequence[float]) -> HeuristicResult: ...
     def extract_features(self, window: Sequence[float]) -> Dict[str, float]: ...
     def feature_vector(self, f: Dict[str, float]) -> np.ndarray: ...
+    def classify_batch(self, windows: Sequence[Sequence[float]]) -> List[HeuristicResult]: ...
 
     # Attributes:
-    rules: List[ApplianceRule]
-    on_threshold_w: float
+    rules: List[ApplianceRule]     # filtered by allowed_classes at construction
+    on_threshold_w: float          # samples below this do not count as "on"
     max_confidence: float          # Capped at 0.75 (never reaches 0.90 RL gate)
     centroids: Dict[str, np.ndarray]
     feature_scales: np.ndarray
+    allowed_classes: Optional[set]
+    reject_radius: float
+    _extra_centroids: set          # centroids with no band rule; exempt from the gate
+
+# ── Module-level, `src/pipeline/heuristic_fallback.py` ──
+UNKNOWN = "unknown"                # the reject sentinel; imported by run_pipeline
+ON_THRESHOLD_W = 20.0
+MAX_HEURISTIC_CONFIDENCE = 0.75
+CENTROID_REJECT_RADIUS = 6.0       # scaled-feature units; beyond it -> UNKNOWN
+ENVELOPE_SLACK = 0.15              # ±6% mains, P ∝ V², so ~±12% power
+DEFAULT_RULES: List[ApplianceRule]
+CLASS_CENTROIDS: Dict[str, Tuple[float, ...]]
+FEATURE_NAMES  = ("log_steady", "log_peak", "duty", "log_overshoot", "volatility")
+FEATURE_SCALES = (0.2063, 0.2233, 1.0000, 0.0272, 0.0474)
+
+def plausible_classes(
+    features: Dict[str, float],                     # from extract_features()
+    rules: Optional[Sequence[ApplianceRule]] = None,
+    slack: float = ENVELOPE_SLACK,
+) -> set: ...
+# The model-free physical gate. Returns the classes whose measured power
+# envelope can contain this window; EMPTY means no known class can draw this
+# power, so the caller must report UNKNOWN and request a label. `steady_w` is
+# the discriminator; `peak` is tested one-sided.
 
 @dataclass
 class HeuristicResult:
@@ -263,6 +292,13 @@ class HeuristicResult:
     runner_up: Optional[str] = None
 ```
 
+⚠️ **`classify()` returns `UNKNOWN` for a sub-`on_threshold_w` window.** A 10 W
+load yields `steady_w == 0.0`, and `feature_vector` then substitutes
+`log10(1e-6) = -6` — a fabricated coordinate seven decades below the real power.
+Assigning a class from it is meaningless, so the window is rejected. To measure a
+sub-20 W load, construct with `on_threshold_w=3.0`. Per CLAUDE.md §1.7, 3–10 W
+trickle/standby is `PhantomTracker`'s domain, not this classifier's.
+
 ❌ **DO NOT USE:**
 * `clf.predict()` $\rightarrow$ Use `clf.classify(window)`
 * `clf.infer()` $\rightarrow$ Use `clf.classify(window)`
@@ -270,6 +306,60 @@ class HeuristicResult:
 ---
 
 ## 3. Models & Calibration (`src/models/`)
+
+### `PrototypeRegistry` (`src/models/protonet.py`)
+Few-shot class registry. **This is what `_classify_device` reads** — the live
+inference path and the operator-label write path are the same object, which is
+what makes the LABEL_REQUEST loop work.
+
+```python
+class PrototypeRegistry:
+    ENVELOPE_KEY = "__power_envelopes__"      # reserved key inside the saved file
+
+    def __init__(self, encoder: nn.Module, device: str = "cpu") -> None: ...
+
+    def add_class(self, class_name: str, support_segments: np.ndarray) -> None: ...
+    # support_segments: (K, 128) raw POWER windows in WATTS, K >= 1.
+    # Merges with an existing class (running mean) and WIDENS its envelope, so
+    # re-labelling the same device extends the band rather than replacing it.
+    def classify(self, segment: np.ndarray) -> Tuple[Optional[str], float, Dict[str, float]]: ...
+    # (best_name, best_squared_distance, {name: squared_distance}).
+    # Returns (None, inf, {}) when nothing is enrolled.
+    def power_envelope(self, class_name: str) -> Optional[Tuple[float, float]]: ...
+    # Observed steady-watt band, or None if unconstrained. `None` is also the
+    # test for "shipped class, not operator-enrolled" in _classify_device.
+    def class_names(self) -> List[str]: ...
+    def save(self, path: str) -> None: ...
+    def load(self, path: str) -> None: ...   # backward-compatible: envelope key popped
+
+    @staticmethod
+    def _steady_watts(support_segments: np.ndarray,
+                      on_threshold_w: float = 20.0) -> Optional[Tuple[float, float]]: ...
+    # Median of samples above threshold, per segment — the SAME definition
+    # heuristic_fallback.extract_features uses, so the two envelope sources are
+    # directly comparable. None for a sub-20 W load: no bogus band is invented.
+
+    # Attributes:
+    prototypes: Dict[str, Tuple[torch.Tensor, int]]   # name -> (embedding, n_support)
+    envelopes: Dict[str, Tuple[float, float]]         # name -> (lo_w, hi_w)
+```
+
+🔴 **The embedding is power-scale-blind — do not threshold on distance to detect
+novelty.** Measured on the shipped demo artefact: a 500 W washing machine lands
+`d2 = 1.02` from the **5 W** `router` prototype, and an 800 W heater sits `1.38`
+from its nearest class while genuine in-distribution windows reach `8.15`. Novel
+distances fall *inside* the known range, so neither a plain threshold nor the
+OpenMax Weibull tail can separate known from novel. Absolute watts are the only
+reliable novelty signal, which is why rejection is done by `plausible_classes` /
+`_eligible_classes` on measured power. Pinned by
+`tests/test_ml_pipeline_recognition.py::TestOpenSetRejection`.
+
+⚠️ `SupportSetManager` (same module) is a **separate, legacy** registry populated
+only from `protonet.anchors_path` — set in `config/config.yaml` alone. Its
+`.raw_windows` is `{}` on the demo and hardware profiles. `_classify_device` only
+falls back to it when `raw_windows` is non-empty.
+
+---
 
 ### `TemperatureScaler` (`src/models/calibration.py`)
 Post-hoc temperature scaling calibration for deep learning logits.
@@ -307,6 +397,29 @@ class EMSOrchestrator:
     async def process_raw_mqtt(self, topic: str, payload: Union[str, bytes, bytearray, dict, float, int]) -> PipelineResult: ...
     async def process(self, event: Any) -> PipelineResult: ...
 
+    # ── Recognition path (rewritten 2026-08-25, defects M-5…M-8) ──
+    def _classify_device(
+        self, device_id: str, power_watts: float,
+        filtered_segment: np.ndarray = None,
+    ) -> Tuple[str, float, Dict[str, float]]: ...
+    # Returns (class_name, confidence, distances). `class_name` is one of:
+    #   a registered class name -> recognised, confident enough to act on
+    #   "unknown"               -> UNRECOGNISED; drives the LABEL_REQUEST flow
+    #   "pending"               -> not enough samples buffered yet
+    #   "error"                 -> inference raised
+    # Reads `prototype_registry`, NOT `support_manager`: the latter is populated
+    # only from `protonet.anchors_path` (config/config.yaml alone), so on the
+    # demo/hardware profiles it returned ("unknown", 0.0, {}) for every event.
+
+    def _eligible_classes(self, window_np: np.ndarray, names: List[str], registry) -> set: ...
+    # Envelope source in order: registry (enrolled) -> DEFAULT_RULES ->
+    # unconstrained. The gate may only veto where it has knowledge.
+    def _registry_heuristic(self, names: List[str]) -> HeuristicApplianceClassifier: ...
+    # Confirmation channel B, scoped to the registry's class set, cached per set.
+    def _classify_heuristic(self, window_np: np.ndarray) -> Tuple[str, float, dict]: ...
+    # Degraded mode only (no encoder / empty registry); gated by
+    # heuristic_min_confidence, else UNRECOGNISED.
+
     # Attributes:
     config: Dict
     safety: SafetyMonitor
@@ -314,14 +427,51 @@ class EMSOrchestrator:
     phantom_tracker: PhantomTracker
     watchdog: SoftAnomalyWatchdog
     analytics: AnalyticsEngine
-    heuristic_clf: HeuristicApplianceClassifier
+    heuristic_clf: HeuristicApplianceClassifier   # scoped by config `appliances:`
     encoder: Optional[ProtoNet]
     prototype_registry: Optional[PrototypeRegistry]
     weibull: OpenMaxWeibull
     calibrated_scaler: Optional[CalibratedTemperatureScaler]
     nilm_detectors: Dict[str, NILMTransientDetector]
     agent: TabularQLearningAgent
+    recognition_threshold: float                  # 0.45; NOT confidence_threshold
+    heuristic_min_confidence: float               # 0.55
+    _unknown_windows: Dict[str, deque]            # raw watt traces for enrollment
+    _registry_clf_cache: Dict[tuple, HeuristicApplianceClassifier]
+
+# ── Module-level, `scripts/run_pipeline.py` ──
+UNRECOGNISED = UNKNOWN = "unknown"          # imported from heuristic_fallback
+UNRECOGNISED_DISPLAY = "Unrecognised device"  # human-facing label only
+FullPipeline = EMSOrchestrator                # alias
 ```
+
+⚠️ **`recognition_threshold` (0.45) is not `confidence_threshold` (0.90).** The
+latter gates a single softmax; the former gates the noisy-OR of two independent
+channels that have already agreed on the class. They are different quantities and
+must not share a number. Both are now explicit in all three config profiles.
+
+⚠️ **`"unknown"` is the wire/internal sentinel and must stay that literal** —
+`src/api/main.py`, the dashboard's `DeviceCards.jsx` and 54 test assertions key on
+it. `UNRECOGNISED_DISPLAY` is what a human reads.
+
+### `LABEL_REQUEST` event contract
+
+```python
+{
+  "type": "LABEL_REQUEST", "device_id": str, "power": float, "confidence": float,
+  "segments": List[List[float]],   # raw 128-sample POWER windows, in WATTS
+  "embedding": List[float],        # display/clustering ONLY — never enroll this
+  "suggested_label": str, "message": str,
+}
+```
+
+🔴 **`segments` is what enrollment consumes; `embedding` is not.** Both are
+length-128 float arrays, so the shape check alone could not tell them apart — the
+dashboard submitted the embedding and `add_class()` ran the CNN over it as though
+it were a power trace, silently building a prototype from nonsense (defect M-8).
+Watts are non-negative and a real appliance event clears 20 W; embeddings are
+zero-centred and fail both. Now refused at **both** layers —
+`LabelSubmission.validate_segments` (HTTP) and `handle_label_submitted` (in-process).
 
 ### CLI Execution Modes:
 * **Standard Profile (3500W ceiling):** `python scripts/run_pipeline.py`

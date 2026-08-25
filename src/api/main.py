@@ -2,6 +2,7 @@ import json
 import asyncio
 import logging
 import logging.handlers
+import math
 import time
 import os
 import io
@@ -135,7 +136,12 @@ class LabelRequestEvent(BaseModel):
     device_id: str = ""
     power: float = 0
     confidence: float = 0
+    # Raw 128-sample power windows in watts. This is what enrollment consumes;
+    # without it the dashboard has nothing valid to submit and falls back to
+    # sending the embedding, which enrolls a meaningless prototype.
+    segments: List[List[float]] = []
     embedding: List[float] = []
+    suggested_label: str = ""
     message: str = ""
 
 
@@ -288,8 +294,16 @@ async def mqtt_listener_task():
                                     "device_id": evt.device_id,
                                     "power": evt.power,
                                     "confidence": evt.confidence,
+                                    # The raw power windows enrollment needs. A
+                                    # dashboard that reloads and reads this from
+                                    # /api/pending-labels must be able to submit
+                                    # a label without the original WebSocket
+                                    # frame, so the watts have to be kept here.
+                                    "segments": evt.segments,
                                     # Bug 3.2 fix: Preserve the 128D embedding
+                                    # (display/clustering only — NOT enrollment)
                                     "embedding": evt.embedding,
+                                    "suggested_label": evt.suggested_label,
                                     "message": evt.message,
                                     "timestamp": time.time(),
                                 }
@@ -585,7 +599,13 @@ class LabelSubmission(BaseModel):
     device_id: str = Field(..., max_length=64)
     label: str = Field(..., max_length=64)
     segments: List[List[float]] = Field(
-        default=[], description="128D embeddings for ProtoNet"
+        default=[],
+        description=(
+            "Raw 128-sample power windows in watts, taken from the "
+            "LABEL_REQUEST event's `segments` field. NOT embeddings — the "
+            "orchestrator runs the CNN over these, so an embedding here "
+            "enrolls a meaningless prototype."
+        ),
     )
 
     @field_validator("segments")
@@ -597,6 +617,22 @@ class LabelSubmission(BaseModel):
             if len(seg) != 128:
                 raise ValueError(
                     f"Segment {i} must have exactly 128 dimensions, got {len(seg)}"
+                )
+            # Power, not an embedding. Both are length-128 float lists, so the
+            # length check alone let the dashboard submit embeddings for months.
+            # Watts are non-negative and an appliance event clears the 20 W
+            # on-threshold; embeddings are zero-centred and fail both.
+            if not all(math.isfinite(x) for x in seg):
+                raise ValueError(f"Segment {i} contains NaN/Inf")
+            if min(seg) < -1e-3:
+                raise ValueError(
+                    f"Segment {i} has negative values ({min(seg):.3f} W): expected "
+                    "raw power in watts, not an embedding"
+                )
+            if max(seg) < 20.0:
+                raise ValueError(
+                    f"Segment {i} never exceeds 20 W (max {max(seg):.3f}): expected "
+                    "a real appliance power window, not an embedding"
                 )
         return v
 

@@ -49,6 +49,27 @@ MAX_HEURISTIC_CONFIDENCE = 0.75
 ON_THRESHOLD_W = 20.0
 UNKNOWN = "unknown"
 
+# Nearest-centroid distance beyond which the window is called UNKNOWN rather
+# than assigned to the closest class.
+#
+# Without this the centroid path was a pure argmin: it returned the nearest
+# class at ANY distance, so a load no class describes still came back with a
+# label and a non-trivial confidence. Measured before the gate: a 65 W laptop
+# window classified as `hvac` (band 200-3000 W) and a 55 W monitor as `laptop`.
+#
+# Units are scaled-feature sigmas (the distance is divided by FEATURE_SCALES),
+# so 6.0 means "six robust within-class deviations from every known centroid".
+# Chosen from the real UK-DALE/REDD window distances: in-distribution windows
+# sit below ~3, so 6.0 rejects genuine novelty without discarding real matches.
+CENTROID_REJECT_RADIUS = 6.0
+
+# Fractional slack applied to a rule's power envelope by `plausible_classes`.
+# Envelopes in DEFAULT_RULES are already widened for tolerance; this is only to
+# keep a window that sits exactly on a boundary from being excluded by float
+# noise or by Indian mains voltage swing (P scales as V^2, so +-6% mains is
+# ~+-12% power).
+ENVELOPE_SLACK = 0.15
+
 
 @dataclass
 class HeuristicResult:
@@ -126,16 +147,40 @@ FEATURE_SCALES: Tuple[float, ...] = (0.2063, 0.2233, 1.0000, 0.0272, 0.0474)
 # than overwriting the dict. Restrict what a given deployment may emit with
 # `allowed_classes=`, not by deleting centroids.
 CLASS_CENTROIDS: Dict[str, Tuple[float, ...]] = {
+    'desktop_computer': (1.8633, 1.9777, 0.7500, 0.1098, 0.1392),
     'dishwasher': (2.2810, 2.3802, 0.7500, 0.0132, 0.0265),
     'fridge': (2.0934, 2.1732, 0.7500, 0.0367, 0.0441),
     'hvac': (2.0043, 2.0374, 0.7500, 0.0445, 0.0426),
     'kettle': (3.4600, 3.4658, 0.7500, 0.0058, 0.0083),
     'laptop': (1.9823, 2.0645, 0.7500, 0.0289, 0.0504),
     'microwave': (3.1858, 3.1976, 0.6328, 0.0056, 0.3695),
+    'monitor': (1.7709, 1.7853, 0.7500, 0.0071, 0.0570),
     'oven': (2.9899, 3.1532, 0.7500, 0.0104, 0.0179),
+    'projector': (2.3181, 2.4249, 0.7500, 0.0643, 0.3530),
     'tv': (1.9685, 1.9868, 0.7500, 0.0382, 0.1267),
     'washing_machine': (2.8228, 2.9668, 0.7500, 0.0612, 0.1696),
 }
+
+# 🔴 Why `phone_charger` and `router` have no centroid, deliberately.
+#
+# `fit_heuristic_centroids.py --cache-tag _demo` does fit them, but from the
+# only real windows that exist for those classes: UK-DALE b1/m27,32,34 (charger)
+# and b1/m18 + b2/m18 (router). Both are sub-10 W loads — the fitted centroids
+# come out at log_steady 0.699 (5.0 W) and 0.778 (6.0 W).
+#
+# `extract_features` only counts samples above `on_threshold_w` (20 W default).
+# A 5 W window therefore yields `on.size == 0` -> `steady_w = 0.0`, and
+# `classify()` returns UNKNOWN before the centroid path is ever consulted. The
+# centroids would be permanently unreachable, so storing them would only make
+# the coverage look better than it is.
+#
+# This is the documented division of labour, not an oversight: CLAUDE.md §1.7
+# routes 3-10 W trickle/standby loads to `PhantomTracker`, and only 18-120 W
+# fast-charge / USB-PD loads cross `TRANSIENT_THRESHOLD_W` into NILM. There is
+# no real USB-PD-era charger data in UK-DALE (2013 vintage) at all — the highest
+# `phone_charger` window in the cache peaks at 33 W and the median is 5 W. A
+# modern 45-120 W charger has to be enrolled from the user's own hardware
+# through the LABEL_REQUEST loop; no fitted constant can stand in for it.
 
 
 # Envelopes derived from the measured UK-DALE / REDD windows extracted by
@@ -188,6 +233,65 @@ DEFAULT_RULES: List[ApplianceRule] = [
 ]
 
 
+# ── Physical plausibility gate ───────────────────────────────────────────────
+
+def plausible_classes(features: Dict[str, float],
+                      rules: Optional[Sequence[ApplianceRule]] = None,
+                      slack: float = ENVELOPE_SLACK) -> set:
+    """
+    Return the classes whose measured power envelope can contain this window.
+
+    Why this exists as a separate, model-free gate
+    ----------------------------------------------
+    The learned embedding is **power-scale-blind**. Measured on the shipped
+    `backend/models/weights_demo` artefacts, squared prototype distances for
+    genuinely novel loads land inside the known-class range rather than outside
+    it, so neither the OpenMax Weibull tail nor a plain distance threshold can
+    separate known from novel:
+
+        known windows (real UK-DALE)  median d2 = 0.27, p99 = 5.10
+        kettle    2000 W  -> `tv`               d2 = 5.89
+        oven      2500 W  -> `tv`               d2 = 10.39
+        washing    500 W  -> `router`           d2 = 1.02   (router is a 5 W load)
+        heater     800 W  -> `phone_charger`    d2 = 1.35
+
+    A 500 W load landing 1.02 from a 5 W router's prototype is not a threshold
+    that needs tuning — the distance carries no scale information to threshold.
+    Absolute watts, however, are measured directly by the PZEM and are the one
+    thing about a load that cannot be confused. So the reject decision is made
+    here, on physics, and the network is only ever allowed to choose *among*
+    classes that the wattage already permits.
+
+    Args:
+        features: output of `HeuristicApplianceClassifier.extract_features`.
+        rules:    envelopes to test. Defaults to DEFAULT_RULES.
+        slack:    fractional widening of each band (see ENVELOPE_SLACK).
+
+    Returns:
+        Set of class names. Empty means no known class can draw this power —
+        the caller should report UNKNOWN and request a label.
+    """
+    src = list(rules) if rules is not None else DEFAULT_RULES
+    steady = float(features.get("steady_w", 0.0) or 0.0)
+    peak = float(features.get("peak_w", 0.0) or 0.0)
+    if steady <= 0.0 and peak <= 0.0:
+        return set()
+
+    out = set()
+    for r in src:
+        s_lo, s_hi = r.steady_w[0] * (1.0 - slack), r.steady_w[1] * (1.0 + slack)
+        p_lo, p_hi = r.peak_w[0] * (1.0 - slack), r.peak_w[1] * (1.0 + slack)
+        # steady_w is the discriminator; peak only has to not contradict it.
+        # A window captured mid-transient can peak well above the rule's band
+        # without the class being wrong, so peak is tested one-sided (a load
+        # cannot peak *below* its own floor).
+        if s_lo <= steady <= s_hi and peak >= p_lo * 0.5:
+            out.add(r.name)
+        elif steady <= 0.0 and p_lo <= peak <= p_hi:
+            out.add(r.name)
+    return out
+
+
 class HeuristicApplianceClassifier:
     """
     Deterministic power-signature classifier used when ProtoNet is unavailable.
@@ -201,7 +305,8 @@ class HeuristicApplianceClassifier:
                  max_confidence: float = MAX_HEURISTIC_CONFIDENCE,
                  centroids: Optional[Dict[str, Sequence[float]]] = None,
                  feature_scales: Optional[Sequence[float]] = None,
-                 allowed_classes: Optional[Sequence[str]] = None):
+                 allowed_classes: Optional[Sequence[str]] = None,
+                 reject_radius: float = CENTROID_REJECT_RADIUS):
         """
         Args:
             allowed_classes: Restrict output to this class set, e.g. the
@@ -214,8 +319,12 @@ class HeuristicApplianceClassifier:
                 runner-up and the confidence margin are both computed over the
                 surviving classes, so a suppressed class cannot silently damp
                 the confidence of the one that is actually plugged in.
+            reject_radius: Scaled-feature distance beyond which the nearest
+                centroid is not trusted and the window is reported UNKNOWN
+                rather than assigned. See CENTROID_REJECT_RADIUS.
         """
         self.allowed_classes = set(allowed_classes) if allowed_classes else None
+        self.reject_radius = float(reject_radius)
 
         rule_src = list(rules) if rules else list(DEFAULT_RULES)
         if self.allowed_classes is not None:
@@ -243,6 +352,13 @@ class HeuristicApplianceClassifier:
             # path answer with a class the profile forbids, so drop to the band
             # rules (already filtered) instead.
             self.centroids = kept_c
+
+        # Centroids for classes that have no band rule. The physical gate is
+        # built from the rule set, so it has nothing to say about these — they
+        # must bypass it rather than be vetoed by it. Empty for the default
+        # centroid set, non-empty only when a caller supplies its own.
+        self._extra_centroids = {k for k in self.centroids
+                                 if k not in {r.name for r in self.rules}}
 
         self.feature_scales = np.asarray(
             feature_scales if feature_scales is not None else FEATURE_SCALES,
@@ -327,32 +443,70 @@ class HeuristicApplianceClassifier:
         if not f or f.get("peak_w", 0.0) <= 0.0:
             return HeuristicResult(UNKNOWN, 0.0, features=f)
 
+        # Physical gate first: only classes whose measured power envelope can
+        # contain this window are eligible. A load outside every envelope is
+        # novel by construction and no amount of feature distance should be
+        # allowed to label it.
+        eligible = plausible_classes(f, self.rules)
+        if not eligible and not self._extra_centroids:
+            return HeuristicResult(UNKNOWN, 0.0, features=f)
+
         # Preferred path: nearest fitted centroid in the robust feature space.
         if self.centroids:
-            return self._classify_by_centroid(f)
+            result = self._classify_by_centroid(f, eligible)
+            if result is not None:
+                return result
+            # No eligible class has a fitted centroid, or the nearest one was
+            # beyond the reject radius — fall through to the band rules, which
+            # cover classes the centroid fit could not reach (see the
+            # phone_charger / router note above CLASS_CENTROIDS).
 
         if f.get("steady_w", 0.0) <= 0.0:
             return HeuristicResult(UNKNOWN, 0.0, features=f)
 
-        return self._classify_by_rules(f)
+        if not eligible:
+            return HeuristicResult(UNKNOWN, 0.0, features=f)
 
-    def _classify_by_centroid(self, f: Dict[str, float]) -> HeuristicResult:
+        return self._classify_by_rules(f, eligible)
+
+    def _classify_by_centroid(self, f: Dict[str, float],
+                              eligible: Optional[set] = None
+                              ) -> Optional[HeuristicResult]:
+        """
+        Nearest-centroid classification restricted to `eligible` classes.
+
+        A centroid whose class has no band rule is exempt from the restriction.
+        `eligible` is derived from the rule set, so it carries no opinion about
+        such a class — vetoing it would be the gate ruling on something it has
+        no knowledge of, and would silently disable any caller-supplied centroid
+        set that does not mirror DEFAULT_RULES.
+
+        Returns None when the caller should fall through to the band rules:
+        either no eligible class has a fitted centroid, or the nearest centroid
+        is further than CENTROID_REJECT_RADIUS.
+        """
         v = self.feature_vector(f)
+        rule_names = {r.name for r in self.rules}
         names, dists = [], []
         for name, c in self.centroids.items():
             if c.shape != v.shape:
+                continue
+            if eligible is not None and name in rule_names and name not in eligible:
                 continue
             d = float(np.linalg.norm((v - c) / self.feature_scales))
             names.append(name)
             dists.append(d)
 
         if not names:
-            return self._classify_by_rules(f)
+            return None
 
         order = np.argsort(dists)
         best, second = order[0], (order[1] if len(order) > 1 else None)
         best_name = names[best]
         runner_up = names[second] if second is not None else None
+
+        if dists[best] > self.reject_radius:
+            return None
 
         # Convert distance to confidence: near the centroid is confident, and a
         # clear margin over the runner-up raises it further.
@@ -366,8 +520,14 @@ class HeuristicApplianceClassifier:
         return HeuristicResult(appliance=best_name, confidence=float(confidence),
                                features=f, runner_up=runner_up)
 
-    def _classify_by_rules(self, f: Dict[str, float]) -> HeuristicResult:
-        scored = sorted(((self._score_rule(r, f), r.name) for r in self.rules),
+    def _classify_by_rules(self, f: Dict[str, float],
+                           eligible: Optional[set] = None) -> HeuristicResult:
+        pool = [r for r in self.rules
+                if eligible is None or r.name in eligible]
+        if not pool:
+            return HeuristicResult(UNKNOWN, 0.0, features=f)
+
+        scored = sorted(((self._score_rule(r, f), r.name) for r in pool),
                         reverse=True)
         best_score, best_name = scored[0]
         runner_up = scored[1][1] if len(scored) > 1 else None

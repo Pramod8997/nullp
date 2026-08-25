@@ -236,6 +236,8 @@ id_rsa*
 .antigravity/
 .cursor/
 .claude/
+claude/
+**/claude/
 .copilot/
 .windsurf/
 .aider*
@@ -253,6 +255,7 @@ graphify-out/
 fix_*.py
 scratch/
 **/scratch/
+new*/
 make_pdf.py
 make_detailed_pdf.py
 e.md
@@ -260,6 +263,8 @@ SESSION_CHECKPOINT.md
 PROJECT_HANDOVER.md
 PRODUCTION_AUDIT_ARCHIVE.md
 nullp_exhaustive_test_prompt.md
+prompt.md
+FAST_FIX_*.md
 Project_Overview.pdf
 *.pdf
 
@@ -280,6 +285,7 @@ Project_Overview.pdf
 !docs/screenshots/*
 !claude_debug/
 !claude_debug/**/*
+claude_debug/claude/
 !claude_context/
 !claude_context/**/*
 !.github/**/*

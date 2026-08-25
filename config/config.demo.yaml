@@ -33,10 +33,32 @@ protonet:
   embedding_size: 128
   distance_threshold: 15.0
   confidence_threshold: 0.90
+  # Bar a *confirmed* classification must clear to be reported as recognised.
+  # Deliberately NOT the same quantity as confidence_threshold above: that one
+  # gates a single softmax, this one gates the noisy-OR of two independent
+  # channels (learned prototype distance + deterministic absolute-watts
+  # classifier) that have already agreed on the class. Sharing a number would
+  # silently couple two different decisions. Set from the threshold sweep on
+  # real UK-DALE windows — see claude_debug/ML_PIPELINE_FIX_2026-08-25.md §2.3.
+  # Below this the load is reported unrecognised, which fires LABEL_REQUEST.
+  recognition_threshold: 0.45
+  # Floor for the deterministic classifier when it is the ONLY channel
+  # available (no encoder, or an empty registry). Below it the answer is
+  # reported unrecognised rather than promoted to the device's final class.
+  heuristic_min_confidence: 0.55
   # Demo-profile weights: consumer-electronics class set trained by
   # scripts/train_demo_models.py. The general 10-class model spans 3 W-3.5 kW
   # and is weakest exactly in this band.
   weights_path: "backend/models/weights_demo/protonet.pt"
+  # Registry enrolled on THIS deployment's four devices, written by
+  # scripts/enroll_demo_devices.py. The shipped prototype_registry.pt is fitted
+  # on UK-DALE, where `laptop` is a 21 W netbook (p50) and `phone_charger` has
+  # zero windows above the 20 W floor — it cannot represent the demo fleet's
+  # 120 W laptop or 45 W USB-PD charger, so nothing was ever recognised.
+  # Enrolment gives each of the four a prototype AND a measured power envelope,
+  # which is the independent absolute-watts channel _classify_device requires.
+  # Kept in its own file so re-running train_demo_models.py cannot clobber it.
+  registry_path: "backend/models/weights_demo/prototype_registry_enrolled.pt"
 
 # Real measured draw of typical bench loads, for reference:
 #   phone charger / powerbank  5-120 W   (3-10W standby/trickle -> PhantomTracker; 18-120W USB-PD -> ProtoNet/NILM)

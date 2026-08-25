@@ -16,7 +16,7 @@ class ESP32FirmwareNode:
         self,
         device_id: str,
         rated_watts: float = 200.0,
-        relay_active_low: bool = True,
+        relay_active_low: bool = False,   # tracks RELAY_ACTIVE_LOW at main.cpp:85
         mqtt_publish_fn: Optional[Callable[[str, str], Coroutine]] = None,
     ) -> None: ...
 
@@ -28,7 +28,9 @@ class ESP32FirmwareNode:
     # Attributes (Safe to access):
     device_id: str
     rated_watts: float
-    gpio18_relay_state: bool       # True = ON, False = OFF
+    gpio18_relay_state: bool       # Logical relay state: True = ON, False = OFF
+    gpio18_level: bool             # Read-only property: electrical pin level
+                                   # (True = HIGH). Inverted when relay_active_low.
     relay_locked: bool             # True when in 300s cooldown
     lock_start_time: float         # time.time() of trip
     safety_lockout_seconds: float  # Default: 300.0

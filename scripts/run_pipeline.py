@@ -106,7 +106,21 @@ from src.pipeline.temporal_validator import TemporalValidator
 from src.pipeline.analytics import AnalyticsEngine
 from src.pipeline.failure_matrix import FailureMatrix
 from src.pipeline.classifier import ModeClassifier
-from src.pipeline.heuristic_fallback import HeuristicApplianceClassifier
+from src.pipeline.heuristic_fallback import (
+    HeuristicApplianceClassifier,
+    plausible_classes,
+    DEFAULT_RULES,
+    ENVELOPE_SLACK,
+    UNKNOWN as UNRECOGNISED,
+)
+
+# Wire/internal sentinel for "no known class fits this load". Kept as the string
+# "unknown" deliberately: src/api/main.py, the dashboard's DeviceCards.jsx and 54
+# test assertions all key on that literal, and renaming it would break the
+# contract for no functional gain. UNRECOGNISED_DISPLAY is what a human should
+# read — the operator is being told the system cannot name the device, not that
+# the device is malfunctioning.
+UNRECOGNISED_DISPLAY = "Unrecognised device"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -195,7 +209,28 @@ class EMSOrchestrator:
         self._load_ml_models(proto_cfg)
 
         # ── Heuristic Fallback (zero-torch, deterministic) ──
-        self.heuristic_clf = HeuristicApplianceClassifier()
+        # `appliances:` scopes the classifier to what this deployment can
+        # actually present, so a class no socket on the rig can drive is never
+        # the answer. Previously the full rule set was always used, so the
+        # hardware profile (laptop + phone charger only) could report `hvac`.
+        self.heuristic_min_confidence = proto_cfg.get("heuristic_min_confidence", 0.55)
+        self.heuristic_clf = HeuristicApplianceClassifier(
+            allowed_classes=self.config.get("appliances") or None
+        )
+        self._registry_clf_cache: Dict[tuple, HeuristicApplianceClassifier] = {}
+
+        # Raw power windows behind each device's recent unrecognised events.
+        # Enrollment needs watts; the DeltaStabilityAnalyzer only keeps
+        # embeddings, so the traces have to be retained separately.
+        self._unknown_windows: Dict[str, deque] = {}
+
+        # Bar a *confirmed* classification must clear to be reported as
+        # recognised. Deliberately separate from `confidence_threshold` (0.90),
+        # which gates a single softmax: this value gates the noisy-OR of two
+        # independent channels that have already agreed, so it is not the same
+        # quantity and must not borrow the same number. Set from measurement on
+        # real UK-DALE windows — see claude_debug/DEBUG_SESSION_2026-08-25.md.
+        self.recognition_threshold = proto_cfg.get("recognition_threshold", 0.45)
 
         # ── Delta Stability Analyzer ──
         ds_cfg = self.config.get("delta_stability", {})
@@ -259,6 +294,33 @@ class EMSOrchestrator:
         self.cnn_active_ticks: Dict[str, int] = {}
 
 
+    def _resolve_registry_path(self) -> str:
+        """
+        The one place the prototype-registry file path is decided.
+
+        Both the startup load and `handle_label_submitted`'s save must agree, or
+        an operator label is written to a file the next boot does not read and
+        the label loop silently loses every enrolment. They disagreed as soon as
+        `registry_path` became configurable, which is why this is a method and
+        not two copies of the expression.
+
+        `registry_path` lets a deployment point at a registry enrolled on ITS OWN
+        devices instead of the shipped UK-DALE artifact. That matters: UK-DALE's
+        `laptop` prototype is a 21 W load (p50, measured on
+        `data/real/cache/ukdale_windows_demo.npz`) and its `phone_charger` has
+        zero windows above the 20 W on-threshold, so the shipped artifact cannot
+        represent a modern 45-120 W USB-PD charger or a 120 W laptop at all.
+        Enrol with `scripts/enroll_demo_devices.py`. Defaults to the path
+        `train_demo_models.py` writes, so an enrolled registry lives in its own
+        file and a retrain cannot clobber it.
+        """
+        proto_cfg = self.config.get("protonet", {})
+        weights_path = proto_cfg.get("weights_path", "")
+        weights_dir = os.path.dirname(weights_path) if weights_path else "backend/models/weights"
+        return proto_cfg.get(
+            "registry_path", os.path.join(weights_dir, "prototype_registry.pt")
+        )
+
     def _load_ml_models(self, proto_cfg: dict) -> None:
         """Load CNN encoder, temperature scaler, Weibull, and support registry."""
         weights_path = proto_cfg.get("weights_path", "")
@@ -311,13 +373,44 @@ class EMSOrchestrator:
 
             # Load Prototype Registry (separate try so ProtoNet isn't killed)
             try:
-                registry_path = os.path.join(weights_dir, "prototype_registry.pt")
+                registry_path = self._resolve_registry_path()
                 if os.path.exists(registry_path) and self.encoder is not None:
                     self.prototype_registry = PrototypeRegistry(self.encoder)
                     self.prototype_registry.load(registry_path)
-                    logger.info(f"✅ Prototype Registry loaded ({len(self.prototype_registry.class_names())} classes)")
+                    enrolled = len(self.prototype_registry.envelopes)
+                    logger.info(
+                        f"✅ Prototype Registry loaded "
+                        f"({len(self.prototype_registry.class_names())} classes, "
+                        f"{enrolled} with a power envelope) from {registry_path}"
+                    )
+                    if enrolled == 0:
+                        # Not fatal, but it decides how recognition behaves: with
+                        # no envelopes every class needs the deterministic
+                        # centroid vote to agree, and on out-of-family loads that
+                        # vote is noise-dominated. Say so rather than let the
+                        # dashboard look merely quiet.
+                        logger.warning(
+                            "   ⚠ no class carries a power envelope — recognition "
+                            "rests entirely on the centroid agreement channel. "
+                            "Enrol this deployment's devices with "
+                            "scripts/enroll_demo_devices.py, or label them once "
+                            "through the dashboard."
+                        )
                 else:
                     self.prototype_registry = None
+                    if self.encoder is not None and not os.path.exists(registry_path):
+                        # Silent absence used to leave the pipeline in degraded
+                        # heuristic mode with no indication why nothing is ever
+                        # named. The demo weights directory is gitignored, so a
+                        # fresh checkout hits this the moment `registry_path` is
+                        # configured but the artifact has not been generated.
+                        logger.warning(
+                            f"⚠ Prototype Registry MISSING at {registry_path} — "
+                            f"classification falls back to the deterministic "
+                            f"heuristic only. Generate it with "
+                            f"scripts/train_demo_models.py then "
+                            f"scripts/enroll_demo_devices.py."
+                        )
             except Exception as e:
                 logger.warning(f"Prototype Registry load failed: {e}")
                 self.prototype_registry = None
@@ -447,31 +540,48 @@ class EMSOrchestrator:
                 "message": f"Safety threshold breached — {device_id} relay forced OFF",
             })
 
-    # ─── ProtoNet Classification (with OpenMax + confidence) ──────────
+    # ─── ProtoNet Classification (registry + physical gate + confidence) ──
     def _classify_device(self, device_id: str, power_watts: float,
                          filtered_segment: np.ndarray = None):
         """
         Full classification pipeline:
         1. NILM-filtered segment (or legacy rolling window) → CNN → embedding
-        2. Distance to prototypes → softmax → calibrated confidence
-        3. Weibull OpenMax → unknown detection
-        4. Returns (class_name, confidence, distances) or ("pending", 0, {})
+        2. Squared distance to every registry prototype → temperature-scaled
+           softmax → calibrated confidence
+        3. Physical power-envelope gate + confidence gate → UNRECOGNISED
+        4. Returns (class_name, confidence, distances)
+
+        `class_name` is one of:
+          * a registered class name — recognised, and confident enough to act on
+          * `"unknown"`             — UNRECOGNISED. Either no known class can
+                                      draw this power, or the best match is not
+                                      trustworthy. Drives the LABEL_REQUEST flow
+                                      so the operator can name it; the label is
+                                      then live for the *next* event because
+                                      inference reads the same registry
+                                      `handle_label_submitted` writes to.
+          * `"pending"`             — not enough samples buffered yet
+          * `"error"`               — inference raised
+
+        Why the registry and not `support_manager`
+        ------------------------------------------
+        This method used to call `SupportSetManager.classify()`. That object is
+        only populated from `protonet.anchors_path`, which is set in
+        `config/config.yaml` alone — never in the demo or hardware profiles —
+        so `compute_prototypes()` returned `{}` and the method returned
+        `("unknown", 0.0, {})` for **every event on every profile**. The trained
+        7-class registry sitting in `self.prototype_registry` was loaded, logged
+        at startup, written to by `handle_label_submitted`, and never once read.
+        So nothing was ever classified, and operator labels had no effect on
+        inference at all.
 
         Args:
             filtered_segment: (128,) pre-filtered segment from NILMTransientDetector.
                               If provided, bypasses the legacy rolling window.
         """
-        if self.encoder is None:
-            # Heuristic fallback when ProtoNet is unavailable
-            if filtered_segment is not None:
-                result = self.heuristic_clf.classify(filtered_segment)
-                if result.appliance != "unknown":
-                    return result.appliance, result.confidence, {}
-            return "pending", 0.0, {}
-
         # Use NILM-filtered segment when available (§2.1 fix)
         if filtered_segment is not None:
-            window_np = filtered_segment
+            window_np = np.asarray(filtered_segment, dtype=np.float32)
         else:
             # Legacy fallback: maintain rolling window
             if device_id not in self.power_windows:
@@ -482,16 +592,235 @@ class EMSOrchestrator:
                 return "pending", 0.0, {}
             window_np = np.array(list(window), dtype=np.float32)
 
+        if window_np.size < self.seq_len:
+            window_np = np.pad(window_np, (0, self.seq_len - window_np.size))
+        window_np = window_np[:self.seq_len]
+
+        registry = getattr(self, "prototype_registry", None)
+
+        # ── Degraded mode: no encoder, or nothing enrolled to compare against ──
+        if self.encoder is None or registry is None or not registry.prototypes:
+            if not self.support_manager.raw_windows:
+                return self._classify_heuristic(window_np)
+            # Legacy profile with a populated anchors registry — honour it.
+            try:
+                return self.support_manager.classify(
+                    window_np, self.encoder, self.weibull, self.temp_scaler,
+                    self.confidence_threshold
+                )
+            except Exception as e:
+                logger.error(f"Legacy ProtoNet classification error for {device_id}: {e}")
+                return "error", 0.0, {}
+
         try:
-            class_name, confidence, distances = self.support_manager.classify(
-                window_np, self.encoder, self.weibull, self.temp_scaler,
-                self.confidence_threshold
-            )
-            return class_name, confidence, distances
+            _, _, dist_map = registry.classify(window_np)
+            if not dist_map:
+                return self._classify_heuristic(window_np)
+
+            names = list(dist_map.keys())
+            d2 = np.array([dist_map[n] for n in names], dtype=np.float64)
+            if not np.all(np.isfinite(d2)):
+                logger.warning(f"Non-finite prototype distance for {device_id} — treating as unrecognised")
+                return UNRECOGNISED, 0.0, dist_map
+
+            # Temperature-scaled softmax over negative squared distances.
+            # T comes from the calibrated scaler when one was fitted; the floor
+            # mirrors TemperatureScaler's own T >= 0.05 clamp so a degenerate
+            # artefact cannot produce a one-hot (falsely certain) posterior.
+            temperature = 1.0
+            cal = getattr(self, "calibrated_scaler", None)
+            if cal is not None:
+                try:
+                    temperature = max(float(cal.temperature.item()), 0.05)
+                except Exception:
+                    temperature = 1.0
+            logits = -d2 / temperature
+            logits -= logits.max()
+            probs = np.exp(logits)
+            probs /= probs.sum() + 1e-12
+
+            order = np.argsort(-probs)
+            best = names[order[0]]
+            confidence = float(probs[order[0]])
+
+            # ── Physical plausibility gate ──
+            # The embedding carries no absolute-scale information (a 500 W load
+            # sits d2 = 1.02 from the 5 W router prototype), so the wattage the
+            # PZEM actually measured is the only reliable novelty signal. Veto
+            # any class whose known power envelope cannot contain this window,
+            # then re-normalise over the survivors.
+            eligible = self._eligible_classes(window_np, names, registry)
+            if not eligible:
+                return UNRECOGNISED, 0.0, dist_map
+
+            # ── The operator's own labels outrank the population prior ──
+            # An enrolled class carries the envelope measured on *this* device
+            # and confirmed by a human. A shipped class carries a literature
+            # band shared with three neighbours. When a window sits inside an
+            # enrolled envelope, that is the better evidence, so drop the
+            # shipped classes from the contest rather than letting them split
+            # the softmax with it.
+            #
+            # Without this the label loop silently does nothing: the shipped
+            # `monitor` prototype sits almost on top of a newly enrolled 35 W
+            # monitor in embedding space, the probability halves between them,
+            # and the result falls back under the threshold — so the device the
+            # operator just named still reports as unrecognised. Measured:
+            # enrolled-recall 1/3 -> 3/3.
+            #
+            # Two enrolled classes with overlapping envelopes both survive, and
+            # the embedding then chooses between them, which is correct.
+            enrolled_hits = {n for n in eligible if registry.power_envelope(n) is not None}
+            if enrolled_hits:
+                eligible = enrolled_hits
+
+            # Always renormalise over the survivors, not only when the argmax
+            # was vetoed: a confidence carried over from the full softmax would
+            # still be diluted by classes the physical gate has just ruled out.
+            keep = [i for i, n in enumerate(names) if n in eligible]
+            sub = probs[keep] / (probs[keep].sum() + 1e-12)
+            j = int(np.argmax(sub))
+            best = names[keep[j]]
+            confidence = float(sub[j])
+
+            # ── Two-channel agreement is the recognition test ──
+            # Confidence alone cannot be trusted here, and that is a measured
+            # fact rather than a precaution: on the shipped 7-class artefact a
+            # 65 W laptop is called desktop_computer at p=0.72 and a 100 W
+            # charger is called tv at p=0.86. Raising the gate does not remove
+            # those, it only removes the correct low-confidence answers with
+            # them. So the learned channel must be confirmed by an independent,
+            # non-learned measurement of absolute watts before we name a device.
+            #
+            # Which confirmation applies depends on where the class came from:
+            #
+            #   enrolled class  — the operator labelled it, so we hold the power
+            #                     envelope actually observed on their device.
+            #                     Containment in that envelope IS the
+            #                     independent confirmation, and a tight one.
+            #                     `_eligible_classes` has already enforced it.
+            #   shipped class   — we only have a wide literature band shared
+            #                     with three neighbouring classes, which
+            #                     confirms almost nothing. Demand the stronger
+            #                     test: the deterministic centroid classifier
+            #                     must independently pick the same class.
+            #
+            # Disagreement, or either channel abstaining, yields UNRECOGNISED —
+            # the honest answer, and the one that asks the operator for a label.
+            # Measured on real UK-DALE windows, for the shipped classes:
+            # accuracy among accepted 0.621 -> 0.851, and confidently-wrong on
+            # the phone/laptop/monitor set halved. The price is coverage (~0.37
+            # of windows accepted), paid deliberately: an unanswered window costs
+            # one label, a wrong one corrupts that appliance's energy history.
+            if registry.power_envelope(best) is None:
+                h_result = self._registry_heuristic(names).classify(window_np)
+                if h_result.appliance == UNRECOGNISED or h_result.appliance != best:
+                    return UNRECOGNISED, 0.0, dist_map
+                # Two independent confirmations — combined as a noisy-OR so
+                # agreement can only raise confidence, never lower it below
+                # either channel on its own.
+                confidence = 1.0 - (1.0 - confidence) * (1.0 - float(h_result.confidence))
+
+            if confidence < self.recognition_threshold:
+                # Confirmed but not convincing. Ask rather than commit: this
+                # window is exactly what the LABEL_REQUEST flow exists for.
+                return UNRECOGNISED, confidence, dist_map
+
+            return best, confidence, dist_map
 
         except Exception as e:
             logger.error(f"ProtoNet classification error for {device_id}: {e}")
             return "error", 0.0, {}
+
+    def _registry_heuristic(self, names: List[str]) -> HeuristicApplianceClassifier:
+        """
+        Confirmation channel, scoped to the classes the registry can actually
+        return.
+
+        Without the scoping the two channels could never agree on the general
+        household profile: `self.heuristic_clf` is built from `appliances:`,
+        which need not match the registry's class list, so channel B would
+        propose a class channel A cannot produce and every window would be
+        rejected. Cached per class-set — construction filters the rule list, so
+        rebuilding it per event would allocate on the MQTT ingest path.
+        """
+        key = tuple(sorted(names))
+        cached = self._registry_clf_cache.get(key)
+        if cached is None:
+            cached = HeuristicApplianceClassifier(allowed_classes=list(key))
+            self._registry_clf_cache[key] = cached
+        return cached
+
+    def _eligible_classes(self, window_np: np.ndarray, names: List[str],
+                          registry) -> set:
+        """
+        Classes whose power envelope can contain this window.
+
+        Envelope source, in order of preference:
+          1. the range observed when the class was enrolled (registry), which is
+             the only option for operator-labelled classes — they have no entry
+             in DEFAULT_RULES by definition;
+          2. the measured UK-DALE/REDD band in `heuristic_fallback.DEFAULT_RULES`;
+          3. unconstrained — a class with neither is never vetoed, because the
+             gate may only veto where it actually has knowledge.
+        """
+        feats = self.heuristic_clf.extract_features(window_np)
+        if not feats:
+            return set(names)
+        steady = float(feats.get("steady_w", 0.0) or 0.0)
+        band_ok = plausible_classes(feats)
+        known_bands = {r.name for r in DEFAULT_RULES}
+
+        # `appliances:` in config restricts what this deployment can present.
+        # A registry class outside it (the shipped demo artifact carries all 7
+        # regardless of profile) must not be reported. Operator-enrolled classes
+        # are never in the list, so they are exempt.
+        allowed = self.heuristic_clf.allowed_classes
+        enrolled = set(registry.envelopes) if registry is not None else set()
+
+        out = set()
+        for n in names:
+            if allowed is not None and n not in allowed and n not in enrolled:
+                continue
+            env = registry.power_envelope(n) if registry is not None else None
+            if env is not None:
+                lo, hi = env
+                # Pad for mains drift and PZEM resolution ONLY — the same
+                # physical slack heuristic_fallback uses (±6% mains, P ∝ V², so
+                # ~±12% power), plus 1 W for the meter's own quantisation.
+                #
+                # It must NOT be widened to "cover the range a 5-sample
+                # enrollment might have missed": at 25% an enrolled 45 W charger
+                # spanned 33–57 W and captured a 35 W monitor, and since enrolled
+                # classes take precedence the correct shipped answer was
+                # discarded. Guessing at unobserved range costs more than it buys
+                # — if the device really draws more, that window is reported
+                # unrecognised, the operator labels it again, and add_class()
+                # merges the envelope with what was already recorded.
+                pad = max(ENVELOPE_SLACK * hi, 1.0)
+                if lo - pad <= steady <= hi + pad:
+                    out.add(n)
+            elif n in known_bands:
+                if n in band_ok:
+                    out.add(n)
+            else:
+                out.add(n)
+        return out
+
+    def _classify_heuristic(self, window_np: np.ndarray):
+        """
+        Deterministic fallback when ProtoNet or the registry is unavailable.
+
+        A heuristic guess is only returned when it clears
+        `heuristic_min_confidence`. Below that it is reported as unrecognised:
+        the previous code accepted any heuristic answer whose confidence merely
+        beat ProtoNet's (usually 0.0), so a 0.11-confidence guess became the
+        device's final classification and the operator was never asked.
+        """
+        result = self.heuristic_clf.classify(window_np)
+        if result.appliance != UNRECOGNISED and result.confidence >= self.heuristic_min_confidence:
+            return result.appliance, result.confidence, {}
+        return UNRECOGNISED, result.confidence, {}
 
     # ─── Event Broadcast ──────────────────────────────────────────────
     async def _broadcast_event(self, event: dict) -> None:
@@ -726,15 +1055,33 @@ class EMSOrchestrator:
 
                     # Use new push() API for DFD P4.3 compliance
                     stability, cluster_mean = self.delta_analyzer.push(embedding)
+
+                    # Keep the RAW power windows that produced these embeddings.
+                    # Enrollment needs watts, not embeddings — see below.
+                    buf = self._unknown_windows.setdefault(device_id, deque(maxlen=8))
+                    buf.append(np.asarray(window_np[:128], dtype=np.float32).tolist())
+
                     if stability == 'stable':
-                        logger.info(f"❓ Stable unknown on {device_id} ({power_watts:.1f}W) — requesting label")
+                        logger.info(f"❓ Stable unrecognised load on {device_id} ({power_watts:.1f}W) — requesting label")
                         await self._broadcast_event({
                             "type": "LABEL_REQUEST",
                             "device_id": device_id,
                             "power": round(power_watts, 2),
                             "confidence": round(confidence, 3),
+                            # `segments` is what enrollment consumes: raw 128-sample
+                            # POWER windows in watts. `embedding` is retained for
+                            # display/clustering only.
+                            #
+                            # This used to ship only `embedding`, and the dashboard
+                            # POSTed that straight back as `segments`. add_class()
+                            # then ran the CNN over a 128-D embedding as though it
+                            # were a power trace, so every operator label produced a
+                            # prototype built from nonsense — silently, since the
+                            # shapes happen to match at (128,).
+                            "segments": [list(s) for s in buf],
                             "embedding": cluster_mean.tolist() if cluster_mean is not None else [],
-                            "message": f"Stable unknown signature on {device_id}. Please label this device.",
+                            "suggested_label": UNRECOGNISED_DISPLAY,
+                            "message": f"Unrecognised device on {device_id} at {power_watts:.0f} W. Please label it.",
                         })
 
                         # ── Task 5: Background pseudo-labeling ──
@@ -812,30 +1159,26 @@ class EMSOrchestrator:
                             await self._csv_fallback_write(current_time, device_id, power_watts)
                 # End unknown device flow
                 
-            elif confidence < self.confidence_threshold:
-                # ── LOW CONFIDENCE GATE → HEURISTIC FALLBACK ──
-                heuristic_used = False
-                if filtered_segment is not None:
-                    h_result = self.heuristic_clf.classify(filtered_segment)
-                    if h_result.appliance != "unknown" and h_result.confidence > confidence:
-                        class_name = h_result.appliance
-                        confidence = h_result.confidence
-                        self.device_classifications[device_id] = class_name
-                        self.last_known_confidences[device_id] = confidence
-                        heuristic_used = True
-                        logger.info(f"🔧 Heuristic fallback: {device_id} → {class_name} (conf={confidence:.3f}, degraded=True)")
-                
-                if not heuristic_used:
-                    logger.info(f"⚠️ Low confidence ({confidence:.3f}) for {class_name} on {device_id}. Skipping RL.")
-                    await self._broadcast_event({
-                        "type": "LOW_CONFIDENCE",
-                        "device_id": device_id,
-                        "classified_as": class_name,
-                        "confidence": round(confidence, 3),
-                        "threshold": self.confidence_threshold,
-                        "message": f"Classification uncertain ({confidence:.2f} < {self.confidence_threshold})",
-                    })
-                    # Skip RL — uncertain classification
+            elif confidence < self.recognition_threshold:
+                # ── LOW CONFIDENCE ──
+                # No heuristic re-run here. `_classify_device` already consults
+                # the deterministic classifier as its confirmation channel, so
+                # anything that reaches this branch has *already* been through
+                # it. The previous code re-ran it and overwrote the class
+                # whenever the heuristic's confidence merely beat ProtoNet's —
+                # which, since ProtoNet returned 0.0 for every event, meant a
+                # 0.11-confidence guess became the device's final answer and the
+                # operator was never asked for a label.
+                logger.info(f"⚠️ Low confidence ({confidence:.3f}) for {class_name} on {device_id}. Skipping RL.")
+                await self._broadcast_event({
+                    "type": "LOW_CONFIDENCE",
+                    "device_id": device_id,
+                    "classified_as": class_name,
+                    "confidence": round(confidence, 3),
+                    "threshold": self.recognition_threshold,
+                    "message": f"Classification uncertain ({confidence:.2f} < {self.recognition_threshold})",
+                })
+                # Skip RL — uncertain classification
 
             else:
                 # ══════════════════════════════════════════════════════
@@ -1065,7 +1408,8 @@ class EMSOrchestrator:
 
         Args:
             class_name:    user-provided label string
-            segments_list: list of (128,) float arrays from the WebSocket broadcast
+            segments_list: list of (128,) raw POWER windows, in watts, as carried
+                           by the LABEL_REQUEST event's `segments` field
         """
         try:
             if self.prototype_registry is None:
@@ -1078,13 +1422,32 @@ class EMSOrchestrator:
             if segs.shape[-1] != 128:
                 logger.error(f"Label segments wrong shape: {segs.shape}")
                 return
+            if not np.all(np.isfinite(segs)):
+                logger.error("Label segments contain NaN/Inf — refusing to enroll")
+                return
+
+            # Reject embeddings passed in place of power traces. An embedding is
+            # 128-D too, so the shape check above cannot tell them apart, and the
+            # dashboard used to submit exactly that. A power window is watts:
+            # non-negative, and a real appliance event reaches the 20 W
+            # on-threshold somewhere in the window. Embeddings are roughly
+            # zero-centred, so they fail both tests. Enrolling one produces a
+            # prototype that matches nothing and silently poisons the registry,
+            # so this is worth refusing loudly.
+            if float(segs.min()) < -1e-3 or float(segs.max()) < 20.0:
+                logger.error(
+                    "Label segments do not look like power in watts "
+                    f"(min={segs.min():.3f}, max={segs.max():.3f}) — refusing to "
+                    "enroll '%s'. Expected raw 128-sample power windows, not "
+                    "embeddings.", class_name
+                )
+                return
 
             self.prototype_registry.add_class(class_name, segs)
-            # Use the active weights directory (respects demo config)
-            proto_cfg = self.config.get("protonet", {})
-            weights_path = proto_cfg.get("weights_path", "")
-            weights_dir = os.path.dirname(weights_path) if weights_path else "backend/models/weights"
-            registry_path = os.path.join(weights_dir, "prototype_registry.pt")
+            # Save back to the SAME file the startup load read (respects the
+            # demo/hardware config's `registry_path`), or the enrolment is lost
+            # on the next boot.
+            registry_path = self._resolve_registry_path()
             os.makedirs(os.path.dirname(registry_path), exist_ok=True)
             self.prototype_registry.save(registry_path)
             logger.info(
@@ -1149,7 +1512,19 @@ class EMSOrchestrator:
         logger.info("  🏠 EMS Pipeline Orchestrator ONLINE")
         logger.info("  Safety Layer: ✅ (parallel task)")
         logger.info("  ProtoNet: " + ("✅" if self.encoder else "⚠️ (disabled)"))
-        logger.info("  OpenMax: " + ("✅" if getattr(self.weibull, '_weibull', None) else "⚠️"))
+        # Report the dict the runtime actually READS, not the one training writes.
+        # `train_demo_models.py` fits index-keyed tails into `_weibull`; the only
+        # runtime consumer, `compute_open_set_prob`, reads `_weibull_by_name`,
+        # which the indexed `fit()` never populates. Both shipped artifacts
+        # therefore carry tails and no names, and the old banner logged "✅" off
+        # `_weibull` — advertising an open-set reject channel that returns 0.0
+        # for every window. The physical envelope gate in `_classify_device` is
+        # what actually rejects; see claude_debug/ML_PIPELINE_FIX_2026-08-25.md §2.2.
+        _om_tails = len(getattr(self.weibull, '_weibull', None) or {})
+        _om_named = len(getattr(self.weibull, '_weibull_by_name', None) or {})
+        logger.info(
+            f"  OpenMax: {_om_tails} tail(s), {_om_named} named — "
+            + ("active" if _om_named else "INACTIVE (physical envelope gate is the reject channel)"))
         logger.info(f"  Temp Scaler: T={self.temp_scaler.temperature.item():.4f}")
         logger.info(f"  Confidence Gate: {self.confidence_threshold}")
         logger.info("  Delta Stability: ✅")

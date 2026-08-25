@@ -3,7 +3,7 @@
 > **Smart Energy Monitoring & Edge Safety System (EMS)**  
 > **Target Folder:** `claude_debug/`  
 > **Prepared for:** Claude (Opus 4.5 / 5 / Sonnet) & Senior Engineering Agents  
-> **Current Baseline:** 467/467 Tests Passing (100%) | Real UK-DALE & REDD Data Integrated | Demo Models Trained
+> **Current Baseline:** 511/511 Tests Passing (100%) | Real UK-DALE & REDD Data Integrated | Demo Models Trained
 
 ---
 
@@ -14,7 +14,7 @@ All documents in this folder (`claude_debug/`) provide zero-gap, token-efficient
 | Document | Path | Purpose |
 | :--- | :--- | :--- |
 | **1. Agent Guide** | [`CLAUDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/CLAUDE.md) | Master development playbook, baseline commands, FreeRTOS pinout, and token-economy rules. |
-| **2. Master Prompt** | [`PROMPT.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/PROMPT.md) | Ultra-dense, token-efficient prompt for Claude Opus 5 with exact API contracts and 467-test baseline. |
+| **2. Master Prompt** | [`PROMPT.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/PROMPT.md) | Ultra-dense, token-efficient prompt for Claude Opus 5 with exact API contracts. **Note:** its stated 467-test baseline is historic — the live baseline is 511. |
 | **3. Product Requirements** | [`PRD.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/PRD.md) | Product Requirements Document (Functional & Non-Functional specifications, 10-appliance + demo class sets). |
 | **4. Technical Review** | [`TECHNICAL_REVIEW.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/TECHNICAL_REVIEW.md) | Deep system architecture, FreeRTOS state machines, real-data NILM pipeline, centroid fallback. |
 | **5. API Cheatsheet** | [`ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md) | Exhaustive class/method signatures to prevent token-wasting API hallucinations. |
@@ -22,14 +22,16 @@ All documents in this folder (`claude_debug/`) provide zero-gap, token-efficient
 | **7. Hazard Analysis** | [`HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md) | 6 physical hazard root causes: MOSFET level shifting, RC snubber, brownout, PZEM refresh latency, creepage, inverter dynamics. **BOM superseded by the spec.** |
 | **8. Readiness Checklist** | [`HARDWARE_READINESS_CHECKLIST.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_READINESS_CHECKLIST.md) | Original pre-procurement review and blocking-issue analysis. **All issues resolved; order tables superseded by the spec.** |
 | **9. Real-World Physical Testing** | [`REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/REAL_WORLD_TESTING_PLAN.md) | 8 physical bench tests (Variac brownouts, inductive arcing, thermal rise, THD noise). |
-| **10. Debug Verification Status** | [`debug_status.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/debug_status.md) | 467/467 regression verification, 7/7 physical stress, 10/10 HIL, and modified tracked files review. |
+| **10. Debug Verification Status** | [`debug_status.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/debug_status.md) | 511/511 regression verification, 7/7 physical stress, 10/10 HIL. §0 = fixes from the 2026-08-25 hardware/NILM pass, §0b = the ML recognition pass, §5 = open items. |
+| **11. Debug Session Log (2026-08-25)** | [`DEBUG_SESSION_2026-08-25.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/DEBUG_SESSION_2026-08-25.md) | ML & hardware-integration debug pass: 6 defects (H-1…H-3, M-1/M-3/M-4) with root causes and `file:line` proofs, re-specified stress scenario 4, before/after regression proof, open items, resume instructions. **Read this first when resuming.** |
+| **12. ML Pipeline Fix Log (2026-08-25)** | [`ML_PIPELINE_FIX_2026-08-25.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ML_PIPELINE_FIX_2026-08-25.md) | The recognition rewire: M-5…M-8, the measured evidence base (why confidence and embedding distance both fail, why two-channel agreement works), the working label/enrollment loop, and the OpenMax deadness resolution. |
 
 ---
 
 ## Reference Knowledge Base & Pre-built Graphs
 
 Before asking broad architectural questions, query the pre-indexed AST knowledge graph:
-* **Knowledge Graph Directory:** `graphify-out/` (2,266 nodes, 4,625 edges, 164 communities)
+* **Knowledge Graph Directory:** `graphify-out/` (2,513 nodes, 4,958 edges, 207 communities)
 * **CLI Query Tool:** `graphify query "<question>"`
 * **CLI Path Tool:** `graphify path "<nodeA>" "<nodeB>"`
 * **Architecture Report:** [`graphify-out/GRAPH_REPORT.md`](file:///home/pramodsb/Downloads/mjr/graphify-out/GRAPH_REPORT.md)
@@ -42,17 +44,20 @@ Before asking broad architectural questions, query the pre-indexed AST knowledge
 # Activate Virtual Environment
 source .venv/bin/activate
 
-# Run Entire 467-Test Regression Suite (100% Pass)
+# Run Entire 511-Test Regression Suite (100% Pass)
 python -m pytest tests/ -q
 
-# Run Real-Data & Heuristic Fallback Suite (34 Tests)
+# Run Real-Data & Heuristic Fallback Suite (36 Tests)
 python -m pytest tests/test_real_data_and_ml_fallback.py -v
+
+# Run ML Recognition & Label-Loop Suite (35 Tests)
+python -m pytest tests/test_ml_pipeline_recognition.py -v
 
 # Run Real-World Physical & Electrical Stress Harness
 python scripts/real_world_physical_stress.py
 python scripts/hil_hardware_test.py
 
-# Run Core 5 Production Stress & Chaos Suites (209 Tests)
+# Run Core 5 Production Stress & Chaos Suites (216 Tests)
 python -m pytest tests/test_hil_uart_corruption.py \
                  tests/test_relay_safety_boot_brownout.py \
                  tests/test_ml_nilm_math_stress.py \

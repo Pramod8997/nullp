@@ -54,9 +54,14 @@ class ESP32FirmwareNode:
         self,
         device_id: str,
         rated_watts: float = 200.0,
-        relay_active_low: bool = True,
+        relay_active_low: bool = False,
         mqtt_publish_fn: Optional[Callable[[str, str], Any]] = None,
     ):
+        # relay_active_low mirrors RELAY_ACTIVE_LOW at main.cpp:85, which the
+        # locked HARDWARE_FINAL_SPEC.md pins to false (active-HIGH net at GPIO
+        # 18: HIGH = closed, LOW = open, Hi-Z = open). Defaulting this to True
+        # modelled the inverted polarity of defect B-7 — the one that energised
+        # the load at boot and made every cutoff CLOSE the relay.
         self.device_id = device_id
         self.rated_watts = rated_watts
         self.relay_active_low = relay_active_low
@@ -104,6 +109,20 @@ class ESP32FirmwareNode:
         if not on:
             self.pzem.set_load(0.0)
 
+    @property
+    def gpio18_level(self) -> bool:
+        """Electrical level driven onto GPIO 18 (True = HIGH, False = LOW).
+
+        Mirrors setRelay() at main.cpp:137. `gpio18_relay_state` is the *logical*
+        relay state (True = load energised); this is the pin level that produces
+        it, so a reintroduced polarity inversion (B-7) becomes observable in the
+        twin instead of being invisible as it was while relay_active_low was
+        stored and never read.
+        """
+        if self.relay_active_low:
+            return not self.gpio18_relay_state
+        return self.gpio18_relay_state
+
     # ═════════════════════════════════════════════════════════════════════
     # CORE 0: High-Priority Safety Loop (Runs every 100ms)
     # ═════════════════════════════════════════════════════════════════════
@@ -114,6 +133,20 @@ class ESP32FirmwareNode:
         voltage = self.pzem.voltage
         current = self.pzem.current
         pf = self.pzem.power_factor
+
+        # Reject invalid PZEM reads before they can reach safety state.
+        # Mirrors the isnan() guard at main.cpp:167, which skips the whole
+        # cycle: _last_watts, the baseline ring and the shared block are all
+        # left untouched. Without this the twin latched NaN into _last_watts and
+        # _baseline_ring (permanently forcing is_normal_inrush False) and Core 1
+        # published a bare "nan" on the power topic plus non-standard JSON
+        # ({"w": NaN}) on the telemetry topic, poisoning the NILM stage.
+        if not all(math.isfinite(v) for v in (power_w, voltage, current, pf)):
+            logger.warning(
+                f"[CORE 0] Invalid PZEM read on {self.device_id} "
+                f"(W={power_w}, V={voltage}, I={current}, PF={pf}) -> cycle skipped."
+            )
+            return
 
         # 1. Calculate pre-step sliding baseline average from history
         baseline_avg = sum(self._baseline_ring[:self._baseline_fill]) / max(1, self._baseline_fill) if self._baseline_fill > 0 else 0.0
@@ -134,9 +167,16 @@ class ESP32FirmwareNode:
                     f"dP/dt={roc:.0f} W/s > 1000 W/s -> Relay CUTOFF instantly!"
                 )
 
-        # 3. Overcurrent Cutoff (125% of rated) — allow transient inrush during motor startup
+        # 3. Overcurrent Cutoff (125% of rated) — UNCONDITIONAL.
+        # Inrush suppression deliberately does NOT gate this path, matching
+        # main.cpp:207-217 and HARDWARE_FINAL_SPEC.md D11': suppression exists
+        # only to stop a starting surge reading as an arc fault on the dP/dt
+        # channel. Gating overcurrent on is_normal_inrush made the twin *weaker*
+        # than the firmware — a 140% overload arriving while the baseline was
+        # still cold (e.g. 280W on a 200W line at boot) left the relay closed in
+        # simulation while real hardware opens it on the first sample.
         critical_watts = self.rated_watts * 1.25
-        if power_w > critical_watts and not is_normal_inrush:
+        if power_w > critical_watts:
             self.set_relay(False)
             self.relay_locked = True
             self.lock_start_time = now

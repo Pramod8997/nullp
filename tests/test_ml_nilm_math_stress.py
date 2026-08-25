@@ -102,16 +102,42 @@ def test_nilm_negative_step():
     assert len(transients) >= 0
 
 def test_nilm_nan_in_signal():
+    """A NaN sample must be dropped, never buffered.
+
+    Regression: buffering NaN corrupted savgol_filter across ±sg_window//2
+    samples, and every `np.abs(...) >= threshold` comparison against NaN is
+    False — so a genuine appliance step arriving alongside one corrupted PZEM
+    read was silently and permanently lost, not merely delayed.
+    """
     detector = NILMTransientDetector(threshold=20, embed_window=128)
-    detector.process(float('nan')) if hasattr(detector, 'process') else None
-    # Should not crash
-    assert True
+    for _ in range(20):
+        detector.push(100.0)
+    buffer_before = list(detector._buffer)
+
+    is_transient, segment = detector.push(float('nan'))
+    assert is_transient is False and segment is None
+    assert detector._buffer == buffer_before, "a rejected sample must leave the buffer untouched"
+    assert not any(math.isnan(v) for v in detector._buffer)
+
+    # The step that arrives with the corrupted read must still be detected.
+    is_transient, segment = detector.push(2200.0)
+    assert is_transient is True, "2100W step must not be lost to an adjacent NaN"
+    assert segment is not None and bool(np.all(np.isfinite(segment)))
 
 def test_nilm_inf_in_signal():
-    detector = NILMTransientDetector(threshold=20, embed_window=128)
-    detector.process(float('inf')) if hasattr(detector, 'process') else None
-    # Should not crash
-    assert True
+    """±Inf must be dropped on the same path as NaN (savgol propagates both)."""
+    for bad in (float('inf'), float('-inf')):
+        detector = NILMTransientDetector(threshold=20, embed_window=128)
+        for _ in range(20):
+            detector.push(100.0)
+
+        is_transient, segment = detector.push(bad)
+        assert is_transient is False and segment is None
+        assert all(math.isfinite(v) for v in detector._buffer)
+
+        is_transient, segment = detector.push(2200.0)
+        assert is_transient is True, f"step must survive an adjacent {bad}"
+        assert bool(np.all(np.isfinite(segment)))
 
 def test_nilm_overflow_float32():
     detector = NILMTransientDetector(threshold=20, embed_window=128)
@@ -166,30 +192,109 @@ def test_nilm_buffer_memory_growth():
     assert len(buf) <= 10000 # bounded
 
 # --- Category 2: Overlap Detector Stress ---
+#
+# NOTE: these previously read `overlap = OverlapAwareNILMDetector(); assert True`
+# and verified nothing. The base detector applies a 5s cooldown after every
+# detection, so two detections can never fall inside the default 3.0s
+# overlap_window_s — the subtraction branch is unreachable at defaults. The
+# reachable configurations below use overlap_window_s > 5.0.
+
+def _prime(det, n=15, base=100.0, ts=0.0):
+    for _ in range(n):
+        det.push(base, timestamp=ts)
+        ts += 1.0
+    return ts
+
+def _drive(det, n, ts, low=150.0, high=2350.0):
+    """Alternate large steps and collect every emitted label hint."""
+    hints = set()
+    for i in range(n):
+        for is_t, seg, hint in det.push(low if i % 2 == 0 else high, timestamp=ts):
+            if is_t:
+                hints.add(hint)
+        ts += 1.0
+    return hints
+
+def test_overlap_window_shorter_than_cooldown_is_unreachable():
+    """Documents the reachability constraint: overlap_window_s must exceed the 5s cooldown."""
+    overlap = OverlapAwareNILMDetector()
+    assert overlap.overlap_window_s == 3.0
+    ts = _prime(overlap)
+    overlap.register_baseline("fridge", 150.0)
+    hints = _drive(overlap, 120, ts)
+    assert hints == {"single"}, f"overlap branch must be unreachable at defaults, got {hints}"
 
 def test_overlap_two_simultaneous_appliances():
-    overlap = OverlapAwareNILMDetector()
-    assert True
+    overlap = OverlapAwareNILMDetector(overlap_window_s=8.0)
+    overlap.register_baseline("fridge", 150.0)
+    overlap.register_baseline("kettle", 2200.0)
+    ts = _prime(overlap)
+    hints = _drive(overlap, 120, ts)
+    assert "multi_device" in hints, f"overlap must be flagged, got {hints}"
 
 def test_overlap_three_simultaneous_appliances():
-    overlap = OverlapAwareNILMDetector()
-    assert True
+    overlap = OverlapAwareNILMDetector(overlap_window_s=8.0)
+    for name, w in (("fridge", 150.0), ("kettle", 2200.0), ("monitor", 35.0)):
+        overlap.register_baseline(name, w)
+    ts = _prime(overlap)
+    hints = _drive(overlap, 160, ts)
+    # Every baseline plausibly contained in the segment yields a candidate.
+    assert "multi_device" in hints
+    assert len(hints & {"fridge", "kettle", "monitor"}) >= 2, f"got {hints}"
 
 def test_overlap_subtraction_accuracy():
-    overlap = OverlapAwareNILMDetector()
-    assert True
+    """A per-device candidate must equal the segment minus that device's rating."""
+    overlap = OverlapAwareNILMDetector(overlap_window_s=8.0)
+    overlap.register_baseline("fridge", 150.0)
+    ts = _prime(overlap)
+    combined = None
+    residual = None
+    for i in range(160):
+        for is_t, seg, hint in overlap.push(150.0 if i % 2 == 0 else 2350.0, timestamp=ts):
+            if is_t and hint == "multi_device":
+                combined = seg
+            elif is_t and hint == "fridge":
+                residual = seg
+        ts += 1.0
+        if combined is not None and residual is not None:
+            break
+    assert combined is not None and residual is not None, "subtraction branch never reached"
+    expected = np.maximum(combined - 150.0, 0.0)
+    assert np.allclose(residual, expected, atol=1e-4)
 
 def test_overlap_negative_residual_clamped():
-    overlap = OverlapAwareNILMDetector()
-    assert True
+    """Subtracting a rating above the measured power must clamp to 0, never go negative."""
+    overlap = OverlapAwareNILMDetector(overlap_window_s=8.0)
+    overlap.register_baseline("kettle", 2200.0)
+    ts = _prime(overlap)
+    saw_residual = False
+    for i in range(160):
+        for is_t, seg, hint in overlap.push(150.0 if i % 2 == 0 else 2350.0, timestamp=ts):
+            if is_t and hint == "kettle":
+                saw_residual = True
+                assert float(seg.min()) >= 0.0, "residual must be zero-clamped"
+        ts += 1.0
+    assert saw_residual, "kettle residual never emitted"
 
 def test_overlap_no_baselines_registered():
-    overlap = OverlapAwareNILMDetector()
-    assert True
+    """With no baselines the detector must degrade to single-transient behaviour."""
+    overlap = OverlapAwareNILMDetector(overlap_window_s=8.0)
+    ts = _prime(overlap)
+    hints = _drive(overlap, 120, ts)
+    assert hints == {"single"}, f"no baselines must mean no subtraction, got {hints}"
 
 def test_overlap_rapid_fire_transients():
-    overlap = OverlapAwareNILMDetector()
-    assert True
+    """Rapid alternating steps must stay bounded and never emit a non-finite segment."""
+    overlap = OverlapAwareNILMDetector(overlap_window_s=8.0)
+    overlap.register_baseline("fridge", 150.0)
+    ts = _prime(overlap)
+    for i in range(400):
+        for is_t, seg, hint in overlap.push(50.0 * (i % 40), timestamp=ts):
+            if is_t:
+                assert seg is not None and bool(np.all(np.isfinite(seg)))
+        ts += 1.0
+    assert len(overlap._power_buffer) <= overlap.embed_window * 3
+    assert len(overlap._recent_transients) <= 20
 
 # --- Category 3: Floating-Point Math Hazards ---
 

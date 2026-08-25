@@ -118,7 +118,7 @@ Drive current ≈ (3.3 V − 1.2 V) / 1 kΩ ≈ **2.1 mA**, far inside the ESP32
 
 ### D5 — 🔒 Firmware polarity **unchanged: `RELAY_ACTIVE_LOW = false`** — and this is now the *direct* reading
 
-Net polarity at GPIO 18 is **active-HIGH**, exactly as before, so `firmware/esp32_node/src/main.cpp:67` is already correct and **no firmware edit is required for this build.**
+Net polarity at GPIO 18 is **active-HIGH**, exactly as before, so `firmware/esp32_node/src/main.cpp:85` is already correct and **no firmware edit is required for this build.**
 
 What changed is *why*. Previously it was active-HIGH because two inversions (inverting MOSFET + active-LOW module input) cancelled. Now there are **zero** inversions: a high-trigger input driven directly is active-HIGH on its face. Same constant, and now it means what it says.
 
@@ -126,7 +126,7 @@ The original defect B-7 is still worth reading: `RELAY_ACTIVE_LOW = true` meant 
 
 > ⚠️ **Purchase contingency — the only "it depends" in this BOM.** If the module you receive has no H/L jumper, or refuses to latch at 3.3 V in Stage 2:
 > 1. Set module **VCC = 3.3 V** (not 5 V) and remove the **JD-VCC jumper**, feeding JD-VCC from 5 V — the coil stays on 5 V, the opto input becomes 3.3 V-referenced, and 0 V is then a true OFF.
-> 2. Flip `main.cpp:67` to `RELAY_ACTIVE_LOW = true`.
+> 2. Flip `main.cpp:85` to `RELAY_ACTIVE_LOW = true`.
 > 3. Move the 100 kΩ pull-**down** to a 100 kΩ pull-**up** (IN → 3.3 V), so Hi-Z at boot still means OPEN.
 >
 > **Re-run Stage 2 and confirm OPEN-at-boot before any mains touches the contacts.** One constant, one resistor move — nothing you purchased becomes wrong.
@@ -335,7 +335,7 @@ Prices are **indicative Indian retail (Aug 2026)** from Robu / Robocraze / Quart
 | **B-4** | PZEM TX may be 5 V push-pull; ESP32 absolute max is 3.6 V | ⚠️ **Open by design — bench test required.** Power the PZEM from 5 V with TX unconnected, measure TX-to-GND idle. ≈3.3 V or floating → connect direct (10 kΩ pull-up to 3.3 V if floating). ≈5 V → 1 kΩ/2 kΩ divider on PZEM-TX → GPIO 16. **Two 1 kΩ/2 kΩ resistors cost ₹6 — buy them with the 100 kΩ so you are not blocked mid-bring-up** |
 | **B-5** | `firmware/esp32_node/src/README_PHASE2.md` documented an **entirely different sensor chain** — SCT-013-030 CT on GPIO 34 (ADC) + 33 Ω burden + relay on GPIO 5 (a strapping pin) + USB supply | ✅ **Resolved** — corrected in this change set |
 | **B-6** | `config/config.demo.yaml` declared **5 nodes as `simulated: false`** while the build is one node | ✅ **Resolved** — the 5 are `simulated: true` (the `make demo` software fleet) |
-| **B-7** | `RELAY_ACTIVE_LOW = true` inverted the relay: boot energised the load, and safety cutoffs closed it | ✅ **Resolved** — `main.cpp:67` is `false`, and under D3′ that is now the *direct* reading with zero inversions in the chain |
+| **B-7** | `RELAY_ACTIVE_LOW = true` inverted the relay: boot energised the load, and safety cutoffs closed it | ✅ **Resolved** — `main.cpp:85` is `false`, and under D3′ that is now the *direct* reading with zero inversions in the chain |
 | **B-8** | 🆕 **3.3 V cannot turn OFF a 5 V low-trigger opto relay module.** IN at 3.3 V leaves ~0.5 mA in the opto LED — the relay may fail to release or chatter. This is the defect the deleted BSS138 was masking | ✅ **Resolved** — D3′ high-trigger direct drive. ⚠️ **Confirm at purchase and at Stage 2**; fallback documented in D5 |
 | **B-9** | 🆕 **The 600 W ceiling made the safety cutoff unreachable on the real rig.** `config/config.demo.yaml` put CRITICAL at 750 W (3.26 A) while one port carrying a laptop + phone draws 150–320 W — the relay could never trip, so the headline safety feature was undemonstrable in hardware | ✅ **Resolved** — new `config/config.hardware.yaml` at **250 W → 312 W trip**. `config.demo.yaml` stays at 600 W because its ~1130 W *simulated* fleet needs it; the two files must not be merged |
 | **B-10** | 🆕 **Zero-solder claim was false against the old BOM** — BSS138 is SOT-23 SMD and HLK-5M05 is a solder-pin module with exposed AC pads, neither buildable by a first-time builder (S4) | ✅ **Resolved** — D3′ and D6′ |
@@ -380,7 +380,7 @@ Prices are **indicative Indian retail (Aug 2026)** from Robu / Robocraze / Quart
 * ☐ Multi-plug adapter is **earthed** and its PE is continuous to the socket (D12′)
 
 **Firmware & config**
-* ☐ `RELAY_ACTIVE_LOW == false` at `main.cpp:67` — **unchanged; do not edit** unless the D5 fallback was taken
+* ☐ `RELAY_ACTIVE_LOW == false` at `main.cpp:85` — **unchanged; do not edit** unless the D5 fallback was taken
 * ☐ `RELAY_PIN == 18`, `PZEM_RX_PIN == 16`, `PZEM_TX_PIN == 17` at `main.cpp:59-69` — unchanged, the shield only breaks pins out
 * ☐ `DEVICE_ID` = `node_bench_agg`, `RATED_WATTS` = **250**, WiFi and MQTT broker set
 * ☐ Pipeline launched with **`--config config/config.hardware.yaml`** (250 W ceiling) — **not** `config.demo.yaml` (600 W, simulated fleet) and not the 3500 W default (B-9)

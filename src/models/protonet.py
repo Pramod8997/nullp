@@ -395,7 +395,34 @@ class OpenMaxWeibull:
     def compute_open_set_prob(self, embedding: np.ndarray,
                               class_names: List[str],
                               distances: List[float]) -> float:
-        """Legacy API: returns scalar open-set probability."""
+        """Legacy API: returns scalar open-set probability.
+
+        ⚠️ Returns 0.0 when no tails are fitted BY NAME. That value means
+        "cannot judge", but the only caller — `SupportSetManager.classify` —
+        tests `open_set > (1 - confidence_threshold)`, which reads it as
+        "definitely known". The path therefore fails OPEN, not closed.
+
+        Both shipped artifacts have an empty `_weibull_by_name`:
+        `scripts/train_demo_models.py` fits via the *indexed* `fit(idx, d2)`
+        API, which only writes `_weibull[idx]`. So this method is inert in
+        every deployment profile today. It is also unreachable — see the
+        reachability note on `SupportSetManager.classify`.
+
+        Anyone wiring this up must fix TWO things, not one:
+          1. populate `_weibull_by_name` at training time (needs the class
+             name AND its prototype, neither of which the indexed fit keeps);
+          2. match the metric. This method scores `np.linalg.norm(e - proto)`
+             — plain L2 — while `train_demo_models.py:178` fits its tails on
+             *squared* L2. Populating the names from those same distances
+             would calibrate the tail on a different metric than the query
+             and silently mis-score every window.
+        Before doing either, read claude_debug/ML_PIPELINE_FIX_2026-08-25.md
+        §2.2: embedding distance is power-scale-blind here (a 500 W washing
+        machine lands 1.02 from the 5 W router prototype), so a Weibull tail
+        over these distances cannot separate novel from known regardless of
+        how correctly it is fitted. The physical power-envelope gate is the
+        operative reject channel.
+        """
         if not hasattr(self, '_weibull_by_name') or not self._weibull_by_name:
             return 0.0
 
@@ -515,13 +542,52 @@ class PrototypeRegistry:
     Stores per-class prototype vectors.
     Supports incremental addition of new classes from as few as 5 samples
     without retraining the CNN encoder — the encoder is frozen.
+
+    Alongside each prototype it records the class's observed **power envelope**
+    (steady-watt range across the enrolled support segments). The embedding is
+    power-scale-blind — measured on the shipped demo weights, a 500 W load lands
+    d2 = 1.02 from the 5 W `router` prototype — so distance alone cannot tell a
+    novel load from an enrolled one. The envelope restores that discrimination
+    for user-enrolled classes, which by definition have no entry in
+    `heuristic_fallback.DEFAULT_RULES` to fall back on.
     """
+
+    # Reserved key in the saved artefact holding {class: (steady_lo, steady_hi)}.
+    # Registries written before envelopes existed simply lack the key and load
+    # with `envelopes = {}`, falling back to the DEFAULT_RULES bands.
+    ENVELOPE_KEY = "__power_envelopes__"
 
     def __init__(self, encoder: ProtoNet, device: str = 'cpu'):
         self.encoder    = encoder
         self.device     = device
         self.prototypes: Dict[str, Tuple[torch.Tensor, int]] = {}
+        self.envelopes: Dict[str, Tuple[float, float]] = {}
         self.encoder.eval()
+
+    @staticmethod
+    def _steady_watts(support_segments: np.ndarray,
+                      on_threshold_w: float = 20.0) -> Optional[Tuple[float, float]]:
+        """
+        Observed steady-state watt range over the enrolled segments.
+
+        Steady power per segment is the median of samples above
+        `on_threshold_w` — the same definition
+        `heuristic_fallback.extract_features` uses, so the two envelope sources
+        are directly comparable. Segments that never come on contribute nothing.
+        Returns None when no segment has an on-portion (e.g. a sub-20 W trickle
+        load), in which case no envelope is recorded and the class is left
+        unconstrained rather than given a bogus band.
+        """
+        arr = np.atleast_2d(np.asarray(support_segments, dtype=np.float64))
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        steadies = []
+        for seg in arr:
+            on = seg[seg > on_threshold_w]
+            if on.size:
+                steadies.append(float(np.median(on)))
+        if not steadies:
+            return None
+        return float(min(steadies)), float(max(steadies))
 
     @torch.no_grad()
     def add_class(self, class_name: str, support_segments: np.ndarray):
@@ -541,6 +607,18 @@ class PrototypeRegistry:
             self.prototypes[class_name] = (new_proto, new_n)
         else:
             self.prototypes[class_name] = (proto, len(support_segments))
+
+        env = self._steady_watts(support_segments)
+        if env is not None:
+            lo, hi = env
+            if class_name in self.envelopes:
+                old_lo, old_hi = self.envelopes[class_name]
+                lo, hi = min(lo, old_lo), max(hi, old_hi)
+            self.envelopes[class_name] = (lo, hi)
+
+    def power_envelope(self, class_name: str) -> Optional[Tuple[float, float]]:
+        """Observed steady-watt band for a class, or None if unconstrained."""
+        return self.envelopes.get(class_name)
 
     @torch.no_grad()
     def classify(self, segment: np.ndarray):
@@ -569,10 +647,15 @@ class PrototypeRegistry:
 
     def save(self, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save({k: (v[0].cpu(), v[1]) for k, v in self.prototypes.items()}, path)
+        payload = {k: (v[0].cpu(), v[1]) for k, v in self.prototypes.items()}
+        if self.envelopes:
+            payload[self.ENVELOPE_KEY] = dict(self.envelopes)
+        torch.save(payload, path)
 
     def load(self, path: str):
         data = torch.load(path, map_location=self.device)
+        data = dict(data)
+        self.envelopes = dict(data.pop(self.ENVELOPE_KEY, None) or {})
         self.prototypes = {k: (v[0].to(self.device), v[1]) for k, v in data.items()}
 
 
@@ -631,6 +714,19 @@ class SupportSetManager:
                  weibull: OpenMaxWeibull, scaler,
                  confidence_threshold: float,
                  device: torch.device = torch.device('cpu')) -> Tuple[str, float, Dict[str, float]]:
+        """Legacy anchor-based classification. NOT REACHABLE in any shipped profile.
+
+        `scripts/run_pipeline.py` only calls this when `self.raw_windows` is
+        non-empty, and `raw_windows` is only filled by `load_registry(anchors_path)`.
+        `anchors_path` is named in `config/config.yaml` alone, and the file it
+        points at (`backend/models/weights/protonet_anchors.pt`) does not exist
+        in the repo — so the guard never opens on any of the three profiles.
+        Live classification goes through `EMSOrchestrator._classify_device`,
+        which reads `PrototypeRegistry` instead (defect M-5).
+
+        If an anchors artifact is ever shipped, note that the `open_set` gate
+        below is inert and fails OPEN — see `compute_open_set_prob`.
+        """
         encoder.eval()
         scaler.eval()
         x = torch.tensor(window, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)

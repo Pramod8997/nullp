@@ -1,112 +1,135 @@
-# CLAUDE.md: Master Playbook & Technical Guidelines
+# CLAUDE.md — FAST FIX MODE
 
-> **Project:** Digital Twin Smart Energy Monitoring & Disaggregation System (EMS)  
-> **Target Folder:** `claude_debug/`  
-> **Role:** Principal Embedded Systems QA Architect, Lead ML Test Engineer & Senior Backend Engineer  
-> **Target Models:** Claude 3.5 Sonnet / Claude 3.7 Sonnet / Claude Opus 4.5 & 5  
-> **Current Health:** 467/467 Tests Passing (100%) | Real UK-DALE & REDD Data Integrated | Physical Stress Verified
+## Mission
+You are the implementation engineer for an existing EMS project. **Finish the working system fast and correctly.**
+Optimize for: **correctness > simplicity > speed > completeness of architecture**.
+Do not build a "better" system. Repair the existing one.
 
----
+## HARD SCOPE LOCK
+The required appliance recognition demo scope is ONLY:
+1. phone
+2. laptop
+3. projector
+4. monitor
 
-## 1. Token Economy & Development Rules (STRICT)
+Do NOT expand appliance classes, redesign the NILM architecture, add new agents, add speculative ML models, or build generalized frameworks unless a currently failing test or existing production contract strictly requires it.
 
-1. **Zero Fluff & Concise Output:** Output only direct code diffs, command executions, and 1–2 sentence operational summaries. Do NOT write conversational filler, restate prompt requirements, or provide unrequested lengthy explanations.
-2. **Do Not Overcomplicate:** Fix root causes cleanly and directly in place. Never introduce speculative abstractions, wrapper classes, or unnecessary architectural refactors that trigger secondary cascading bugs.
-3. **Graph-First Architecture Navigation:** NEVER dump or recursively traverse the directory tree. Use the pre-built knowledge graph at `graphify-out/` via `graphify query "<topic>"` or `graphify path "<A>" "<B>"` to retrieve scoped subgraphs in $<500$ tokens.
-4. **Zero API Hallucinations:** Never invent class names or method signatures. Consult [`claude_debug/ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md).
-5. **AST Synchronization:** After modifying any code file, execute `graphify update .` (AST-only, zero API cost).
-6. **No Regressions:** Verify with `python -m pytest tests/ -q` (baseline is **467 passing tests**).
+## Non-negotiable behavior
+- Inspect actual code before editing.
+- Reproduce/locate the failure before changing it.
+- Identify ONE root-cause hypothesis.
+- Make the smallest viable fix.
+- Prefer existing code paths, APIs, models, fixtures, and tests.
+- Never rewrite working subsystems merely because another design looks cleaner.
+- Never create abstractions for one use.
+- Never refactor unrelated code while fixing a bug.
+- Never repeat the same failed fix. If a fix fails, explicitly change the hypothesis.
+- Never claim hardware was physically validated unless it was physically run.
+- Never weaken firmware safety behavior to make tests green.
 
----
+## TOKEN / SPEED MODE
+Default behavior is **fast triage**:
+1. Read the master index and the smallest relevant evidence.
+2. Search exact symbols/files.
+3. Run one narrow reproducer.
+4. Patch.
+5. Run the smallest relevant regression.
+6. Expand verification only if needed.
 
-## 2. Essential CLI Commands
+Do NOT:
+- dump the repository;
+- read every documentation file;
+- regenerate the graph unnecessarily;
+- run the full 500+ test suite after every edit;
+- explain obvious code;
+- produce long plans before touching the first proven defect;
+- investigate unrelated "nice to have" issues.
 
+### Context priority
+Use this order:
+1. live source code + current test output
+2. current failure/reproducer
+3. `claude_debug/DEBUG_SESSION_2026-08-25.md`
+4. `claude_debug/ML_PIPELINE_FIX_2026-08-25.md`
+5. `claude_debug/HARDWARE_FINAL_SPEC.md`
+6. `claude_debug/ARCHITECTURE_AND_APIS.md`
+7. `claude_debug/MASTER_PLAYBOOK.md` (previous root playbook: architecture map, CLI commands, API quick reference, open item M-2)
+8. other context docs
+
+Historical docs are evidence, not truth.
+
+## Anti-loop protocol
+Maintain a tiny internal state:
+- FAILURE
+- ROOT CAUSE
+- FIX
+- TEST
+- RESULT
+
+If the same failure appears twice:
+- stop repeating commands;
+- compare the two attempts;
+- inspect the actual runtime path;
+- form a different hypothesis;
+- test the hypothesis before editing again.
+
+If 2 fixes fail for the same symptom, stop broad coding and perform a minimal data-flow trace from input -> transform -> classifier/output.
+
+## ML FIX STRATEGY
+For phone/laptop/projector/monitor recognition:
+- Prefer the existing working recognition path and existing demo weights/data.
+- Do not replace ProtoNet/OpenMax/heuristics unless the current code proves that component is the root cause.
+- First verify: input units -> preprocessing -> feature vector -> model input -> label mapping -> confidence/gate -> output.
+- Check class-name/index mismatches before retraining.
+- Check tensor shape/dtype/device before changing model architecture.
+- Check model/weight loading paths before training anything.
+- Use existing real-data/demo fixtures before collecting or generating new data.
+- If ML confidence is broken, verify the fallback/label-loop behavior already present before inventing a new confidence scheme.
+- The goal is reliable recognition of the FOUR required classes, not a research-grade generalized NILM platform.
+
+## HARDWARE INTEGRATION STRATEGY
+Required recognition/integration target: phone, laptop, projector, monitor.
+Keep the locked hardware safety contract:
+- relay safety behavior remains authoritative;
+- finite PZEM values only;
+- overcurrent protection remains unconditional as specified;
+- active-high/low semantics must match the locked firmware spec;
+- do not "fix" safety by changing protection thresholds or bypassing cutoffs.
+For hardware bugs, distinguish:
+- simulator/twin bug
+- firmware bug
+- MQTT/backend integration bug
+- physical validation gap
+
+Never turn a physical-validation gap into a code change.
+
+## VERIFICATION
+Use targeted tests first. Typical sequence:
 ```bash
-# Activate environment
-source .venv/bin/activate
-
-# 1. Query Codebase Knowledge Graph (Fast, token-efficient)
-graphify query "<question>"
-graphify path "<nodeA>" "<nodeB>"
-
-# 2. Run All 467 Regression Tests
+python -m pytest <one relevant test> -q
+python -m pytest <relevant suite> -q
+```
+Run full regression only at a milestone or before declaring completion:
+```bash
 python -m pytest tests/ -q
-
-# 3. Run Real Data Provenance & Fallback Suite (34 tests)
-python -m pytest tests/test_real_data_and_ml_fallback.py -v
-
-# 4. Run Real-World Physical Stress & HIL Harness
-python scripts/real_world_physical_stress.py
-python scripts/hil_hardware_test.py
-
-# 5. Run Core 5 Stress & Chaos Suites (209 tests)
-python -m pytest tests/test_hil_uart_corruption.py \
-                 tests/test_relay_safety_boot_brownout.py \
-                 tests/test_ml_nilm_math_stress.py \
-                 tests/test_security_penetration.py \
-                 tests/test_chaos_engineering.py -v --tb=short
-
-# 6. Keep Graph Synchronized
-graphify update .
 ```
+Also use the existing HIL/stress scripts when relevant.
 
----
+A test that only asserts that code executes is not meaningful verification. Strengthen it to assert the actual invariant/output when necessary.
 
-## 3. High-Level Architecture & Component Map
+## EDITING RULE
+Smallest patch wins.
+If a 5-line fix solves the root cause, do not write a 100-line subsystem.
 
-```mermaid
-graph TD
-    subgraph Edge [ESP32 Firmware Node (Dual-Core FreeRTOS)]
-        PZEM["PZEM-004T v3.0 (UART Modbus RTU)"] -->|GPIO 16 RX / 17 TX| Core0["Core 0: SafetySamplingTask (100ms)"]
-        Core0 -->|Overcurrent > 125% or dP/dt > 1000W/s| Relay["Active-LOW Relay (GPIO 18)"]
-        Core0 -->|portMUX_TYPE sharedMux spinlock| Core1["Core 1: Arduino Loop + MQTT Task"]
-    end
+## COMPLETION GATE
+Do not say "fixed" unless:
+- the failure is reproduced or directly grounded;
+- the root cause is identified;
+- the minimal fix is applied;
+- a regression check passes;
+- the relevant integration path passes.
 
-    subgraph Transport [MQTT Message Bus]
-        Core1 -->|home/sensor/{id}/power (1Hz plain float)| Mosquitto["Mosquitto MQTT Broker (Port 1883)"]
-        Core1 -->|home/sensor/{id}/telemetry (JSON)| Mosquitto
-        Mosquitto -->|home/plug/{id}/command (ON/OFF/WARNING)| Core1
-    end
-
-    subgraph Backend_Pipeline [Server-Side Pipeline]
-        Mosquitto --> Safety["FleetDiagnosticsMonitor (Agg > 3500W / Demo 600W)"]
-        Mosquitto --> NILM["NILMTransientDetector (Savitzky-Golay + diff)"]
-        NILM --> Overlap["OverlapAwareNILMDetector (Power Subtraction)"]
-        Overlap --> ProtoNet["ProtoNet Embedding Network (General / Demo Weights)"]
-        ProtoNet --> Fallback["HeuristicApplianceClassifier (Centroid Fallback)"]
-        ProtoNet --> Calib["TemperatureScaler (T >= 0.05) + confidence_gate(0.90)"]
-        Calib --> Watchdog["SoftAnomalyWatchdog (Rolling Z-Score)"]
-        Calib --> RL["RL Load Shedding Agent (PPO / DQN)"]
-        RL -->|home/plug/{id}/command| Mosquitto
-    end
-```
-
----
-
-## 4. Anti-Hallucination API Quick Reference
-
-| Class | Correct Methods & Attributes | Forbidden Hallucinations (DO NOT USE) |
-| :--- | :--- | :--- |
-| **`ESP32FirmwareNode`** | `set_relay(bool)`, `core0_safety_step(sim_dt)`, `handle_mqtt_command(str)`, `core1_telemetry_tick()`, `.gpio18_relay_state`, `.relay_locked`, `.lock_start_time`, `.pzem`, `.shared_power_watts` | ❌ `.relay_state`, ❌ `.sensor`, ❌ `.wifi_connected`, ❌ `.relay_pin`, ❌ `.process_reading()` |
-| **`VirtualPZEM004T`** | `set_load(target_watts, pf)`, `.voltage`, `.current`, `.active_power`, `.power_factor`, `.energy_kwh` | ❌ `.parse_modbus_frame()`, ❌ `.read_power()`, ❌ `.set_voltage()` |
-| **`AsyncMQTTClient`** | `subscribe(topic)`, `publish(topic, payload)`, `disconnect()`, `reconnect()`, `is_connected()`, `get_published()`, `.published_messages`, `._connected` | ❌ `.send()`, ❌ `.connected`, ❌ `.connect()` |
-| **`MockMQTTBroker`** | `register(client)`, `unregister(client)`, `await disconnect_all()`, `await restart()` | ❌ Sync `disconnect_all()` (must `await`), ❌ `.kill()` |
-| **`FleetDiagnosticsMonitor`** | `check_aggregate(power_map)`, `check_roc(device, prev, curr, dt)`, `check_device(device, power)`, `_log_event_sync()`, `_log_event_async()` | ❌ `.update_reading()`, ❌ `.log_event()`, ❌ `.trigger_safety_event()`, ❌ `.is_heartbeat_lost()` |
-| **`NILMTransientDetector`** | `push(power_w) -> (bool, np.ndarray)`, `reset()`, `._buffer`, `._cooldown` | ❌ `.detect()`, ❌ `.add_sample()`, ❌ `.process()` |
-| **`HeuristicApplianceClassifier`** | `classify(window_128) -> HeuristicResult`, `extract_features(window)`, `feature_vector(f)` | ❌ `.predict()`, ❌ `.infer()` |
-| **`SoftAnomalyWatchdog`** | `update(device_id, reading) -> (bool, float)`, `.window_size`, `.threshold` | ❌ `.check()`, ❌ `.is_anomaly()`, ❌ `.add_reading()` |
-| **`TemperatureScaler`** | `forward(logits) -> Tensor`, `calibrate(logits, labels)`, `temperature_scale(logits, T)`, `confidence_gate(prob, threshold=0.90)` | ❌ `.predict()`, ❌ `.scale()` |
-
----
-
-## 5. Master Documentation Index (`claude_debug/`)
-
-* 📄 [`claude_debug/INDEX.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/INDEX.md) — Master Navigation Index
-* 📄 [`claude_debug/PROMPT.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/PROMPT.md) — Ultra-Dense Master Prompt for Claude Opus 5
-* 📄 [`claude_debug/PRD.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/PRD.md) — Product Requirements Document
-* 📄 [`claude_debug/TECHNICAL_REVIEW.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/TECHNICAL_REVIEW.md) — Technical Review & FreeRTOS Diagrams
-* 📄 [`claude_debug/ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md) — Complete API Cheatsheet
-* 📄 [`claude_debug/HARDWARE_FINAL_SPEC.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_FINAL_SPEC.md) — 🔒 **AUTHORITATIVE Physical Hardware Spec.** Locked build: single aggregate node, ~600 W consumer electronics, India 230 V. PZEM 10 A direct-connect, SRD 10 A relay, BSS138 + 100 kΩ pull-down, 5 A load fuse. Relay net polarity is **ACTIVE-HIGH** (`RELAY_ACTIVE_LOW = false`).
-* 📄 [`claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md) — Real-World Hardware Hazards & Schematics (BOM superseded by the spec)
-* 📄 [`claude_debug/HARDWARE_READINESS_CHECKLIST.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_READINESS_CHECKLIST.md) — Pre-Procurement Review & Bring-Up Gate (order tables superseded by the spec)
-* 📄 [`claude_debug/REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/REAL_WORLD_TESTING_PLAN.md) — 8 Physical Bench Tests & Protocols
+At the end, report only:
+1. Fixed
+2. Verified
+3. Remaining blocker (if any)

@@ -80,6 +80,12 @@ protonet:
   embedding_size: 128
   distance_threshold: 15.0
   confidence_threshold: 0.70  # Lowered from 0.90 for real-world PZEM noisy data; NEVER_SHED is independent
+  # Separate quantity from confidence_threshold — see config.demo.yaml. This
+  # gates the noisy-OR of the learned channel and the deterministic
+  # absolute-watts channel after they have already agreed on the class; below it
+  # the load is reported unrecognised and LABEL_REQUEST fires.
+  recognition_threshold: 0.45
+  heuristic_min_confidence: 0.55
   openmax_tail_size: 20
   openmax_alpha: 3
 

@@ -101,7 +101,22 @@ class NILMTransientDetector:
         Returns (is_transient: bool, segment_array | None).
         segment_array is shape (embed_window,), zero-padded if near buffer edge.
         """
-        self._buffer.append(float(power_w))
+        val = float(power_w)
+
+        # Reject non-finite samples instead of buffering them. A single NaN/Inf
+        # (a corrupted PZEM read or a bare "nan" MQTT payload) propagates through
+        # savgol_filter across ±sg_window//2 samples, and every
+        # `np.abs(...) >= threshold` comparison against NaN evaluates False — so a
+        # genuine appliance step landing in that neighbourhood was silently never
+        # detected, and the event was lost for good rather than merely delayed.
+        if not np.isfinite(val):
+            logger.warning(
+                f"NILMTransientDetector: dropped non-finite sample ({power_w!r}); "
+                "buffer left unchanged."
+            )
+            return False, None
+
+        self._buffer.append(val)
         # Trim to 3× embed_window for efficiency
         if len(self._buffer) > self.embed_window * 3:
             self._buffer = self._buffer[-(self.embed_window * 3):]
@@ -291,11 +306,13 @@ class OverlapAwareNILMDetector:
             # Only attempt subtraction if the power level is plausibly
             # high enough to contain this device
             if segment is not None and float(segment.max()) > rated_w * 0.5:
-                residual = segment - rated_w
-                # Only emit if the residual still has a meaningful transient
+                # Zero-clamp before the guard below. Subtracting a constant
+                # leaves np.diff untouched (diff(x - c) == diff(x)), so testing
+                # the pre-clamp residual was a tautology that filtered nothing
+                # and emitted a candidate for every registered baseline.
+                residual = np.maximum(segment - rated_w, 0.0).astype(np.float32)
+                # Only emit if the clamped residual still has a meaningful transient
                 if np.any(np.abs(np.diff(residual)) >= self.threshold / self.sample_rate_hz):
-                    # Zero-clamp negative residuals (can't have negative power)
-                    residual = np.maximum(residual, 0.0).astype(np.float32)
                     results.append((True, residual, device_name))
 
         return results

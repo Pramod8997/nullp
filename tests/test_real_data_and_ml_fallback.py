@@ -23,6 +23,7 @@ from src.pipeline.heuristic_fallback import (
     ApplianceRule,
     MAX_HEURISTIC_CONFIDENCE,
     UNKNOWN,
+    plausible_classes,
 )
 from data.nilmtk_reader import NILMTKReader, SEQ_LEN, TARGET_HZ, WINDOW_SECONDS
 from data.unified_loader import (
@@ -155,15 +156,55 @@ class TestHeuristicDiscrimination:
         assert clf.classify(_step_window(50)).appliance == 'only_small'
         assert clf.classify(_step_window(3000)).appliance == 'only_big'
 
+    # Two well-separated centroids in feature space; nearest must win.
+    #
+    # `on_threshold_w=3.0` is required, not incidental: the 'tiny' centroid
+    # describes a 10 W load, which is below the default 20 W floor. At the
+    # default floor `extract_features` finds no on-samples, so steady_w == 0 and
+    # `feature_vector` substitutes log10(1e-6) = -6 — a fabricated coordinate
+    # seven decades below the real power. Before the reject radius existed the
+    # centroid path was a pure argmin, so this test passed on that garbage
+    # coordinate: measured d(tiny) = 34.01 vs d(huge) = 47.26. Neither is a
+    # match; 'tiny' merely sorted first because -6 is nearer log10(10) than
+    # log10(3000). Lowering the floor is the API's documented way to measure a
+    # sub-20 W load (see TestLowPowerDemoBand below) and makes the assertion
+    # rest on real separation instead: d(tiny) = 1.24 vs d(huge) = 16.24.
+    CUSTOM_CENTROIDS = {
+        'tiny': (np.log10(10), np.log10(12), 0.75, 0.05, 0.05),
+        'huge': (np.log10(3000), np.log10(3200), 0.75, 0.05, 0.05),
+    }
+
     def test_centroid_path_used_when_fitted(self):
-        # Two well-separated centroids in feature space; nearest must win.
-        centroids = {
-            'tiny': (np.log10(10), np.log10(12), 0.75, 0.05, 0.05),
-            'huge': (np.log10(3000), np.log10(3200), 0.75, 0.05, 0.05),
-        }
-        clf = HeuristicApplianceClassifier(centroids=centroids)
+        clf = HeuristicApplianceClassifier(centroids=self.CUSTOM_CENTROIDS,
+                                           on_threshold_w=3.0)
         assert clf.classify(_step_window(10, peak=12)).appliance == 'tiny'
         assert clf.classify(_step_window(3000, peak=3200)).appliance == 'huge'
+
+    def test_caller_centroids_bypass_the_physical_gate(self):
+        # `plausible_classes` is built from the *rule* set, so it has no opinion
+        # about a caller-supplied centroid whose class has no rule. Vetoing such
+        # a class would be the gate ruling where it has no knowledge, and would
+        # silently disable any centroid set that does not mirror DEFAULT_RULES.
+        clf = HeuristicApplianceClassifier(centroids=self.CUSTOM_CENTROIDS,
+                                           on_threshold_w=3.0)
+        assert clf._extra_centroids == {'tiny', 'huge'}
+        f = clf.extract_features(_step_window(10, peak=12))
+        # No rule-derived class admits a 10 W load with a 12 W peak...
+        assert 'tiny' not in plausible_classes(f, clf.rules)
+        # ...yet the caller's own centroid is still allowed to answer.
+        assert clf.classify(_step_window(10, peak=12)).appliance == 'tiny'
+
+    def test_sub_floor_load_is_unknown_at_the_default_threshold(self):
+        # The mirror of the above: at the default 20 W floor the classifier
+        # cannot measure a 10 W load at all, and must say so rather than assign
+        # it from the log10(1e-6) coordinate. CLAUDE.md §1.7 routes 3-10 W
+        # trickle/standby loads to PhantomTracker, not to this classifier.
+        clf = HeuristicApplianceClassifier(centroids=self.CUSTOM_CENTROIDS)
+        f = clf.extract_features(_step_window(10, peak=12))
+        assert f['steady_w'] == 0.0
+        r = clf.classify(_step_window(10, peak=12))
+        assert r.appliance == UNKNOWN
+        assert r.confidence == 0.0
 
     def test_falls_back_to_rules_without_centroids(self):
         clf = HeuristicApplianceClassifier(centroids={})
