@@ -256,6 +256,8 @@ fix_*.py
 scratch/
 **/scratch/
 new*/
+temp*/
+tmp*/
 make_pdf.py
 make_detailed_pdf.py
 e.md
@@ -295,3 +297,6 @@ claude_debug/claude/
 !test_requirements.json
 !frontend/public/**/*
 !frontend/src/assets/**/*
+
+# ESP32 per-node credentials (copy from secrets.h.example, never commit)
+firmware/esp32_node/include/secrets.h

@@ -218,6 +218,25 @@ _shared_mqtt_client: Optional[aiomqtt.Client] = None
 _shared_db: Optional[aiosqlite.Connection] = None
 
 
+def _mqtt_connect_kwargs() -> dict:
+    """
+    Broker address, port and credentials for every aiomqtt client in this module.
+
+    Both call sites previously hardcoded `port=1883` and passed no credentials,
+    so against a broker with `allow_anonymous false` — which is what this repo's
+    own mosquitto/config/mosquitto.conf sets and docker-compose.yml mounts — the
+    dashboard bridge and the label-publish path both failed to authenticate.
+    docker-compose.yml already exports MQTT_USERNAME/MQTT_PASSWORD; nothing read
+    them. None stays None, so an anonymous dev broker behaves exactly as before.
+    """
+    return {
+        "hostname": os.environ.get("MQTT_BROKER", "localhost"),
+        "port": int(os.environ.get("MQTT_PORT", "1883")),
+        "username": os.environ.get("MQTT_USERNAME") or None,
+        "password": os.environ.get("MQTT_PASSWORD") or None,
+    }
+
+
 # ─── Issue #7: API Key Authentication ───────────────────────────────
 async def verify_api_key(x_api_key: str = Header(None)):
     """Dependency that checks X-API-Key header against EMS_API_KEY env var."""
@@ -238,9 +257,7 @@ async def mqtt_listener_task():
     while True:
         try:
             # Bug 4.5 fix: Use MQTT_BROKER env var instead of hardcoded localhost
-            async with aiomqtt.Client(
-                os.environ.get("MQTT_BROKER", "localhost"), port=1883
-            ) as client:
+            async with aiomqtt.Client(**_mqtt_connect_kwargs()) as client:
                 _shared_mqtt_client = client
                 logger.info("FastAPI MQTT bridge connected.")
                 system_state["pipeline_status"] = "connected"
@@ -666,9 +683,7 @@ async def submit_label(submission: LabelSubmission, _: None = Depends(verify_api
         if _shared_mqtt_client:
             await _shared_mqtt_client.publish("home/ml/label", mqtt_payload)
         else:
-            async with aiomqtt.Client(
-                os.environ.get("MQTT_BROKER", "localhost"), port=1883
-            ) as client:
+            async with aiomqtt.Client(**_mqtt_connect_kwargs()) as client:
                 await client.publish("home/ml/label", mqtt_payload)
     except Exception as e:
         logger.error(f"Failed to publish label to MQTT: {e}")

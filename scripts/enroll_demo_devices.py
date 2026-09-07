@@ -128,6 +128,27 @@ def load_capture(path: str) -> dict:
     PZEM reported them. Only TARGET_CLASSES are read.
     """
     z = np.load(path, allow_pickle=False)
+    # Echo provenance recorded by scripts/capture_bench_windows.py. A file with
+    # no provenance block was not produced by the capture tool, and nothing here
+    # can vouch for where its numbers came from — say so rather than let a
+    # hand-made array be enrolled as if it were measured.
+    if "__provenance__" in z.files:
+        import json as _json
+        for rec in _json.loads(str(z["__provenance__"])):
+            att = rec.get("physical_attestation", "UNATTESTED")
+            print(f"  provenance: {rec.get('class')} — {rec.get('windows')} window(s), "
+                  f"{rec.get('transport', rec.get('source'))} from {rec.get('topic')} "
+                  f"@ {rec.get('broker')}, {rec.get('first_utc')} .. "
+                  f"{rec.get('last_utc')}, {rec.get('measured_rate_hz')} Hz measured")
+            if att == "UNATTESTED":
+                print(f"    🔴 UNATTESTED — the operator did not attest that a real "
+                      f"appliance on a real PZEM produced this. Enrolling it does "
+                      f"NOT constitute physical validation.")
+            else:
+                print(f"    ✅ operator attestation: {att}")
+    else:
+        print(f"  ⚠ {path} carries NO provenance block — it was not produced by "
+              f"scripts/capture_bench_windows.py. Its physical origin is unverified.")
     out = {}
     for cls in TARGET_CLASSES:
         if cls not in z:

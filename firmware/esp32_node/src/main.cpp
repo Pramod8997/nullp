@@ -36,8 +36,18 @@
 #include <freertos/task.h>
 #include <PZEM004Tv30.h>
 
+// Per-node credentials. Copy include/secrets.h.example to include/secrets.h
+// and fill it in; secrets.h is gitignored so a real Wi-Fi or broker password
+// never lands in version control. Kept out of this file deliberately: the
+// placeholders that used to live here ("YOUR_WIFI_SSID", "192.168.1.100") are
+// tracked, so filling them in risks committing credentials.
+#if !__has_include("secrets.h")
+#error "Missing firmware/esp32_node/include/secrets.h - copy secrets.h.example to secrets.h and fill in your Wi-Fi SSID/password, broker IP and broker password."
+#endif
+#include "secrets.h"
+
 // ═══════════════════════════════════════════════════════
-//  CONFIGURATION — CHANGE THESE PER NODE
+//  CONFIGURATION — set these in include/secrets.h
 // ═══════════════════════════════════════════════════════
 // Single aggregate sense point: ONE PZEM measures ONE IS 1293 6 A socket, and a
 // 3-pin earthed multi-plug adapter in that socket puts the laptop brick and the
@@ -45,12 +55,13 @@
 // what NILM disaggregates -- one load at a time would be single-appliance
 // classification, not disaggregation.
 // See claude_debug/HARDWARE_FINAL_SPEC.md (scope S1/S2/S5, decision D12').
-const char* DEVICE_ID      = "node_bench_agg";   // Unique per node
-const char* ssid           = "YOUR_WIFI_SSID";
-const char* password       = "YOUR_WIFI_PASSWORD";
-const char* mqtt_server    = "192.168.1.100";     // EMS Backend IP
-const char* mqtt_user      = "pipeline";          // Broker username (matches mosquitto.conf)
-const char* mqtt_password  = "changeme_pipeline_password"; // Broker password
+const char* DEVICE_ID      = EMS_DEVICE_ID;
+const char* ssid           = EMS_WIFI_SSID;
+const char* password       = EMS_WIFI_PASSWORD;
+const char* mqtt_server    = EMS_MQTT_SERVER;
+const int   mqtt_port      = EMS_MQTT_PORT;
+const char* mqtt_user      = EMS_MQTT_USER;
+const char* mqtt_password  = EMS_MQTT_PASSWORD;
 // 250 W prototype envelope -> CRITICAL_PCT 1.25 trips the relay at 312 W
 // (1.36 A @ 230 V), which stays 3.7x below the 5 A load fuse so the relay always
 // acts first. Coordination ladder: HARDWARE_FINAL_SPEC.md D8.
@@ -334,7 +345,7 @@ void setup() {
     Serial.printf("[INIT] Device ID: %s\n", activeDeviceId);
 
     // Configure MQTT
-    client.setServer(mqtt_server, 1883);
+    client.setServer(mqtt_server, mqtt_port);
     client.setCallback(callback);
     client.setKeepAlive(15);
     

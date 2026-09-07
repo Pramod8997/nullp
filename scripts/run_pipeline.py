@@ -159,10 +159,28 @@ class EMSOrchestrator:
         mqtt_cfg = self.config.get('mqtt', {}) if isinstance(self.config.get('mqtt'), dict) else {}
         mqtt_broker = os.environ.get('MQTT_BROKER', mqtt_cfg.get('broker', 'localhost'))
         mqtt_port = mqtt_cfg.get('port', 1883)
+        # Credentials, env first so a deployment never has to bake them into a
+        # tracked config file. MQTTClientManager has always accepted these; the
+        # constructor call simply never passed them, so against this repo's OWN
+        # broker config (mosquitto/config/mosquitto.conf sets
+        # `allow_anonymous false` + `password_file`, which is what
+        # docker-compose.yml mounts) the pipeline could not authenticate and just
+        # logged "MQTT connection error ... Reconnecting in 5 seconds" forever.
+        # docker-compose.yml already exports MQTT_USERNAME/MQTT_PASSWORD for
+        # exactly this and nothing read them. None stays None, which is what
+        # aiomqtt wants for an anonymous broker, so a local dev broker with no
+        # auth behaves exactly as before.
+        mqtt_username = os.environ.get('MQTT_USERNAME', mqtt_cfg.get('username')) or None
+        mqtt_password = os.environ.get('MQTT_PASSWORD', mqtt_cfg.get('password')) or None
         self.mqtt = MQTTClientManager(
             mqtt_broker,
-            mqtt_port
+            mqtt_port,
+            username=mqtt_username,
+            password=mqtt_password,
         )
+        if mqtt_username:
+            logger.info(f"MQTT auth: user '{mqtt_username}' (password "
+                        f"{'set' if mqtt_password else 'MISSING'})")
 
         # Auto-register with mock broker if active during tests
         try:

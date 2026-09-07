@@ -12,7 +12,7 @@ services:
     restart: always
     # Health check — uses credentials since allow_anonymous=false
     healthcheck:
-      test: ["CMD", "mosquitto_sub", "-u", "pipeline", "-P", "${MQTT_PASSWORD:-changeme_pipeline_password}", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
+      test: ["CMD", "mosquitto_sub", "-u", "ems_pipeline", "-P", "${MQTT_PASSWORD:-changeme_pipeline_password}", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -22,7 +22,7 @@ services:
     command: python scripts/run_pipeline.py
     environment:
       - MQTT_BROKER=mosquitto
-      - MQTT_USERNAME=${MQTT_USERNAME:-pipeline}
+      - MQTT_USERNAME=${MQTT_USERNAME:-ems_pipeline}
       - MQTT_PASSWORD=${MQTT_PASSWORD:-changeme_pipeline_password}
       - PYTHONPATH=/app
     depends_on:
@@ -43,7 +43,7 @@ services:
       - "8000:8000"
     environment:
       - MQTT_BROKER=mosquitto
-      - MQTT_USERNAME=${MQTT_USERNAME:-pipeline}
+      - MQTT_USERNAME=${MQTT_USERNAME:-ems_pipeline}
       - MQTT_PASSWORD=${MQTT_PASSWORD:-changeme_pipeline_password}
       - PYTHONPATH=/app
       # Auth and CORS configuration
