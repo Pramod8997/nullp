@@ -30,8 +30,15 @@ devices:
   esp32_oven:       { simulated: true,  rated: 3000, tier0: false }
   esp32_lighting:   { simulated: true,  rated: 100,  tier0: false }
 
-# 10 appliance classes used by Phase-1 NILM pipeline
+# 10 appliance classes used by Phase-1 NILM pipeline. The five primary
+# recognition classes (phone, laptop, bulb, projector, fan) are declared under
+# `protonet.classes`; this broader list scopes the heuristic fallback.
 appliances:
+  - phone
+  - laptop
+  - bulb
+  - projector
+  - fan
   - fridge
   - hvac
   - kettle
@@ -41,13 +48,17 @@ appliances:
   - microwave
   - oven
   - ev_charger
-  - laptop
 
 system_safety:
   max_aggregate_wattage: 3500.0
   warning_pct: 1.10
   critical_pct: 1.25
   # Per-appliance watt limits; tier0: true = life-critical (never shed)
+  phone:           { max_w: 130, tier0: false }
+  laptop:          { max_w: 220, tier0: false }
+  bulb:            { max_w: 100, tier0: false }
+  projector:       { max_w: 450, tier0: false }
+  fan:             { max_w: 110, tier0: false }
   fridge:          { max_w: 300,  tier0: false }
   hvac:            { max_w: 2500, tier0: false }
   kettle:          { max_w: 2500, tier0: false }
@@ -80,6 +91,11 @@ protonet:
   embedding_size: 128
   distance_threshold: 15.0
   confidence_threshold: 0.70  # Lowered from 0.90 for real-world PZEM noisy data; NEVER_SHED is independent
+  # The five primary appliance classes this deployment recognises.
+  classes: ['phone', 'laptop', 'bulb', 'projector', 'fan']
+  # Open-set / out-of-distribution gate tau. Best-window confidence below
+  # this is reported as Unrecognised/Unknown and routed to labeling.
+  open_set_threshold: 0.65
   # Separate quantity from confidence_threshold — see config.demo.yaml. This
   # gates the noisy-OR of the learned channel and the deterministic
   # absolute-watts channel after they have already agreed on the class; below it

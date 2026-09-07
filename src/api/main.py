@@ -327,6 +327,11 @@ async def mqtt_listener_task():
                                 async with state_lock:
                                     system_state["pending_labels"].append(label_entry)
                                     system_state["pending_labels"] = system_state["pending_labels"][-50:]
+                                # Open-set hook: buffer the raw windows behind
+                                # this unrecognised signature so
+                                # POST /api/v1/appliances/label-unrecognized
+                                # can enroll them when the user names it.
+                                await _capture_signature(evt.device_id, label_entry)
                                 logger.info(f"📋 LABEL_REQUEST: {evt.device_id}")
                                 audit_logger.info(json.dumps({
                                     "event": "LABEL_REQUEST",
@@ -699,6 +704,230 @@ async def submit_label(submission: LabelSubmission, _: None = Depends(verify_api
 # Bug 3.4 fix: Removed /api/unknown_devices and pending_unknowns_store.
 # The never-populated pending_unknowns_store was always returning empty arrays.
 # Use /api/pending-labels exclusively for unknown device management.
+
+
+# ─── Label-Unrecognized (open-set labeling hook) ────────────────────
+# Signature buffer for unrecognised electrical signatures. Populated from
+# LABEL_REQUEST events (keyed by signature_id == device_id of the unknown
+# node), so a label can be submitted later without holding the original
+# WebSocket frame. Raw 128-sample POWER windows in watts — the format
+# PrototypeRegistry.add_class / handle_label_submitted enroll from.
+signature_buffer: Dict[str, Dict[str, Any]] = {}
+_signature_lock = asyncio.Lock()
+SIGNATURE_BUFFER_MAX = 200  # bound memory; keep most recent
+
+# Classes recognised by this deployment (config protonet.classes).
+_target_classes: List[str] = []
+try:
+    import yaml as _yaml
+    _cfg_path = os.environ.get("EMS_CONFIG", "config/config.demo.yaml")
+    if not os.path.exists(_cfg_path):
+        _cfg_path = "config/config.yaml"
+    with open(_cfg_path) as _fh:
+        _cfg = _yaml.safe_load(_fh) or {}
+    _target_classes = list((_cfg.get("protonet") or {}).get("classes") or [])
+except Exception:
+    _target_classes = []
+
+
+async def _capture_signature(device_id: str, entry: Dict[str, Any]) -> None:
+    """Buffer the feature vector behind an unrecognised signature (open-set hook).
+
+    Called from the LABEL_REQUEST branch of the MQTT listener: keeps the raw
+    power windows so a later POST /api/v1/appliances/label-unrecognized can
+    enroll them, plus the embedding for display/cluster identity.
+    """
+    async with _signature_lock:
+        signature_buffer[device_id] = {
+            "segments": list(entry.get("segments") or []),
+            "embedding": list(entry.get("embedding") or []),
+            "power": entry.get("power", 0.0),
+            "confidence": entry.get("confidence", 0.0),
+            "captured_at": time.time(),
+        }
+        while len(signature_buffer) > SIGNATURE_BUFFER_MAX:
+            signature_buffer.pop(next(iter(signature_buffer)))
+
+
+class LabelUnrecognizedRequest(BaseModel):
+    """POST /api/v1/appliances/label-unrecognized body."""
+    signature_id: str = Field(..., max_length=64)
+    label: str = Field(..., max_length=64)
+    # Optional direct segments (K x 128 raw watts). When absent the buffered
+    # windows captured at LABEL_REQUEST time are used.
+    segments: List[List[float]] = Field(
+        default=[],
+        description=(
+            "Raw 128-sample power windows in watts. When omitted, the buffered "
+            "windows for signature_id (captured when the signature was flagged "
+            "Unrecognized) are enrolled."
+        ),
+    )
+
+    @field_validator("segments")
+    @classmethod
+    def validate_segments(cls, v):
+        if len(v) > 100:
+            raise ValueError("Maximum 100 segments allowed")
+        for i, seg in enumerate(v):
+            if len(seg) != 128:
+                raise ValueError(f"Segment {i} must have exactly 128 dimensions, got {len(seg)}")
+            if not all(math.isfinite(x) for x in seg):
+                raise ValueError(f"Segment {i} contains NaN/Inf")
+            if min(seg) < -1e-3:
+                raise ValueError(f"Segment {i} has negative values: expected raw power in watts")
+            if max(seg) < 20.0:
+                raise ValueError(f"Segment {i} never exceeds 20 W: expected an appliance power window")
+        return v
+
+
+class LabelUnrecognizedResponse(BaseModel):
+    status: str
+    signature_id: str
+    label: str
+    enrolled: bool
+    classes: List[str]
+    message: str
+
+
+@app.post(
+    "/api/v1/appliances/label-unrecognized",
+    response_model=LabelUnrecognizedResponse,
+)
+async def label_unrecognized(req: LabelUnrecognizedRequest,
+                             _: None = Depends(verify_api_key)):
+    """
+    Label an Unrecognised/Unknown electrical signature and register it into
+    the runtime prototype registry via few-shot prototype averaging.
+
+    Body: {"signature_id": "<id>", "label": "<new_appliance_name>"}.
+    The 128-sample power windows buffered when the signature was flagged
+    Unrecognized are enrolled (PrototypeRegistry.add_class), and the registry
+    is persisted to the configured registry_path. The enrolled class is live
+    for the *next* classification event.
+    """
+    label = req.label.strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="label must not be empty")
+
+    async with _signature_lock:
+        buffered = signature_buffer.get(req.signature_id) or {}
+
+    segments = req.segments or buffered.get("segments") or []
+    source = "request" if req.segments else "buffer"
+
+    if not segments:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "no_segments",
+                "message": (
+                    f"No buffered feature windows for signature_id "
+                    f"'{req.signature_id}'. Provide `segments` (K x 128 raw "
+                    f"watts) or wait for a LABEL_REQUEST event to buffer them."
+                ),
+                "signature_id": req.signature_id,
+            },
+        )
+
+    # Enroll into the runtime prototype registry. Same watts-not-embedding
+    # validation as handle_label_submitted, which does the actual
+    # few-shot prototype averaging (add_class) and persistence.
+    # Construct a FullPipeline lazily so the heavy weights load only once
+    # and are shared across requests.
+    global _label_pipeline
+    try:
+        if _label_pipeline is None:
+            _label_pipeline = await asyncio.to_thread(_build_label_pipeline)
+        pipeline = _label_pipeline
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"ML pipeline unavailable: {e}")
+
+    enrolled = await asyncio.to_thread(
+        _enroll_segments, pipeline, label, segments
+    )
+
+    classes_after = await asyncio.to_thread(
+        lambda: list(pipeline.prototype_registry.class_names())
+    ) if pipeline.prototype_registry is not None else []
+
+    # Consume the buffered signature on success
+    if enrolled:
+        async with _signature_lock:
+            signature_buffer.pop(req.signature_id, None)
+        await manager.broadcast({
+            "type": "LABEL_SUBMITTED",
+            "device_id": req.signature_id,
+            "label": label,
+            "signature_id": req.signature_id,
+        })
+        audit_logger.info(json.dumps({
+            "event": "LABEL_UNRECOGNIZED",
+            "signature_id": req.signature_id,
+            "label": label,
+            "segments_count": len(segments),
+            "source": source,
+        }))
+
+    return LabelUnrecognizedResponse(
+        status="ok" if enrolled else "error",
+        signature_id=req.signature_id,
+        label=label,
+        enrolled=enrolled,
+        classes=classes_after,
+        message=(
+            f"Registered '{label}' into the runtime prototype registry"
+            if enrolled else
+            f"Failed to enroll '{label}' — segments rejected (see server log)"
+        ),
+    )
+
+
+# Shared lazily-initialised orchestrator for the label-unrecognized endpoint.
+_label_pipeline = None
+
+
+def _build_label_pipeline():
+    """Load a FullPipeline from the active config for enrollment."""
+    import yaml
+    cfg_path = os.environ.get("EMS_CONFIG", "config/config.demo.yaml")
+    if not os.path.exists(cfg_path):
+        cfg_path = "config/config.yaml"
+    with open(cfg_path) as fh:
+        cfg = yaml.safe_load(fh) or {}
+    from scripts.run_pipeline import FullPipeline
+    return FullPipeline(config=cfg)
+
+
+def _enroll_segments(pipeline, label: str, segments: List[List[float]]) -> bool:
+    """Run handle_label_submitted in a worker thread. True on enrollment."""
+    before = set(pipeline.prototype_registry.class_names()) \
+        if pipeline.prototype_registry is not None else set()
+    try:
+        pipeline.handle_label_submitted(label, segments)
+    except Exception as e:
+        logger.error(f"label-unrecognized enrollment failed: {e}")
+        return False
+    after = set(pipeline.prototype_registry.class_names()) \
+        if pipeline.prototype_registry is not None else set()
+    return label in after or (before != after)
+
+
+@app.get("/api/v1/appliances/signatures/unrecognized")
+async def list_unrecognized_signatures(_: None = Depends(verify_api_key)):
+    """Buffered unrecognised signatures awaiting a label."""
+    async with _signature_lock:
+        out = [
+            {
+                "signature_id": sid,
+                "power": v.get("power", 0.0),
+                "confidence": v.get("confidence", 0.0),
+                "captured_at": v.get("captured_at"),
+                "window_count": len(v.get("segments") or []),
+            }
+            for sid, v in signature_buffer.items()
+        ]
+    return {"unrecognized_signatures": out, "target_classes": _target_classes}
 
 
 @app.get("/api/export-csv")

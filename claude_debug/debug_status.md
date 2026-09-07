@@ -2,9 +2,9 @@
 
 > **Target:** Smart Energy Monitoring & Edge Safety Platform (EMS)  
 > **Location:** `claude_debug/debug_status.md`  
-> **Current Baseline:** 511/511 Tests Passing (100%) | Physical Stress: 7/7 PASS | HIL: 10/10 PASS | Closed-Loop E2E: 8/8 PASS | HW Sim Stress: 7/7 PASS  
-> **Status:** Two debug passes completed 2026-08-25 — §0 hardware/NILM (6 defects), §0b ML recognition (4 defects + the recognition rewire). Open items in §5.
-> **Session logs:** [`DEBUG_SESSION_2026-08-25.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/DEBUG_SESSION_2026-08-25.md) (hardware/NILM) and [`ML_PIPELINE_FIX_2026-08-25.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ML_PIPELINE_FIX_2026-08-25.md) (ML recognition + label loop) — root causes, measured evidence, verification commands.
+> **Current Baseline:** 549/549 Tests Passing (100%) | Physical Stress: 7/7 PASS | HIL: 10/10 PASS | Closed-Loop E2E: 8/8 PASS | HW Sim Stress: 7/7 PASS  
+> **Status:** Three debug passes completed — §0 hardware/NILM (2026-08-25, 6 defects), §0b ML recognition (2026-08-25, 4 defects + the recognition rewire), §0c five-class scope + label API (2026-09-08). Open items in §5.
+> **Session logs:** [`DEBUG_SESSION_2026-08-25.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/DEBUG_SESSION_2026-08-25.md) (hardware/NILM), [`ML_PIPELINE_FIX_2026-08-25.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ML_PIPELINE_FIX_2026-08-25.md) (ML recognition + label loop), [`SESSION_2026-09-08.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/SESSION_2026-09-08.md) (five-class scope, label-unrecognized API, wiring guide) — root causes, measured evidence, verification commands.
 
 ---
 
@@ -69,22 +69,54 @@ own few-shot labels are the correct path, which is why the label loop was the pr
 
 ---
 
+## 0c. Five-Class Scope & Label API Pass (2026-09-08)
+
+Third pass, on the ask to finalize the ML pipeline for
+`['phone', 'laptop', 'bulb', 'projector', 'fan']` (supersedes the old 4-class
+`phone/laptop/projector/monitor` lock in the root `CLAUDE.md` per explicit user
+instruction), with mock simulator + MQTT/WS standing in for absent hardware, and
+the open-set → label → few-shot-enrollment loop verified end-to-end. Full detail:
+[`SESSION_2026-09-08.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/SESSION_2026-09-08.md).
+
+| ID | Defect | Root cause | Fix |
+|----|--------|-----------|-----|
+| **F-1** | `bulb` and `fan` could never be recognised — no prototype and no physical envelope existed for them | The demo fleet and `enroll_demo_devices.py` still targeted the old 4-class scope; the envelope gate (`_eligible_classes`) has no watts band, so the class is unreachable regardless of the embedding | Added `node_bulb`/`node_fan` to `DEMO_DEVICES`, re-scoped `enroll_demo_devices.py` to the 5 names, regenerated `prototype_registry_enrolled.pt` (10 classes / 6 envelopes; phone 44–48 W, bulb 59–60, fan 74–76, projector 297–302, laptop 117–122, desktop 245–253) — existing few-shot path only, no retraining, no architecture change |
+| **F-2** | No REST surface for the labeling hook — the operator had to POST raw watt segments; `{"signature_id", "label"}` did nothing | The pipeline had `handle_label_submitted` but the API never captured/buffered the LABEL_REQUEST signature | `src/api/main.py`: `_capture_signature` buffers LABEL_REQUEST watts segments; `POST /api/v1/appliances/label-unrecognized` (API-key gated, pydantic refuses embeddings-as-segments, enrolls, audit-logs); `GET /api/v1/appliances/signatures/unrecognized` lists the buffer + target classes; `classes` + `open_set_threshold: 0.65` set in both config profiles |
+| **F-3** | 7 assertions in `test_ml_pipeline_recognition.py` pinned the old 4-class registry state | Regenerated registry: 7 → 10 classes; the 65 W "unrecognised laptop" fixture now lands inside fan's padded envelope 62.9–86.9 W; `monitor` no longer enrolled | Re-anchored: unrecognized test → **95 W** (the true gap between fan ceiling 86.9 W and laptop floor ~99 W); class-count/envelope assertions updated; `TestFour…` → `TestFiveRequiredClassesAreRecognised` |
+
+**Verification (all run live):** new e2e suite
+`tests/test_e2e_five_class_recognition.py` — 21/21 (5 classes each 12/12 on
+held-out seeds at conf ≥ 0.65; microwave/vacuum → `UNRECOGNISED` conf 0.0 with
+populated distance map; full loop: unrecognized → LABEL_REQUEST with watts
+segments → `handle_label_submitted` → recognised next event → persisted to the
+registry file; endpoint 200/401/404/422; GET listing). Targeted regression 79/79.
+**Full suite 549/549** (was 511).
+
+**Honesty boundary (unchanged):** enrolled on the *simulator* distribution —
+demo-verifiable, **not** physical validation. Physical 5-class recognition
+stays NOT PHYSICALLY VERIFIED until `enroll_demo_devices.py --capture` runs on
+attested PZEM windows. Reject channel remains the physical power-envelope gate +
+τ = 0.65; OpenMax stays loaded-but-inert (§5.3).
+
+---
+
 ## 1. Master Verification & Task Status
 
 | # | Task | Scope | Status | Notes |
 |---|------|-------|:------:|-------|
-| 1 | Full regression baseline | `pytest tests/ -q` | ✅ **PASS** | **511/511 passing** (100%) — 467 before the 2026-08-25 hardware pass, 474 after it, 511 after the ML pass |
+| 1 | Full regression baseline | `pytest tests/ -q` | ✅ **PASS** | **549/549 passing** (100%) — 467 before the 2026-08-25 hardware pass, 474 after it, 511 after the ML pass, 549 after the 2026-09-08 five-class pass |
 | 2 | Physical & electrical stress harness | `scripts/real_world_physical_stress.py` | ✅ **PASS** | **7/7 scenarios passed** |
 | 3 | Hardware-in-the-loop (HIL) suite | `scripts/hil_hardware_test.py` | ✅ **PASS** | **10/10 scenarios passed** |
 | 4 | Closed-loop E2E firmware & AI simulation | `scripts/test_firmware_and_ai_e2e.py` | ✅ **PASS** | **8/8 stages passed** |
 | 5 | Hardware simulation stress suite | `scripts/stress_test_hardware_sim.py` | ✅ **PASS** | **7/7 scenarios passed** |
 | 6 | Real-data NILM & ML fallback suite | `tests/test_real_data_and_ml_fallback.py` | ✅ **PASS** | **36/36 passing** |
-| 6b | ML recognition & label-loop suite | `tests/test_ml_pipeline_recognition.py` | ✅ **PASS** | **35/35 passing** — M-5…M-8 regressions + the OpenMax deadness contract (§5.3) |
+| 6b | ML recognition & label-loop suite | `tests/test_ml_pipeline_recognition.py` | ✅ **PASS** | All passing — M-5…M-8 regressions + the OpenMax deadness contract (§5.3); re-anchored to the 5-class registry 2026-09-08 |
+| 6c | Five-class e2e recognition + open-set label loop | `tests/test_e2e_five_class_recognition.py` | ✅ **PASS** | **21/21 passing** (new 2026-09-08) — §0c |
 | 7 | Demo profile CLI argument support | `scripts/run_pipeline.py` | ✅ **DONE** | Added `--config` parameter to load `config/config.demo.yaml` |
 | 8 | Heuristic fallback pipeline integration | `scripts/run_pipeline.py` | ✅ **DONE** | Integrated `HeuristicApplianceClassifier` for zero-torch fallback |
 | 9 | Demo fleet simulation profiles | `backend/scripts/simulate_esp32.py` | ✅ **DONE** | Added `DEMO_DEVICES` and `--demo` CLI flag |
 | 10 | Full system demo runner wiring | `scripts/demo_full_system.py` | ✅ **DONE** | Added `--demo` support & fixed WebSocket URL to `/ws` |
-| 11 | Knowledge graph synchronization | `graphify update .` | ✅ **DONE** | Rebuilt 2026-08-25 after the ML pass: 2,513 nodes, 4,958 edges, 207 communities |
+| 11 | Knowledge graph synchronization | `graphify update .` | ✅ **DONE** | Rebuilt 2026-09-08 after the five-class pass: 2,557 nodes, 5,022 edges, 172 communities |
 | 12 | Recognition thresholds stated in config | `config/config*.yaml` | ✅ **DONE** | `recognition_threshold: 0.45` and `heuristic_min_confidence: 0.55` now explicit in all three profiles, with the rationale for why they are *not* `confidence_threshold` |
 
 ---
@@ -218,7 +250,27 @@ mechanical fix, so none were changed unilaterally.
    *Decision needed:* delete `OpenMaxWeibull` and the `OpenMaxStage` export, or fund a real
    open-set channel on absolute watts. Either is a product call.
 
-4. **Placebo tests remain.** 27 bare `assert True` lines with no other assertion —
+4. **Sim-enrolled recognition does not generalise to physical hardware — capture
+   required before any hardware claim.** The 5-class registry
+   (`prototype_registry_enrolled.pt`) is enrolled on the simulator's gaussian
+   profiles (§0c F-1), verified on held-out seeds only. Real appliances show
+   inrush, power factor and duty cycles the simulator does not. The remedy
+   exists and is documented: `scripts/capture_bench_windows.py` →
+   `scripts/enroll_demo_devices.py --capture bench.npz` (operator-attested
+   provenance). Additionally `config/config.hardware.yaml` still carries the old
+   2-class physical scope (`laptop` + `phone_charger`) — it was deliberately not
+   modified this pass; decide the hardware class list before a rig run.
+
+5. **`POST /api/v1/appliances/label-unrecognized` writes the registry file but
+   does not notify a separately-running orchestrator.** The older
+   `POST /api/submit-label` path hot-reloads a live pipeline via MQTT
+   (`home/ml/label`); the new endpoint's enrollment lands in its own in-process
+   pipeline and persists to the registry file, which an external orchestrator
+   reads only at boot. If API and pipeline run as separate processes
+   (docker-compose does), the new endpoint should also publish to that topic.
+   Small fix; deferred pending a deployment-topology decision.
+
+6. **Placebo tests remain.** 27 bare `assert True` lines with no other assertion —
    `test_chaos_engineering.py` (14), `test_ml_nilm_math_stress.py` (12),
    `test_hil_uart_corruption.py` (1) — plus **39 calls to the hallucinated `.process()` API**
    (`NILMTransientDetector` exposes only `push`, `get_current_segment`, `reset`) that are
@@ -226,12 +278,12 @@ mechanical fix, so none were changed unilaterally.
    no assertions at all. These inflate the headline count without verifying behaviour. The
    2026-08-25 hardware pass cleared 8 of them (the M-4 set); the rest are untouched.
 
-5. **Import failures are masked into green runs.** `test_ml_nilm_math_stress.py`,
+7. **Import failures are masked into green runs.** `test_ml_nilm_math_stress.py`,
    `test_temperature_scaling.py` and `test_e2e.py` wrap their imports in
    `try: … except ImportError: X = MagicMock()`. A genuine import break would pass as a
    `MagicMock` rather than fail the suite.
 
-6. **`aiosqlite` teardown races the event loop — intermittent.**
+8. **`aiosqlite` teardown races the event loop — intermittent.**
    `test_pipeline_stages.py::test_stage9_rl_agent_produces_action` can emit
    `PytestUnhandledThreadExceptionWarning: RuntimeError: Event loop is closed` from the aiosqlite
    worker thread — a DB connection outliving its loop. Observed in 1 of 3 full runs on 2026-08-25
@@ -239,7 +291,7 @@ mechanical fix, so none were changed unilaterally.
    timing-dependent teardown race rather than a fixed bug. Harmless to the assertions; still an
    unawaited-teardown defect.
 
-7. **Recognition coverage is a deliberate trade, not a bug.** ~40% of real UK-DALE windows are
+9. **Recognition coverage is a deliberate trade, not a bug.** ~40% of real UK-DALE windows are
    answered; the rest are reported unrecognised and routed to the label loop. Two shipped-class
    errors survive on the target set (65 W laptop → `desktop_computer`, 45 W phone charger →
    `monitor`); both are rooted in the §0b data gap and the intended remedy is the operator
@@ -247,7 +299,7 @@ mechanical fix, so none were changed unilaterally.
    **not** recommended — UK-DALE contains no modern USB-PD charger, and laptop/monitor score
    0.501 leave-one-meter-out on 3 classes (chance 0.333).
 
-8. **Never physically validated.** Every result above is simulation. The twin now matches
+10. **Never physically validated.** Every result above is simulation. The twin now matches
    `main.cpp` on the paths audited, but no claim here substitutes for bench validation per
    `REAL_WORLD_TESTING_PLAN.md`.
 

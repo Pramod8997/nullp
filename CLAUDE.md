@@ -6,11 +6,14 @@ Optimize for: **correctness > simplicity > speed > completeness of architecture*
 Do not build a "better" system. Repair the existing one.
 
 ## HARD SCOPE LOCK
-The required appliance recognition demo scope is ONLY:
+The required appliance recognition demo scope is ONLY (updated 2026-09-08 per
+explicit user instruction — supersedes the earlier phone/laptop/projector/monitor
+list; see `claude_debug/SESSION_2026-09-08.md`):
 1. phone
 2. laptop
-3. projector
-4. monitor
+3. bulb
+4. projector
+5. fan
 
 Do NOT expand appliance classes, redesign the NILM architecture, add new agents, add speculative ML models, or build generalized frameworks unless a currently failing test or existing production contract strictly requires it.
 
@@ -49,12 +52,13 @@ Do NOT:
 Use this order:
 1. live source code + current test output
 2. current failure/reproducer
-3. `claude_debug/DEBUG_SESSION_2026-08-25.md`
-4. `claude_debug/ML_PIPELINE_FIX_2026-08-25.md`
-5. `claude_debug/HARDWARE_FINAL_SPEC.md`
-6. `claude_debug/ARCHITECTURE_AND_APIS.md`
-7. `claude_debug/MASTER_PLAYBOOK.md` (previous root playbook: architecture map, CLI commands, API quick reference, open item M-2)
-8. other context docs
+3. `claude_debug/SESSION_2026-09-08.md` (latest: 5-class scope + label API)
+4. `claude_debug/DEBUG_SESSION_2026-08-25.md`
+5. `claude_debug/ML_PIPELINE_FIX_2026-08-25.md`
+6. `claude_debug/HARDWARE_FINAL_SPEC.md` + `claude_debug/WIRING_STEP_BY_STEP.md`
+7. `claude_debug/ARCHITECTURE_AND_APIS.md`
+8. `claude_debug/MASTER_PLAYBOOK.md` (previous root playbook: architecture map, CLI commands, API quick reference, open item M-2)
+9. other context docs
 
 Historical docs are evidence, not truth.
 
@@ -76,7 +80,7 @@ If the same failure appears twice:
 If 2 fixes fail for the same symptom, stop broad coding and perform a minimal data-flow trace from input -> transform -> classifier/output.
 
 ## ML FIX STRATEGY
-For phone/laptop/projector/monitor recognition:
+For phone/laptop/bulb/projector/fan recognition:
 - Prefer the existing working recognition path and existing demo weights/data.
 - Do not replace ProtoNet/OpenMax/heuristics unless the current code proves that component is the root cause.
 - First verify: input units -> preprocessing -> feature vector -> model input -> label mapping -> confidence/gate -> output.
@@ -85,10 +89,12 @@ For phone/laptop/projector/monitor recognition:
 - Check model/weight loading paths before training anything.
 - Use existing real-data/demo fixtures before collecting or generating new data.
 - If ML confidence is broken, verify the fallback/label-loop behavior already present before inventing a new confidence scheme.
-- The goal is reliable recognition of the FOUR required classes, not a research-grade generalized NILM platform.
+- The goal is reliable recognition of the FIVE required classes, not a research-grade generalized NILM platform.
 
 ## HARDWARE INTEGRATION STRATEGY
-Required recognition/integration target: phone, laptop, projector, monitor.
+Required recognition/integration target: phone, laptop, bulb, projector, fan
+(demo/simulator scope — the physical rig itself stays per `claude_debug/HARDWARE_FINAL_SPEC.md`).
+Bench wiring for the current 38-pin DevKit build: `claude_debug/WIRING_STEP_BY_STEP.md`.
 Keep the locked hardware safety contract:
 - relay safety behavior remains authoritative;
 - finite PZEM values only;

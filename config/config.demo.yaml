@@ -33,6 +33,13 @@ protonet:
   embedding_size: 128
   distance_threshold: 15.0
   confidence_threshold: 0.90
+  # The five primary appliance classes this deployment recognises. A window
+  # outside every enrolled/known envelope is reported UNRECOGNISED and fires
+  # the LABEL_REQUEST flow instead of being forced onto one of these.
+  classes: ['phone', 'laptop', 'bulb', 'projector', 'fan']
+  # Open-set / out-of-distribution gate tau. Best-window confidence below
+  # this is reported as Unrecognised/Unknown and routed to labeling.
+  open_set_threshold: 0.65
   # Bar a *confirmed* classification must clear to be reported as recognised.
   # Deliberately NOT the same quantity as confidence_threshold above: that one
   # gates a single softmax, this one gates the noisy-OR of two independent
@@ -81,15 +88,19 @@ devices:
   node_monitor:   { simulated: true, rated: 60,  tier0: false }
   node_desktop:   { simulated: true, rated: 350, tier0: false }
   node_charger:   { simulated: true, rated: 120, tier0: false }
+  # Five-class demo fleet additions (phone/laptop/bulb/projector/fan)
+  node_bulb:      { simulated: true, rated: 60,  tier0: false }
+  node_fan:       { simulated: true, rated: 75,  tier0: false }
 
+# The five primary appliance classes (matches protonet.classes above and the
+# enrolled registry). Operator-labelled classes are exempt from this list —
+# see _eligible_classes.
 appliances:
+  - phone
   - laptop
-  - desktop_computer
-  - monitor
+  - bulb
   - projector
-  - tv
-  - router
-  - phone_charger
+  - fan
 
 # Scaled so the safety path is actually demonstrable at bench power levels.
 # 600 W ceiling: a laptop + projector + monitor together (~530 W) sits in the
@@ -103,10 +114,14 @@ system_safety:
   max_aggregate_wattage: 600.0
   warning_pct: 1.10
   critical_pct: 1.25
-  laptop:           { max_w: 220, tier0: false }
+  phone:           { max_w: 130, tier0: false }
+  laptop:          { max_w: 220, tier0: false }
+  bulb:            { max_w: 100, tier0: false }
+  projector:       { max_w: 450, tier0: false }
+  fan:             { max_w: 110, tier0: false }
+  # Legacy classes kept for the monitor/desktop simulator nodes
   desktop_computer: { max_w: 400, tier0: false }
   monitor:          { max_w: 75,  tier0: false }
-  projector:        { max_w: 450, tier0: false }
   tv:               { max_w: 300, tier0: false }
   router:           { max_w: 30,  tier0: true }   # keep the network up
   phone_charger:    { max_w: 130, tier0: false }

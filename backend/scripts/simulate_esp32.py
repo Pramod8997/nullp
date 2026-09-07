@@ -98,7 +98,17 @@ DEVICES = [
     },
 ]
 
-# Demo bench-load device profiles matching config/config.demo.yaml
+# Demo bench-load device profiles matching config/config.demo.yaml.
+#
+# Fleet node id → the recognised appliance class (config `appliances:` /
+# enrolled registry names):
+#   node_charger  → phone       (45 W USB-PD charger)
+#   node_laptop   → laptop      (120 W)
+#   node_bulb     → bulb        (60 W incandescent / LED bench lamp)
+#   node_projector→ projector   (300 W lamp projector)
+#   node_fan      → fan         (75 W table fan)
+#   node_monitor / node_desktop kept for profile compatibility with older
+#   demos; they map to the shipped `monitor` / `desktop_computer` classes.
 DEMO_DEVICES = [
     {
         "id": "node_laptop", "rated": 120.0, "var": 25.0,
@@ -130,6 +140,19 @@ DEMO_DEVICES = [
         "spike_prob": 0.005, "cutoff": 600.0,
         "cycle": False, "on_prob": 0.005, "off_prob": 0.002,
         "phantom": 2.0,
+    },
+    # ── Five-class demo fleet additions (phone/laptop/bulb/projector/fan) ──
+    {
+        "id": "node_bulb", "rated": 60.0, "var": 4.0,
+        "spike_prob": 0.0, "cutoff": 600.0,
+        "cycle": False, "on_prob": 0.004, "off_prob": 0.001,
+        "phantom": 1.0,
+    },
+    {
+        "id": "node_fan", "rated": 75.0, "var": 6.0,
+        "spike_prob": 0.0, "cutoff": 600.0,
+        "cycle": False, "on_prob": 0.003, "off_prob": 0.001,
+        "phantom": 1.5,
     },
 ]
 

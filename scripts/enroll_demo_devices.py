@@ -54,34 +54,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models.protonet import ProtoNet, PrototypeRegistry  # noqa: E402
 
-# The four classes in scope (FAST_FIX_SCOPE.md). Names are the existing wire
-# labels — `phone_charger`, not `phone` — because src/api/main.py, the frontend
-# and 54 test assertions key on them.
-REQUIRED_CLASSES = ("phone_charger", "monitor", "laptop", "projector")
+# The five primary appliance classes of the recognition scope
+# (config `protonet.classes`): phone, laptop, bulb, projector, fan. `phone`
+# maps to the USB-PD charger node (node_charger) — the scope's name for the
+# class the shipped UK-DALE artifact called `phone_charger`.
+REQUIRED_CLASSES = ("phone", "laptop", "bulb", "projector", "fan")
 
-# `desktop_computer` is not in the required four, but node_desktop IS in the demo
-# fleet at 250 W, and enrolling the required four alone makes it WORSE: the
+# `desktop_computer` is not in the required five, but node_desktop IS in the demo
+# fleet at 250 W, and enrolling the required classes alone makes it WORSE: the
 # enrolled projector envelope (297-302 W) pads out to 252-347 W, an enrolled
 # class outranks a shipped one, and a 250 W desktop window then gets called
-# projector. Measured over 24 windows per class:
-#
-#   variant                    four-class   desktop     novel rejected
-#   shipped registry              0/96      12/24            8/8
-#   enrol required four only     96/96       8/24            6/8
-#   enrol all five fleet nodes   96/96      21/24            7/8
-#
-# So enrolling every node the fleet actually presents is both the scope-correct
-# answer and the strictly better one. This is not taxonomy expansion —
-# desktop_computer is already a shipped class and already a demo node.
+# projector. Enrolling every node the fleet actually presents keeps it in its
+# own lane. This is not taxonomy expansion — desktop_computer is already a
+# shipped class and already a demo node.
 TARGET_CLASSES = REQUIRED_CLASSES + ("desktop_computer",)
 
 # Which simulated node presents which class.
 NODE_FOR_CLASS = {
-    "phone_charger":    "node_charger",
-    "monitor":          "node_monitor",
-    "laptop":           "node_laptop",
-    "projector":        "node_projector",
-    "desktop_computer": "node_desktop",
+    "phone":             "node_charger",
+    "laptop":            "node_laptop",
+    "bulb":              "node_bulb",
+    "projector":         "node_projector",
+    "fan":               "node_fan",
+    "desktop_computer":  "node_desktop",
 }
 
 SEQ_LEN = 128

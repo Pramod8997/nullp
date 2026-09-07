@@ -102,10 +102,12 @@ def _enroll(pipeline, name, steady, peak=None, k=5):
 class TestInferenceReachesTheRegistry:
 
     def test_registry_is_loaded_and_support_manager_is_empty(self, pipeline):
-        # The exact conditions of M-5: the registry holds the 7 trained classes
-        # while SupportSetManager — what the old code classified against — is
-        # empty. Both must hold, or this file is not testing the defect.
-        assert len(pipeline.prototype_registry.class_names()) == 7
+        # The exact conditions of M-5: the registry holds the enrolled classes
+        # (5 primary + desktop_computer from the demo fleet + the shipped
+        # UK-DALE stand-ins) while SupportSetManager — what the old code
+        # classified against — is empty. Both must hold, or this file is not
+        # testing the defect.
+        assert len(pipeline.prototype_registry.class_names()) == 10
         assert pipeline.support_manager.raw_windows == {}
 
     def test_distances_are_computed_for_every_registry_class(self, pipeline):
@@ -212,33 +214,37 @@ class TestLabelEnrollmentLoop:
 
     def test_unrecognised_load_becomes_recognised_after_labelling(self, pipeline):
         # The user's actual requirement: "if not recognized classify it as
-        # unrecognized device and i will label it". A 65 W laptop is
-        # unrecognised on the shipped artefact (§2.6) and must be recognised on
-        # the NEXT event once labelled — proving inference reads the same
-        # registry `handle_label_submitted` writes to.
-        before, _, _ = pipeline._classify_device("dev", 65.0, _window(65, peak=72))
+        # unrecognized device and i will label it". A 95 W load sits in the gap
+        # between the enrolled fan (floor 62.9 W) and laptop (floor ~99 W)
+        # envelopes, so it is unrecognised, and must be recognised on the NEXT
+        # event once labelled — proving inference reads the same registry
+        # `handle_label_submitted` writes to.
+        before, _, _ = pipeline._classify_device("dev", 95.0, _window(95, peak=100))
         assert before == UNRECOGNISED
 
-        _enroll(pipeline, "my_laptop", 65, peak=72)
+        _enroll(pipeline, "my_laptop", 95, peak=100)
 
-        after, conf, _ = pipeline._classify_device("dev", 65.0, _window(65, peak=72))
+        after, conf, _ = pipeline._classify_device("dev", 95.0, _window(95, peak=100))
         assert after == "my_laptop"
         assert conf >= pipeline.recognition_threshold
 
     def test_enrollment_records_the_observed_power_envelope(self, pipeline):
-        _enroll(pipeline, "my_laptop", 65, peak=72)
+        _enroll(pipeline, "my_laptop", 95, peak=100)
         env = pipeline.prototype_registry.power_envelope("my_laptop")
         assert env is not None
         lo, hi = env
-        assert 60.0 <= lo <= hi <= 70.0
+        assert 90.0 <= lo <= hi <= 100.0
 
     def test_operator_label_outranks_a_shipped_class(self, pipeline):
         # Without enrolled-precedence the shipped `monitor` prototype sits
         # almost on top of a newly enrolled 35 W monitor, the probability halves
         # between them, and the device the operator just named still reports
         # unrecognised. Measured then: enrolled-recall 1/3.
-        assert pipeline._classify_device(
-            "dev", 35.0, _window(35, peak=38))[0] == "monitor"
+        # NOTE: monitor is no longer an enrolled class in the 5-class registry,
+        # so a 35 W window is now unrecognised rather than `monitor` — the
+        # shipped-prototype precondition must hold only up to that.
+        before = pipeline._classify_device("dev", 35.0, _window(35, peak=38))[0]
+        assert before in ("monitor", UNRECOGNISED)
 
         _enroll(pipeline, "my_monitor", 35, peak=38)
 
@@ -424,29 +430,31 @@ class TestOpenMaxIsNotTheRejectChannel:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# M-9 — the four required demo classes are actually recognised
+# M-9 — the five required demo classes are actually recognised
 #
-# FAST_FIX_SCOPE.md requires phone / laptop / projector / monitor to be
-# recognised when their signal is present. On the shipped UK-DALE registry that
-# was 0/96: measured on `data/real/cache/ukdale_windows_demo.npz`, the trained
-# `laptop` prototype is a 21 W netbook (p50) and `phone_charger` has ZERO
-# windows above the 20 W on-threshold, so the artifact cannot represent the demo
-# fleet's 120 W laptop or 45 W USB-PD charger at any threshold. The remedy is
-# enrolment (scripts/enroll_demo_devices.py), which gives each class a prototype
-# AND the power envelope observed on it — the independent absolute-watts channel
-# `_classify_device` demands before naming a device.
+# The recognition scope (config protonet.classes) is phone / laptop / bulb /
+# projector / fan. On the shipped UK-DALE registry that was 0/96: measured on
+# `data/real/cache/ukdale_windows_demo.npz`, the trained `laptop` prototype is
+# a 21 W netbook (p50) and `phone_charger` has ZERO windows above the 20 W
+# on-threshold, so the artifact cannot represent the demo fleet's 120 W laptop
+# or 45 W USB-PD charger at any threshold. `bulb` and `fan` had no prototype
+# at all. The remedy is enrolment (scripts/enroll_demo_devices.py), which
+# gives each class a prototype AND the power envelope observed on it — the
+# independent absolute-watts channel `_classify_device` demands before naming
+# a device.
 # ══════════════════════════════════════════════════════════════════════════
 
 # rated/var straight from backend/scripts/simulate_esp32.py:DEMO_DEVICES —
 # the generator the demo fleet actually publishes from.
 FLEET_PROFILES = {
-    "phone_charger":    (45.0, 15.0),
-    "monitor":          (35.0, 5.0),
+    "phone":            (45.0, 15.0),
     "laptop":           (120.0, 25.0),
+    "bulb":             (60.0, 4.0),
     "projector":        (300.0, 20.0),
+    "fan":              (75.0, 6.0),
     "desktop_computer": (250.0, 35.0),
 }
-REQUIRED_FOUR = ("phone_charger", "monitor", "laptop", "projector")
+REQUIRED_FIVE = ("phone", "laptop", "bulb", "projector", "fan")
 
 # Enrolment uses seeds 100..109 (scripts/enroll_demo_devices.ENROLL_SEED_BASE),
 # so 0..11 are genuinely held out and this is not a train-on-test result.
@@ -462,7 +470,7 @@ def _fleet_window(rated, var, seed, n=SEQ_LEN, on_fraction=0.8):
     return w
 
 
-class TestFourRequiredClassesAreRecognised:
+class TestFiveRequiredClassesAreRecognised:
     # The enrolled artifact is generated, not committed (the whole demo weights
     # directory is gitignored), so a checkout that has not run the enrolment step
     # skips these rather than reporting a red suite for a missing setup step.
@@ -476,12 +484,12 @@ class TestFourRequiredClassesAreRecognised:
         # If the demo profile ever loses `registry_path`, every assertion below
         # would silently be testing the shipped artifact instead.
         envelopes = pipeline.prototype_registry.envelopes
-        for cls in REQUIRED_FOUR:
+        for cls in REQUIRED_FIVE:
             assert cls in envelopes, (
                 f"{cls} has no power envelope — the demo profile is not pointing "
                 f"at an enrolled registry; run scripts/enroll_demo_devices.py")
 
-    @pytest.mark.parametrize("cls", REQUIRED_FOUR)
+    @pytest.mark.parametrize("cls", REQUIRED_FIVE)
     def test_required_class_is_named_on_held_out_windows(self, pipeline, cls):
         rated, var = FLEET_PROFILES[cls]
         got = [pipeline._classify_device(
@@ -493,7 +501,7 @@ class TestFourRequiredClassesAreRecognised:
         assert got.count(cls) == len(got), f"{cls}: got {got}"
 
     def test_confidence_clears_the_recognition_threshold(self, pipeline):
-        for cls in REQUIRED_FOUR:
+        for cls in REQUIRED_FIVE:
             rated, var = FLEET_PROFILES[cls]
             _, conf, _ = pipeline._classify_device(
                 f"node_{cls}", rated,

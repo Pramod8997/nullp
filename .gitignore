@@ -144,6 +144,8 @@ logs/
 rl_action_log.csv
 safety_events.log
 training_results/
+wandb/
+runs/
 
 # ── Firmware & Embedded (ESP32 / PlatformIO / CMake) ────────────────────────
 .pio/
@@ -207,6 +209,8 @@ $RECYCLE.BIN/
 core
 core.*
 *.core
+Screenshot*.png
+Screenshot from *.png
 
 # ── Environment & Secrets ───────────────────────────────────────────────────
 .env
@@ -236,7 +240,9 @@ id_rsa*
 .antigravity/
 .cursor/
 .claude/
+claude
 claude/
+**/claude
 **/claude/
 .copilot/
 .windsurf/
@@ -249,6 +255,8 @@ claude/
 .web-artifacts/
 graphify-out/
 **/graphify-out/
+.graphify*
+**/.graphify*
 .system_generated/
 
 # ── Ephemeral Checkpoints, Scripts & Prompts ────────────────────────────────
@@ -300,3 +308,5 @@ claude_debug/claude/
 
 # ESP32 per-node credentials (copy from secrets.h.example, never commit)
 firmware/esp32_node/include/secrets.h
+**/secrets.h
+!**/secrets.h.example
