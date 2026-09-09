@@ -6,6 +6,8 @@ import DeviceCards from '../components/DeviceCards';
 import SafetyAlerts from '../components/SafetyAlerts';
 import DigitalTwin from '../components/DigitalTwin';
 import SystemStatus from '../components/SystemStatus';
+import ApplianceTable from '../components/ApplianceTable';
+import AlertsPage from '../pages/AlertsPage/AlertsPage';
 
 // TEST 9A-1: Renders N cards for N devices
 test("renders one card per device", () => {
@@ -38,6 +40,37 @@ test("OFF device shows 0W", () => {
     expect(screen.getByText(/0.*W/i)).toBeInTheDocument();
 });
 
+// TEST 9A-5: PZEM telemetry (V/I/PF) line renders when present
+test("shows V/I/PF telemetry line when telemetry exists for device", () => {
+    const devices = { node_bench_agg: { power: 120, state: "ON", label: "Bench" } };
+    const telemetry = { node_bench_agg: { v: 230.4, i: 0.52, pf: 0.98, ts: 1 } };
+    render(<DeviceCards devices={devices} telemetry={telemetry} />);
+    expect(screen.getByTestId("device-telemetry-node_bench_agg").textContent).toContain("230.4V");
+    expect(screen.getByTestId("device-telemetry-node_bench_agg").textContent).toContain("0.52A");
+    expect(screen.getByTestId("device-telemetry-node_bench_agg").textContent).toContain("PF 0.98");
+});
+
+// TEST 9A-6: no telemetry line when none published
+test("hides telemetry line when no telemetry exists", () => {
+    const devices = { node_bench_agg: { power: 120, state: "ON", label: "Bench" } };
+    render(<DeviceCards devices={devices} telemetry={{}} />);
+    expect(screen.queryByTestId("device-telemetry-node_bench_agg")).not.toBeInTheDocument();
+});
+
+// TEST 9A-7: ApplianceTable renders confidence as a percentage
+test("appliance table shows confidence percentage when provided", () => {
+    const devices = { node_bench_agg: { power: 45, state: "ON", classification: "known:phone", confidence: 0.873 } };
+    render(<ApplianceTable devices={devices} />);
+    expect(screen.getByText("87%")).toBeInTheDocument();
+});
+
+// TEST 9A-8: ApplianceTable shows em-dash when confidence is missing
+test("appliance table shows placeholder when confidence missing", () => {
+    const devices = { node_bench_agg: { power: 45, state: "ON" } };
+    render(<ApplianceTable devices={devices} />);
+    expect(screen.getByText("—")).toBeInTheDocument();
+});
+
 // TEST 9B-1: Critical alert renders in red
 test("CRITICAL alert has critical styling", () => {
     const alerts = [{ id: 1, level: "CRITICAL", message: "Overcurrent", device: "node_kettle" }];
@@ -64,28 +97,39 @@ test("feed shows max 50 alerts", () => {
 
 // TEST 9C-1: PMV gauge at 0 shows center (neutral comfort)
 test("PMV gauge renders at center for PMV=0", () => {
-    render(<DigitalTwin pmv={0} ppd={5} rlLog={[]} unknownDevices={[]} />);
+    render(<DigitalTwin pmv={0} ppd={5} rlLog={[]} />);
     const gauge = screen.getByTestId("pmv-gauge");
     expect(gauge).toHaveAttribute("data-pmv", "0");
     expect(gauge.className).toMatch(/neutral|comfort/i);
 });
 
-// TEST 9C-2: LABEL_REQUEST prompt appears for unknown device
-test("shows label prompt for unknown device", () => {
-    const unknownDevices = [{ id: "esp32_mystery", requestId: "req_1" }];
-    render(<DigitalTwin pmv={0} ppd={5} rlLog={[]} unknownDevices={unknownDevices} />);
-    expect(screen.getByTestId("label-request-req_1")).toBeInTheDocument();
+// TEST 9C-2: LABEL_REQUEST event renders the wired label prompt (event-log card)
+test("shows label prompt for LABEL_REQUEST event", () => {
+    const events = [
+        { type: "LABEL_REQUEST", device_id: "esp32_mystery", message: "Unknown load detected", power: 45 },
+    ];
+    render(<DigitalTwin pmv={0} ppd={5} events={events} />);
+    expect(screen.getByPlaceholderText(/appliance name/i)).toBeInTheDocument();
 });
 
-// TEST 9C-3: Label prompt dismisses after user submission
-test("label prompt dismisses on submit", async () => {
-    const onLabel = vi.fn();
-    render(<DigitalTwin pmv={0} ppd={5} rlLog={[]} unknownDevices={[{id: "x", requestId: "r1"}]}
-                        onLabel={onLabel} />);
-    await userEvent.type(screen.getByRole("textbox"), "Dishwasher");
-    await userEvent.click(screen.getByText(/submit|confirm/i));
-    expect(onLabel).toHaveBeenCalledWith("r1", "Dishwasher");
-    await waitFor(() => expect(screen.queryByTestId("label-request-r1")).not.toBeInTheDocument());
+// TEST 9C-3: label submit posts to /api/submit-label and confirms enrollment
+test("label submit posts to API and confirms enrollment", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    vi.stubGlobal("fetch", fetchMock);
+    const segments = [Array.from({ length: 128 }, () => 45)];
+    const events = [
+        { type: "LABEL_REQUEST", device_id: "esp32_mystery", message: "Unknown load detected", power: 45, segments },
+    ];
+    render(<DigitalTwin pmv={0} ppd={5} events={events} />);
+    await userEvent.type(screen.getByPlaceholderText(/appliance name/i), "Kettle");
+    await userEvent.click(screen.getByText(/label device/i));
+    // Parent swaps the card for the confirmation line once onLabeled fires.
+    await waitFor(() => expect(screen.getByText(/Enrolled as "Kettle"/i)).toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/submit-label"),
+        expect.objectContaining({ method: "POST" })
+    );
+    vi.unstubAllGlobals();
 });
 
 // TEST 9D-1: Latency panel turns red when p95 > 200ms
@@ -106,4 +150,39 @@ test("latency panel shows green when p95 < 200ms", () => {
 test("shows disconnected banner on WS drop", () => {
     render(<SystemStatus wsConnected={false} latency={null} />);
     expect(screen.getByText(/disconnected/i)).toBeInTheDocument();
+});
+
+// TEST 9E-1: Breaker status derived from alerts — TRIPPED on SAFETY_CUTOFF
+test("breaker status shows TRIPPED when a cutoff alert exists", () => {
+    const alerts = [
+        { id: Date.now(), type: "SAFETY_CUTOFF", severity: "critical", device_id: "node_bench_agg",
+          message: "Critical power threshold breached — edge relay has been activated" },
+    ];
+    render(<AlertsPage alerts={alerts} />);
+    const breaker = screen.getByTestId("breaker-status");
+    expect(breaker.textContent).toMatch(/tripped/i);
+    expect(breaker.textContent).toMatch(/relay open/i);
+    expect(breaker.textContent).not.toMatch(/armed & nominal/i);
+});
+
+// TEST 9E-3: A cutoff alert OLDER than the 5-minute lockout leaves the
+// breaker Armed & Nominal — the lockout expired and the relay can be
+// re-energized, so a stale alert must not claim TRIPPED forever.
+test("breaker status resets after the lockout window expires", () => {
+    const alerts = [
+        { id: Date.now() - 6 * 60 * 1000, type: "SAFETY_CUTOFF", severity: "critical",
+          device_id: "node_bench_agg", message: "Critical power threshold breached" },
+    ];
+    render(<AlertsPage alerts={alerts} />);
+    expect(screen.getByTestId("breaker-status").textContent).toMatch(/armed & nominal/i);
+});
+
+// TEST 9E-2: Breaker status stays Armed without cutoff/overcurrent/arc alerts
+test("breaker status shows Armed & Nominal without trip alerts", () => {
+    const alerts = [
+        { id: 1, type: "SAFETY_WARNING", severity: "warning", device_id: "x",
+          message: "Power draw approaching limit on x" },
+    ];
+    render(<AlertsPage alerts={alerts} />);
+    expect(screen.getByTestId("breaker-status").textContent).toMatch(/armed & nominal/i);
 });

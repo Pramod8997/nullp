@@ -7,7 +7,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  ReferenceLine,
 } from 'recharts';
 import { useTheme } from '../contexts/ThemeContext';
 
@@ -91,19 +90,9 @@ const RealTimeChart = ({ data = [], devices = {} }) => {
           />
           <Tooltip content={<CustomTooltip />} isAnimationActive={false} />
 
-          {/* Safety threshold reference line */}
-          <ReferenceLine
-            y={1500}
-            stroke="#ef4444"
-            strokeDasharray="5 5"
-            strokeOpacity={0.7}
-            label={{
-              value: 'Safety Cutoff (1500W)',
-              fill: '#ef4444',
-              fontSize: 10,
-              position: 'insideTopRight',
-            }}
-          />
+          {/* No hardcoded safety-cutoff reference line: the backend does not
+              expose max_aggregate_wattage over WS/REST, and the demo/rig
+              limits (600W / 312.5W) differ from any fixed value drawn here. */}
 
           {/* Per-device lines */}
           {deviceIds.map((deviceId) => (

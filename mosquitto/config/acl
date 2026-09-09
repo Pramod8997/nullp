@@ -1,0 +1,28 @@
+# Mosquitto ACL — per-user topic grants (LAN threat model).
+#
+# Deployment notes (Gate 0):
+#   - The `esp32` user does NOT exist in the shipped passwd yet — it must be
+#     created at deployment time via `mosquitto_passwd -b mosquitto/config/passwd
+#     esp32 <secret>` (dedicated firmware credential; removes direct relay
+#     control from the shared pipeline credential). The firmware's secrets.h
+#     must carry the same pair.
+#   - `ems_api` exists in the passwd file but is UNUSED: docker-compose
+#     connects the API container as ems_pipeline. Left in place intentionally;
+#     if it is ever wired up, give it ems_pipeline's grants minus command writes.
+#     (Do NOT give it zero permissions silently — delete it instead.)
+
+user esp32
+topic read home/plug/+/command
+topic write home/sensor/+/power
+topic write home/sensor/+/telemetry
+topic write home/sensor/+/status
+topic write home/plug/+/ack
+
+user ems_pipeline
+topic read home/sensor/#
+topic read home/plug/+/ack
+topic read home/ml/label
+topic read $SYS/#
+topic write home/plug/+/command
+topic write home/ui/events
+topic write home/ml/label

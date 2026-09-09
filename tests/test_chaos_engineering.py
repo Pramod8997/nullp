@@ -264,7 +264,9 @@ async def test_time_jump_forward_1_hour(esp_node):
     esp_node.relay_locked = True
     esp_node.lock_start_time = time.time() - 3600
     esp_node.safety_lockout_seconds = 300
-    await esp_node.handle_mqtt_command("ON")
+    # Lockout expiry is evaluated by the core-1 loop tick (main.cpp:397-400),
+    # not by the MQTT command handler.
+    await esp_node.core1_telemetry_tick()
     assert esp_node.relay_locked is False
 
 def test_time_jump_backward_1_hour(esp_node):
@@ -283,7 +285,7 @@ async def test_lockout_timer_across_time_jump(esp_node):
     esp_node.relay_locked = True
     esp_node.lock_start_time = time.time() - 301
     esp_node.safety_lockout_seconds = 300
-    await esp_node.handle_mqtt_command("ON")
+    await esp_node.core1_telemetry_tick()  # expiry lives in the tick (main.cpp:397-400)
     assert not esp_node.relay_locked
 
 def test_telemetry_rate_limiter_clock_skew(esp_node):

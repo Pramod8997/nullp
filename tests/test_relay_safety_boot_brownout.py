@@ -79,7 +79,8 @@ def test_active_low_logic_correctness(node):
     the twin could not distinguish active-HIGH from active-LOW at all and this
     test — asserting only gpio18_relay_state — passed under either polarity.
     The locked HARDWARE_FINAL_SPEC.md pins RELAY_ACTIVE_LOW = false
-    (main.cpp:85): HIGH closes the relay, LOW opens it, Hi-Z opens it.
+    (the RELAY_ACTIVE_LOW constant in main.cpp): HIGH closes the relay, LOW
+    opens it, Hi-Z opens it.
     """
     # Default build (spec-correct, active-HIGH): level follows the logical state.
     assert node.relay_active_low is False
@@ -98,7 +99,7 @@ def test_active_low_logic_correctness(node):
 
 
 def test_default_polarity_matches_locked_firmware_constant():
-    """The twin's default must track RELAY_ACTIVE_LOW = false at main.cpp:85."""
+    """The twin's default must track the RELAY_ACTIVE_LOW constant in main.cpp."""
     import re, pathlib
     src = pathlib.Path("firmware/esp32_node/src/main.cpp").read_text()
     m = re.search(r'const\s+bool\s+RELAY_ACTIVE_LOW\s*=\s*(true|false)\s*;', src)
@@ -106,6 +107,22 @@ def test_default_polarity_matches_locked_firmware_constant():
     firmware_active_low = (m.group(1) == "true")
     assert ESP32FirmwareNode(device_id="polarity_probe").relay_active_low is firmware_active_low, (
         "twin default polarity has drifted from the firmware constant"
+    )
+
+
+def test_default_rated_watts_matches_locked_firmware_constant():
+    """The twin's ctor default must track the RATED_WATTS constant in main.cpp (250.0).
+
+    Guards the Run 0.2 re-anchor: the twin defaulted to 200 W, so every
+    default-constructed node tripped overcurrent at 250 W instead of the
+    firmware's 312.5 W (125% of 250).
+    """
+    import re, pathlib
+    src = pathlib.Path("firmware/esp32_node/src/main.cpp").read_text()
+    m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', src)
+    assert m, "RATED_WATTS not found in firmware"
+    assert ESP32FirmwareNode(device_id="rated_probe").rated_watts == float(m.group(1)), (
+        "twin default rated_watts has drifted from the firmware constant"
     )
 
 
@@ -123,7 +140,8 @@ def test_overcurrent_is_unconditional_during_cold_baseline(node):
 
     Regression: the twin gated overcurrent on `is_normal_inrush`, so a fresh node
     (baseline_avg = 0W, last_watts = 0W) tolerated 280W on a 200W-rated line
-    indefinitely. main.cpp:207-217 makes this path unconditional by design
+    indefinitely. The SafetySamplingTask() overcurrent cutoff in main.cpp
+    makes this path unconditional by design
     (HARDWARE_FINAL_SPEC.md D11'), so the twin was weaker than the firmware.
     """
     node.set_relay(True)
@@ -132,6 +150,10 @@ def test_overcurrent_is_unconditional_during_cold_baseline(node):
     node.core0_safety_step(sim_dt=0.1)
     assert node.gpio18_relay_state is False, "overcurrent must not be gated by inrush suppression"
     assert node.gpio18_level is False, "pin must be driven to the de-energising level"
+    # Core 0 opens the relay immediately; the core-1 loop takes the lockout
+    # when it consumes the overcurrent latch (the core-0 cutoff + core-1
+    # lockout blocks in main.cpp).
+    asyncio.run(node.core1_telemetry_tick())
     assert node.relay_locked is True
 
 
@@ -149,7 +171,8 @@ def test_inrush_suppression_still_protects_dpdt_channel():
 
 
 def test_nan_pzem_read_does_not_poison_safety_state(node):
-    """An invalid PZEM read must skip the cycle, as main.cpp:167 does.
+    """An invalid PZEM read must skip the cycle, as the isnan() guard in
+    SafetySamplingTask() in main.cpp does.
 
     Regression: the twin latched NaN into _last_watts and _baseline_ring —
     permanently forcing is_normal_inrush False — and pushed NaN into the shared
@@ -266,12 +289,18 @@ def trigger_arc_fault(node):
 
 def test_lockout_after_arc_fault(node):
     trigger_arc_fault(node)
+    # The lockout is taken by the core-1 tick consuming the arc-fault flag
+    # (the core-1 arc-fault acknowledgment block in main.cpp); core 0 only
+    # opens the relay.
+    asyncio.run(node.core1_telemetry_tick())
     assert node.relay_locked is True
     assert node.gpio18_relay_state is False
 
 @pytest.mark.asyncio
 async def test_lockout_rejects_on_command(node, mqtt_client):
     trigger_arc_fault(node)
+    # Core-1 acknowledgment takes the lockout (the arc-fault latch block).
+    await node.core1_telemetry_tick()
     await node.handle_mqtt_command("ON")
     assert node.gpio18_relay_state is False
     acks = await mqtt_client.get_published(node.topic_ack)
@@ -289,36 +318,45 @@ async def test_lockout_allows_off_command(node, mqtt_client):
 @pytest.mark.asyncio
 async def test_lockout_expires_after_300s(node):
     trigger_arc_fault(node)
+    await node.core1_telemetry_tick()   # lockout taken (arc-fault latch block)
     assert node.relay_locked is True
     node.lock_start_time = time.time() - 301.0
-    await node.handle_mqtt_command("ON")
+    # Lockout expiry is evaluated by the core-1 loop tick (the
+    # SAFETY_LOCKOUT_MS expiry check),
+    # not by the MQTT command handler.
+    await node.core1_telemetry_tick()
     assert node.relay_locked is False
+    await node.handle_mqtt_command("ON")
     assert node.gpio18_relay_state is True
 
 @pytest.mark.asyncio
 async def test_lockout_resets_on_new_fault(node):
     trigger_arc_fault(node)
+    await node.core1_telemetry_tick()   # lockout taken (arc-fault latch block)
     first_lock_time = node.lock_start_time
-    
+
     # Fast forward 100s
     time.sleep(0.01)
-    
+
     # Reset lockout and bypass inrush to trigger another fault
     node.relay_locked = False
     node.set_relay(True)
     node.pzem.set_load(100.0)
     for _ in range(5):
         node.core0_safety_step(sim_dt=0.1)
-        
+
     # Trigger another fault (overcurrent this time)
     node.pzem.set_load(node.rated_watts * 1.5)
     node.core0_safety_step(sim_dt=0.1)
-    
+    # Core 1 re-takes the lockout with a fresh timer (the overcurrent latch block).
+    await node.core1_telemetry_tick()
+
     assert node.lock_start_time > first_lock_time
 
 @pytest.mark.asyncio
 async def test_rapid_fault_lockout_chaining(node):
     trigger_arc_fault(node)
+    await node.core1_telemetry_tick()   # lockout taken (arc-fault latch block)
     for _ in range(3):
         node.pzem.set_load(3000.0)
         node.core0_safety_step(sim_dt=0.1)
@@ -327,6 +365,7 @@ async def test_rapid_fault_lockout_chaining(node):
 @pytest.mark.asyncio
 async def test_lockout_survives_mqtt_reconnect(node, mqtt_client):
     trigger_arc_fault(node)
+    await node.core1_telemetry_tick()   # lockout taken (arc-fault latch block)
     # Simulate disconnect and reconnect
     await mqtt_client.disconnect()
     await mqtt_client.reconnect()
@@ -360,6 +399,10 @@ async def test_core0_core1_relay_race(node):
     
     async def race():
         node.core0_safety_step(sim_dt=0.1)
+        # The core-1 loop consumes the trip latch and takes the lockout
+        # (the latch-consumption blocks in the core-1 loop) before the next
+        # command can be honored.
+        await node.core1_telemetry_tick()
         await node.handle_mqtt_command("ON")
 
     await race()
@@ -389,6 +432,8 @@ async def test_relay_command_during_overcurrent_cutoff(node):
         
     node.pzem.set_load(node.rated_watts * 2.0) # overcurrent
     node.core0_safety_step(sim_dt=0.1)
+    # Core-1 acknowledgment takes the lockout (the overcurrent latch block).
+    await node.core1_telemetry_tick()
     assert node.relay_locked is True
     await node.handle_mqtt_command("ON")
     assert node.gpio18_relay_state is False
@@ -432,6 +477,7 @@ def test_relay_with_negative_power(node):
 @pytest.mark.asyncio
 async def test_millis_overflow_handling(node):
     trigger_arc_fault(node)
+    await node.core1_telemetry_tick()   # lockout taken (arc-fault latch block)
     # Simulate millis overflow (approx 49 days)
     # Python time.time() doesn't overflow like ESP32 millis(), but we test negative diff
     node.lock_start_time = float('inf')
@@ -442,3 +488,50 @@ def test_relay_100000_cycles_endurance(node):
     for i in range(100000):
         node.set_relay(i % 2 == 0)
     assert node.gpio18_relay_state is False
+
+@pytest.mark.asyncio
+async def test_core1_status_lifecycle_and_server_timeout(mqtt_client):
+    """Core 1 must publish the firmware's status strings.
+
+    ONLINE once on the first tick (the retained publish in reconnectMQTT());
+    OFFLINE via announce_offline() (the LWT counterpart, the client.connect()
+    last-will in reconnectMQTT()); SERVER_TIMEOUT per the firmware's exact
+    semantics: lastServerHB is armed at MQTT CONNECT (the twin's ONLINE
+    announcement), so a connected-but-commandless node fires at t+30 s and
+    REPUBLISHES every 30 s while starved (the lastTimeoutLog gate in loop()
+    — not once per episode). A command refreshes the heartbeat and stops
+    the timeouts (callback() sets lastServerHB in main.cpp).
+    """
+    n = ESP32FirmwareNode(device_id=DEVICE_ID, rated_watts=RATED_WATTS,
+                          mqtt_publish_fn=mqtt_client.publish)
+
+    def statuses():
+        return [p for t, p in mqtt_client.published_messages if t == n.topic_status]
+
+    await n.core1_telemetry_tick(force_publish=True)
+    assert statuses() == ["ONLINE"], "first tick must announce ONLINE exactly once"
+
+    # Connected-but-commandless (the heartbeat was armed by the ONLINE
+    # announcement, like main.cpp arms it at connect): starved past 30 s
+    # -> SERVER_TIMEOUT fires.
+    n.last_server_hb = time.time() - 31.0
+    await n.core1_telemetry_tick(force_publish=True)
+    assert statuses().count("SERVER_TIMEOUT") == 1
+    # Still starved -> republished every 30 s (the firmware's lastTimeoutLog
+    # gate), not once per episode. The gate is wall-clock (millis()-based in
+    # the firmware), so the test ages BOTH the heartbeat and the republish
+    # gate — the twin's ticks here run microseconds apart.
+    n.last_server_hb = time.time() - 65.0
+    n._last_server_timeout_log = time.time() - 31.0
+    await n.core1_telemetry_tick(force_publish=True)
+    assert statuses().count("SERVER_TIMEOUT") == 2
+
+    # A server command refreshes the heartbeat -> the watchdog goes quiet.
+    n.last_server_hb = time.time()
+    await n.core1_telemetry_tick(force_publish=True)
+    assert statuses().count("SERVER_TIMEOUT") == 2
+    await n.core1_telemetry_tick(force_publish=True)
+    assert statuses().count("SERVER_TIMEOUT") == 2
+
+    await n.announce_offline()
+    assert statuses()[-1] == "OFFLINE"

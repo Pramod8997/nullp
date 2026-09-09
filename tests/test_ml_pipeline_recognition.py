@@ -26,6 +26,16 @@ all in how the real weights were (not) consulted, so a mocked registry would
 reproduce none of them. Weights are copied to a tmpdir because
 `handle_label_submitted` persists the registry, and enrolling a class must not
 mutate the checked-in artefact.
+
+Scope and honest criteria (2026-09-10): like the steady-window e2e, these
+tests exercise the classification gates on windows handed straight to
+`_classify_device` / the registry — they do not route plug-in events through
+`NILMTransientDetector.push()`, so they say nothing about the transient path
+(trigger-window skew, loaded-socket C1, unplug C9). That coverage lives in
+tests/test_detector_path_e2e.py. A confidence of ~1.0 on an enrolled class is
+the single-envelope-survivor renormalisation artifact, not P(correct); the
+meaningful gates are band-correct classification of the drawn watts and zero
+confidently-wrong answers.
 """
 from __future__ import annotations
 

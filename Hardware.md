@@ -4,7 +4,7 @@
 > **Authoritative spec (BOM, rationale, bring-up):** [`claude_debug/HARDWARE_FINAL_SPEC.md`](./claude_debug/HARDWARE_FINAL_SPEC.md)
 > This file is the pinout quick reference only. Where it disagrees with the spec, the spec wins.
 >
-> **Build class:** zero soldering, integrated modules only, ≤₹3,000. **No firmware change is required** — `main.cpp:59-69` is already correct for this wiring.
+> **Build class:** zero soldering, integrated modules only, ≤₹3,000. **No firmware change is required** — the `RELAY_PIN`/`PZEM_RX_PIN`/`PZEM_TX_PIN` constants in `main.cpp` are already correct for this wiring.
 
 * **PZEM-004T v3.0 Metering UART** — **10 A direct-connect (shunt) variant, not the 100 A CT variant:**
   * ESP32 GPIO 16 (RX2)  <──  PZEM-004T TX  ⚠️ **measure TX idle voltage before connecting** — 5 V push-pull variants exceed the ESP32's 3.6 V absolute maximum. ≈3.3 V or floating → direct (10 kΩ pull-up to 3.3 V if floating); ≈5 V → 1 kΩ/2 kΩ divider
@@ -16,8 +16,8 @@
   * ESP32 GPIO 18 ──────────> Relay Module **IN**   ← direct, no MOSFET, no series resistor
   * Relay **IN** ──[ 100kΩ ]──> GND  ← **mandatory pull-down**: GPIO 18 is Hi-Z during reset/boot, and without this the relay state is undefined. Resistor legs go straight into the screw terminals — no soldering
   * Relay VCC ──> +5 V · Relay GND ──> shared common ground with the ESP32
-  * **Net polarity at GPIO 18 is ACTIVE-HIGH** (`RELAY_ACTIVE_LOW = false`, `main.cpp:67`). With a high-trigger input there are **zero inversions** in the chain: HIGH = closed, LOW = open, Hi-Z = open (fail-safe). GPIO 18 sources ~2.1 mA into the opto LED.
-  * ⚠️ **Why not a low-trigger module:** at IN = 3.3 V a 5 V-referenced opto still passes ~0.5 mA — not a guaranteed OFF; the relay may fail to release or chatter. If you can only get a low-trigger board, set module VCC = 3.3 V with JD-VCC on 5 V, flip `main.cpp:67` to `true`, and move the 100 kΩ to a pull-**up**. Re-verify at Stage 2.
+  * **Net polarity at GPIO 18 is ACTIVE-HIGH** (`RELAY_ACTIVE_LOW = false` in `main.cpp`). With a high-trigger input there are **zero inversions** in the chain: HIGH = closed, LOW = open, Hi-Z = open (fail-safe). GPIO 18 sources ~2.1 mA into the opto LED.
+  * ⚠️ **Why not a low-trigger module:** at IN = 3.3 V a 5 V-referenced opto still passes ~0.5 mA — not a guaranteed OFF; the relay may fail to release or chatter. If you can only get a low-trigger board, set module VCC = 3.3 V with JD-VCC on 5 V, flip the `RELAY_ACTIVE_LOW` constant in `main.cpp` to `true`, and move the 100 kΩ to a pull-**up**. Re-verify at Stage 2.
   * RC snubber (100 Ω 2 W flameproof + 0.1 µF 275 VAC Class-X2 across COM–NO): **optional** for this load set — no inductive load remains in scope. Reinstate for any motor/fan/pump/transformer load.
 * **Wiring interface:**
   * ESP32 plugs into a **30-pin screw-terminal expansion shield** — match pin count *and* board width. Pins are only broken out; no remapping.

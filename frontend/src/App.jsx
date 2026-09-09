@@ -30,10 +30,10 @@ function Dashboard() {
   const [analytics, setAnalytics] = useState({});
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [pipelineStatus, setPipelineStatus] = useState('initializing');
-  const [pendingUnknowns, setPendingUnknowns] = useState([]);
   const [latencyStats, setLatencyStats] = useState({ avg_ms: 0, max_ms: 0, p95_ms: 0 });
   const [latencyHistory, setLatencyHistory] = useState([]);
   const [isArcFaultActive, setIsArcFaultActive] = useState(false);
+  const [telemetry, setTelemetry] = useState({});
 
   const wsRef = useRef(null);
   const reconnectDelay = useRef(1000);
@@ -113,11 +113,22 @@ function Dashboard() {
               power: data.power,
               state: data.state,
               classification: data.classification,
+              confidence: data.confidence,
               pmv: data.pmv,
               last_seen: data.timestamp,
             },
           }));
           if (data.pmv !== undefined) setPmvScore(data.pmv);
+          break;
+
+        // Real PZEM electrical telemetry (voltage / current / power factor)
+        case 'TELEMETRY':
+          if (data.device_id) {
+            setTelemetry((prev) => ({
+              ...prev,
+              [data.device_id]: { v: data.v, i: data.i, pf: data.pf, ts: Date.now() },
+            }));
+          }
           break;
 
         case 'safety_alert':
@@ -126,6 +137,7 @@ function Dashboard() {
             [
               {
                 id: Date.now() + Math.random(),
+                type: data.type,
                 severity: data.severity || 'critical',
                 device_id: data.device_id || '',
                 message: data.message,
@@ -149,6 +161,7 @@ function Dashboard() {
             [
               {
                 id: Date.now() + Math.random(),
+                type: data.type,
                 severity: 'warning',
                 device_id: data.device_id,
                 message: data.message,
@@ -168,10 +181,6 @@ function Dashboard() {
 
         case 'LABEL_REQUEST':
           setTwinEvents((prev) => [data, ...prev].slice(0, 30));
-          setPendingUnknowns((prev) => {
-            const filtered = prev.filter((u) => u.device_id !== data.device_id);
-            return [data, ...filtered].slice(0, 20);
-          });
           break;
 
         case 'LOW_CONFIDENCE':
@@ -183,6 +192,7 @@ function Dashboard() {
             [
               {
                 id: Date.now() + Math.random(),
+                type: data.type,
                 severity: 'warning',
                 device_id: data.device_id || '',
                 message: data.message,
@@ -306,7 +316,7 @@ function Dashboard() {
   const renderPage = () => {
     switch (activeTab) {
       case 'overview':
-        return <OverviewPage devices={devices} powerHistory={powerHistory} />;
+        return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} />;
 
       case 'appliances':
       case 'devices':
@@ -333,7 +343,7 @@ function Dashboard() {
             twinEvents={twinEvents}
             pmvScore={pmvScore}
             phantomData={phantomData}
-            pendingUnknowns={pendingUnknowns}
+            telemetry={telemetry}
           />
         );
 
@@ -347,7 +357,7 @@ function Dashboard() {
         return <SettingsPage />;
 
       default:
-        return <OverviewPage devices={devices} powerHistory={powerHistory} />;
+        return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} />;
     }
   };
 

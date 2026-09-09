@@ -78,8 +78,14 @@ const EnergyChart = ({ powerHistory = [] }) => {
             <h3 className="text-sm font-bold text-gray-900 dark:text-white uppercase tracking-wider">
               Energy Consumption (kWh)
             </h3>
-            <p className="text-xs text-gray-500 dark:text-gray-400">Historical vs current period</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">Typical daily load profile</p>
           </div>
+          <span
+            title="This chart is an illustrative usage profile, not live or historical measurements from this rig."
+            className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 shrink-0"
+          >
+            Illustrative
+          </span>
         </div>
 
         {/* Range Buttons */}

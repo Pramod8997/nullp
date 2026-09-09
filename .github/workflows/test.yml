@@ -27,9 +27,10 @@ jobs:
       - name: Enforce safety module 100% branch coverage
         run: |
           pytest tests/test_safety.py -v \
-            --cov=src/pipeline/safety \
+            --cov=src \
             --cov-branch \
-            --cov-fail-under=100
+            --cov-report=term-missing
+          coverage report --include="*/pipeline/safety.py" --fail-under=100
       - uses: actions/upload-artifact@v4
         with: { name: coverage-xml, path: coverage.xml }
 

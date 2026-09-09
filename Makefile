@@ -16,7 +16,8 @@ endif
 PWD := $(shell pwd)
 
 .PHONY: help install install-backend install-frontend \
-        run dev dev-backend dev-frontend dev-pipeline dev-sim \
+        run dev dev-backend dev-frontend dev-pipeline dev-sim demo \
+        hil-test stress-test sim-test \
         generate_data train_all train_synthetic \
         test test-backend test-frontend test-all test-safety test-e2e \
         lint lint-frontend build-frontend \
@@ -44,7 +45,7 @@ help:
 	@echo ""
 	@echo "  Data & Model Training:"
 	@echo "    make generate_data     - Generate synthetic & mock UK-DALE data"
-	@echo "    make train_all         - Train ProtoNet + OpenMax on all datasets (CUDA)"
+	@echo "    make train_all         - Train ProtoNet + OpenMax on all datasets (ukdale redd synd)"
 	@echo "    make train_synthetic   - Train models on synthetic dataset"
 	@echo ""
 	@echo "  Testing & Quality:"
@@ -123,10 +124,10 @@ generate_data:
 	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/generate_mock_ukdale.py
 
 train_all:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --datasets synthetic ukdale redd --episodes 2000 --cuda
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --sources ukdale redd synd --episodes 2000
 
 train_synthetic:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --datasets synthetic --episodes 2000
+	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --sources synd --episodes 2000
 
 # ── Testing ─────────────────────────────────────────────────────────────────
 test: test-backend test-frontend

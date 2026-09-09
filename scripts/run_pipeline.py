@@ -201,10 +201,19 @@ class EMSOrchestrator:
 
         # ── Auxiliary Pipeline Components ──
         self.env = DigitalTwinEnv()
-        self.phantom_tracker = PhantomTracker()
+        # Config-read so a profile can size the phantom channel for its own
+        # loads. Default 15 W keeps a 5-12 W LED bulb tracked — such loads
+        # never cross the 20 W transient threshold, so the no-transient
+        # branch below is the only path that ever calls track() for them.
+        self.phantom_tracker = PhantomTracker(
+            baseline_threshold_watts=self.config.get("phantom", {}).get(
+                "baseline_threshold_watts", 15.0)
+        )
         self.watchdog = SoftAnomalyWatchdog()
+        # INR/kWh (India) — the dashboard renders ₹. The old hardcoded 0.15
+        # was ~40x understated. ToU pricing used by the RL agent is separate.
         self.analytics = AnalyticsEngine(
-            cost_per_kwh=0.15  # Fallback; ToU pricing used by RL agent
+            cost_per_kwh=self.config.get("analytics", {}).get("cost_per_kwh", 8.0)
         )
         self.failure_matrix = FailureMatrix()
         self.mode_classifier = ModeClassifier()
@@ -277,8 +286,13 @@ class EMSOrchestrator:
         # Rolling windows for CNN input (per device) — legacy fallback
         self.power_windows: Dict[str, deque] = {}
 
-        # ── RL Agent (reads config internally) ──
-        self.agent = TabularQLearningAgent()
+        # ── RL Agent ──
+        # Run 0.8: the agent must see THIS orchestrator's config. Constructed
+        # bare it always loaded config/config.yaml, so no --config profile key
+        # (e.g. devices.node_bench_agg.tier0, rl.cooldown_seconds) could ever
+        # reach it — and its exploration could open the physical relay
+        # uncommanded. All profile keys are .get()-read by the ctor.
+        self.agent = TabularQLearningAgent(config=self.config)
 
         # ── CSV Fallback Writer (§3.2 fix) ──
         self.csv_fallback_path = self.config.get('database', {}).get(
@@ -290,6 +304,10 @@ class EMSOrchestrator:
         self.device_classifications: Dict[str, str] = {}
         self.action_cooldowns: Dict[str, float] = {}
         self.last_analytics_broadcast = 0.0
+        # Latest PZEM electrical-quality frame per device (v/i/w/pf), from
+        # home/sensor/+/telemetry. Display-only: classification reads the
+        # /power topic, so this never feeds the ML path.
+        self.device_telemetry: Dict[str, Dict[str, float]] = {}
         self._running = False
         self._internal_temp = 22.0  # Indoor temp for digital twin
 
@@ -310,6 +328,37 @@ class EMSOrchestrator:
 
         # Fix: Keep CNN active for N ticks after transient to feed DeltaStability OpenMax
         self.cnn_active_ticks: Dict[str, int] = {}
+
+        # ── Run 3 (WS-D): delta-window overlap layer ──
+        # At a plug-in transient, push() returns the last 128 samples ENDING at
+        # the detection sample — 97-99% PRE-event data. On an idle socket that
+        # is harmless (steady_w is decided by the few post-event samples), but
+        # on a socket already carrying a load the window's steady_w is the OLD
+        # load's level and the old load is named at confidence ~1.0 (audit C1,
+        # measured 10/10: 60 W running + phone plugs in → "bulb" @ 1.000). The
+        # delta layer classifies the CHANGE instead — (steady-after −
+        # steady-before) once post-event power is stable — through the same
+        # envelope-gated `_classify_device` path, with the delta as the
+        # window's effective steady level. Opt-in via `preprocessing:
+        # delta_overlap` (true in the demo + hardware profiles), so the pure
+        # window behaviour remains a config flip away.
+        pre_cfg = self.config.get("preprocessing", {}) \
+            if isinstance(self.config.get("preprocessing"), dict) else {}
+        self._delta_overlap = bool(pre_cfg.get("delta_overlap", False))
+        self._delta_min_baseline_w = float(pre_cfg.get("delta_min_baseline_w", 20.0))
+        self._delta_stability_samples = int(pre_cfg.get("delta_stability_samples", 5))
+        # Last 30 raw samples per device — the pre-event level a transient
+        # fires on. Appended AFTER push() in the handler, so at the fire tick
+        # this holds only pre-event samples (minus ≤4 detection-lag ticks,
+        # which the 30-sample median absorbs).
+        self._power_history: Dict[str, deque] = {}
+        # Armed delta events: device_id -> {"pre": <pre-event steady W>,
+        # "post": [<raw watts since the fire>]}. Popped when resolved.
+        self._delta_pending: Dict[str, Dict] = {}
+        # How the device's current classification was produced: "window" or
+        # "delta". Reported on DEVICE_STATUS / LABEL_REQUEST so the dashboard
+        # (and tests) can tell the two paths apart.
+        self._classify_methods: Dict[str, str] = {}
 
 
     def _resolve_registry_path(self) -> str:
@@ -909,6 +958,40 @@ class EMSOrchestrator:
                 })
                 return
 
+            # PZEM electrical-quality frame {"v","i","w","pf"} from
+            # home/sensor/+/telemetry. Display-only (V/I/PF on the dashboard);
+            # classification keeps reading the /power topic, so this never
+            # feeds the ML path. Bad payloads are dropped at debug level.
+            if topic.endswith("/telemetry"):
+                try:
+                    frame = json.loads(payload_str)
+                    vals = {k: float(frame[k]) for k in ("v", "i", "w", "pf")}
+                    # json.loads accepts NaN/Infinity literals — reject them
+                    # before they reach the WS broadcast (same contract as
+                    # the /power path).
+                    if not all(math.isfinite(x) for x in vals.values()):
+                        logger.debug(
+                            f"Non-finite telemetry on {topic}: {payload_str!r}")
+                        return
+                    self.device_telemetry[device_id] = vals
+                except Exception as e:
+                    logger.debug(
+                        f"Unparseable telemetry on {topic}: {payload_str!r} ({e})")
+                    return
+                # Telemetry publishers are full devices: keep them in the
+                # eviction index (and fresh) so device_telemetry cannot grow
+                # unbounded on topic floods.
+                self._device_last_seen[device_id] = time.time()
+                latest = self.device_telemetry[device_id]
+                await self._broadcast_event({
+                    "type": "TELEMETRY",
+                    "device_id": device_id,
+                    "v": latest["v"],
+                    "i": latest["i"],
+                    "pf": latest["pf"],
+                })
+                return
+
             # Bug 3.1 fix: Handle label submissions via MQTT
             # (bridging REST API → MQTT → pipeline for ProtoNet registry updates)
             if "/label" in topic:
@@ -945,7 +1028,8 @@ class EMSOrchestrator:
 
             # Fix: Sanitize NaN/Inf payloads to prevent ML embedding corruption
             # and SQLite data poisoning from faulty sensors
-            import math
+            # (math is imported at module level; a function-local import here
+            # would make `math` an unbound local for the whole handler.)
             if math.isnan(power_watts) or math.isinf(power_watts):
                 logger.warning(f"🚫 Rejected invalid payload on {topic}: {payload_str} (NaN/Inf)")
                 return
@@ -1007,10 +1091,42 @@ class EMSOrchestrator:
 
             is_transient, filtered_segment = self.nilm_detectors[device_id].push(power_watts)
 
-            # Fix: Keep CNN active for 5 ticks after a transient to feed the 
+            # Fix: Keep CNN active for 5 ticks after a transient to feed the
             # DeltaStabilityAnalyzer which requires min_occurrences=3
             if is_transient:
                 self.cnn_active_ticks[device_id] = 5
+
+            # ══════════════════════════════════════════════════════════
+            # STEP 1.6: DELTA-WINDOW OVERLAP LAYER (Run 3 / WS-D)
+            # On a non-idle baseline, arm a delta event at the transient and
+            # classify (steady-after − steady-before) once post-event power is
+            # stable, instead of the pre-event-dominated window. Idle sockets
+            # (pre-event steady < delta_min_baseline_w) never arm — the
+            # proven sequential window path is untouched underneath.
+            # ══════════════════════════════════════════════════════════
+            history = self._power_history.setdefault(device_id, deque(maxlen=30))
+            if is_transient and self._delta_overlap:
+                # steady_w of the pre-event history: median of samples > 20 W,
+                # 0.0 on an idle socket — the same definition
+                # heuristic_fallback.extract_features uses for the window, so
+                # pre-level and window-level are directly comparable.
+                pre_steady = float(
+                    self.heuristic_clf.extract_features(
+                        np.asarray(history, dtype=np.float32)
+                    ).get("steady_w", 0.0) or 0.0
+                )
+                if pre_steady >= self._delta_min_baseline_w:
+                    self._delta_pending[device_id] = {"pre": pre_steady, "post": []}
+                    # Reuse the cnn_active_ticks burst, extended to cover the
+                    # post-event stability wait (the detector's 5 s cooldown
+                    # can re-fire the same step once; a re-arm simply restarts
+                    # the wait and re-derives the same delta).
+                    self.cnn_active_ticks[device_id] = max(
+                        5, self._delta_stability_samples + 2)
+            delta_pending = self._delta_pending.get(device_id)
+            if delta_pending is not None:
+                delta_pending["post"].append(power_watts)
+            history.append(power_watts)
                 
             cnn_should_run = is_transient or self.cnn_active_ticks.get(device_id, 0) > 0
             if not is_transient and self.cnn_active_ticks.get(device_id, 0) > 0:
@@ -1028,6 +1144,14 @@ class EMSOrchestrator:
                 # No transient detected — still update device state tracking
                 # and broadcast status, but skip heavy CNN classification
                 self.device_states[device_id] = 1 if power_watts > 10 else 0
+                # Sub-transient trickle loads (e.g. a 9 W LED bulb) never
+                # cross the 20 W transient threshold, so they never reach the
+                # classified branch's track() call below — feed the phantom
+                # channel from here too or they stay invisible.
+                self.phantom_tracker.track(
+                    device_id, power_watts,
+                    self.device_states.get(device_id, 0) == 0
+                )
                 class_name = self.device_classifications.get(device_id, "pending")
                 # Bug 1.6 fix: Carry over last known confidence during steady-state
                 # ticks instead of forcing 0.0 (which starves the entire pipeline)
@@ -1038,11 +1162,100 @@ class EMSOrchestrator:
                 # STEP 2: CNN / PROTONET + OPENMAX CLASSIFICATION
                 # (only on transient events — §2.1 fix)
                 # ══════════════════════════════════════════════════════
-                class_name, confidence, distances = self._classify_device(
-                    device_id, power_watts, filtered_segment=filtered_segment
-                )
-                # Bug 1.6 fix: Cache the confidence for steady-state carry-over
-                self.last_known_confidences[device_id] = confidence
+                if (delta_pending is not None
+                        and len(delta_pending["post"]) >= self._delta_stability_samples):
+                    # ── Run 3: post-event power is stable — classify the
+                    # delta through the same envelope-gated path, with the
+                    # delta as the window's effective steady level.
+                    # Stability is a flatness check, not a mere sample count:
+                    # a slow SMPS soft-start ramp must not resolve mid-ramp
+                    # with a partial delta (which would confidently name the
+                    # intermediate level). While the window is still ramping,
+                    # extend the classification burst (bounded) and wait.
+                    post_arr = np.asarray(
+                        delta_pending["post"], dtype=np.float32)
+                    window = post_arr[-self._delta_stability_samples:]
+                    level = float(window.mean())
+                    spread = float(window.max() - window.min())
+                    flat_tol = max(15.0, 0.1 * abs(level))
+                    if (spread > flat_tol
+                            and len(delta_pending["post"]) < 30):
+                        # Still ramping: keep the burst alive (cap 30 ticks)
+                        # so the resolve happens when the load settles. Carry
+                        # the last known verdict meanwhile (same semantics as
+                        # the waiting branch below).
+                        self.cnn_active_ticks[device_id] = max(
+                            self.cnn_active_ticks.get(device_id, 0), 1)
+                        cnn_should_run = True
+                        filtered_segment = None
+                        class_name = self.device_classifications.get(device_id, "pending")
+                        confidence = self.last_known_confidences.get(device_id, 0.0)
+                        distances = {}
+                    else:
+                        post_steady = float(
+                            self.heuristic_clf.extract_features(
+                                np.asarray(delta_pending["post"],
+                                           dtype=np.float32)
+                            ).get("steady_w", 0.0) or 0.0
+                        )
+                        delta_w = post_steady - delta_pending["pre"]
+                        self._delta_pending.pop(device_id, None)
+                        # The event is decided: end the post-transient burst
+                        # so the trailing ticks cannot re-classify the (still
+                        # pre-event-dominated) window over this verdict.
+                        self.cnn_active_ticks[device_id] = 0
+                        if delta_w >= self.heuristic_clf.on_threshold_w:
+                            # Baseline handoff (added-load resolves only): the
+                            # post level becomes the next event's pre level, so
+                            # a closely-spaced second plug-in is measured
+                            # against the NEW level, not the stale pre-first-
+                            # event one (cross-review RISK: 6 s spacing
+                            # previously derived a 165 W "delta" from a 60 W
+                            # baseline). NOT done for unplug/step-down — there
+                            # the low post samples must NOT become the
+                            # baseline, or the cooldown re-fire of the same
+                            # step sees an idle socket and the window path
+                            # re-broadcasts the stale pre-event verdict (the
+                            # C9 bug, resurrected).
+                            history.clear()
+                            history.extend(delta_pending["post"])
+                            delta_segment = np.full(self.seq_len, delta_w,
+                                                    dtype=np.float32)
+                            class_name, confidence, distances = self._classify_device(
+                                device_id, delta_w, filtered_segment=delta_segment)
+                            self._classify_methods[device_id] = "delta"
+                            self.last_known_confidences[device_id] = confidence
+                            # A dead-zone delta returns UNRECOGNISED: feed the
+                            # unknown flow the delta signature (what was added),
+                            # not the pre-event-dominated window (what was
+                            # already running).
+                            filtered_segment = delta_segment
+                        else:
+                            # Unplug / step-down, or a delta below the on-threshold
+                            # (e.g. the detector's 5 s cooldown re-firing the SAME
+                            # step ~5 s later, whose measured delta is pure noise):
+                            # NO classification event (the documented C9 decision)
+                            # — carry the last known state. A delta below the
+                            # on-threshold can never produce an on-portion, so
+                            # classifying it would only manufacture a spurious
+                            # unknown over an already-correct verdict.
+                            class_name = self.device_classifications.get(device_id, "pending")
+                            confidence = self.last_known_confidences.get(device_id, 0.0)
+                            distances = {}
+                elif delta_pending is not None:
+                    # Waiting for post-event stability. The window here is
+                    # 97-99% pre-event — classifying it would name the OLD
+                    # load. Carry the last known state until the delta
+                    # resolves.
+                    class_name = self.device_classifications.get(device_id, "pending")
+                    confidence = self.last_known_confidences.get(device_id, 0.0)
+                    distances = {}
+                else:
+                    class_name, confidence, distances = self._classify_device(
+                        device_id, power_watts, filtered_segment=filtered_segment
+                    )
+                    self._classify_methods[device_id] = "window"
+                    self.last_known_confidences[device_id] = confidence
             self.device_classifications[device_id] = class_name
 
             if class_name == "pending" or class_name == "error":
@@ -1099,6 +1312,10 @@ class EMSOrchestrator:
                             "segments": [list(s) for s in buf],
                             "embedding": cluster_mean.tolist() if cluster_mean is not None else [],
                             "suggested_label": UNRECOGNISED_DISPLAY,
+                            # Run 3: which classification path produced this
+                            # unknown — "window" (the pre/post-event window)
+                            # or "delta" (the added-load difference).
+                            "method": self._classify_methods.get(device_id, "window"),
                             "message": f"Unrecognised device on {device_id} at {power_watts:.0f} W. Please label it.",
                         })
 
@@ -1367,6 +1584,11 @@ class EMSOrchestrator:
                 "state": "ON" if self.device_states.get(device_id, 0) == 1 else "OFF",
                 "classification": class_name,
                 "confidence": round(confidence, 3) if confidence else 0,
+                # Run 3: classification provenance — "window" (the sequential
+                # path's pre/post-event window) or "delta" (the Run 3 overlap
+                # layer's added-load difference). Additive; consumers that do
+                # not read it are unaffected.
+                "method": self._classify_methods.get(device_id, "window"),
                 "pmv": round(self.env.compute_pmv(
                     t_air=self._internal_temp, t_mrt=self._internal_temp - 0.5,
                     v_air=0.1, rh=50.0, clo=0.7, met=1.2
@@ -1495,9 +1717,16 @@ class EMSOrchestrator:
             nonlocal safety_mqtt
             while self._running:
                 try:
+                    # Same credentials MQTTClientManager authenticates with
+                    # (env MQTT_USERNAME/MQTT_PASSWORD, resolved in __init__).
+                    # This parallel client used to connect anonymously, so
+                    # against this repo's own auth broker it could never
+                    # connect and SAFETY_WARNING/CUTOFF broadcasts never fired.
                     async with aiomqtt.Client(
                         os.environ.get('MQTT_BROKER', self.config['mqtt']['broker']),
-                        port=self.config['mqtt']['port']
+                        port=self.config['mqtt']['port'],
+                        username=self.mqtt.username,
+                        password=self.mqtt.password,
                     ) as client:
                         safety_mqtt = client
                         await client.subscribe(self.config['mqtt']['topics']['reads'])
@@ -1523,6 +1752,8 @@ class EMSOrchestrator:
                 "home/plug/+/ack",
                 "home/ml/label",  # Bug 3.1 fix: Subscribe to label topic
                 "home/sensor/+/status",
+                # PZEM V/I/PF frames → device_telemetry + "TELEMETRY" WS event
+                "home/sensor/+/telemetry",
             ])
         )
 
@@ -1585,7 +1816,9 @@ class EMSOrchestrator:
                       self.device_classifications, self.action_cooldowns,
                       self.last_device_power, self.last_known_confidences,
                       self.last_device_analytics_time, self.cnn_active_ticks,
-                      self._device_last_seen]:
+                      self._device_last_seen, self._power_history,
+                      self._delta_pending, self._classify_methods,
+                      self.device_telemetry]:
                 d.pop(did, None)
         if stale_ids:
             logger.info(f"🧹 Evicted {len(stale_ids)} stale device(s) from memory")

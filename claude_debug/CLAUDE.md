@@ -4,7 +4,7 @@
 > **Target Folder:** `claude_debug/`  
 > **Role:** Principal Embedded Systems QA Architect, Lead ML Test Engineer & Senior Backend Engineer  
 > **Target Models:** Claude 3.5 Sonnet / Claude 3.7 Sonnet / Claude Opus 4.5 & 5  
-> **Current Health:** 549/549 Tests Passing (100%) | Real UK-DALE & REDD Data Integrated | 5-Class Demo Scope Enrolled (phone/laptop/bulb/projector/fan)
+> **Current Health:** 626/626 Tests Passing (100%) (2026-09-10 close-out) | Real UK-DALE & REDD Data Integrated | Demo Scope: phone/laptop/bulb/projector (fan dropped to OOD); physical scope: phone/laptop/projector + LED bulb phantom-tracked (see root CLAUDE.md scope lock)
 
 ---
 
@@ -15,7 +15,7 @@
 3. **Graph-First Architecture Navigation:** NEVER dump or recursively traverse the directory tree. Use the pre-built knowledge graph at `graphify-out/` via `graphify query "<topic>"` or `graphify path "<A>" "<B>"` to retrieve scoped subgraphs in $<500$ tokens.
 4. **Zero API Hallucinations:** Never invent class names or method signatures. Consult [`claude_debug/ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md).
 5. **AST Synchronization:** After modifying any code file, execute `graphify update .` (AST-only, zero API cost).
-6. **No Regressions:** Verify with `python -m pytest tests/ -q` (baseline is **549 passing tests**).
+6. **No Regressions:** Verify with `python -m pytest tests/ -q` (baseline is **626 passing tests**, 2026-09-10).
 7. **Device Power Regimes & Low-Accounting Loads:** Phones/powerbanks in trickle/standby (3–10W) are tracked via `PhantomTracker`; fast charging / USB-PD (18–120W) cross the 20W transient threshold and trigger active NILM classification. Laptops span 30–200W (ultrabooks to gaming/workstation). Bulbs 40–75W. Fans 45–120W. Projectors span 30–400W.
 
 ---
@@ -30,10 +30,10 @@ source .venv/bin/activate
 graphify query "<question>"
 graphify path "<nodeA>" "<nodeB>"
 
-# 2. Run All 549 Regression Tests
+# 2. Run All 626 Regression Tests
 python -m pytest tests/ -q
 
-# 2b. Run the 5-Class e2e Recognition + Label-Loop Suite (21 tests)
+# 2b. Run the Demo e2e Recognition + Label-Loop Suite (gate-plumbing, 4-class scope)
 python -m pytest tests/test_e2e_five_class_recognition.py -v
 
 # 3. Run Real Data Provenance & Fallback Suite (36 tests)

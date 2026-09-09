@@ -16,8 +16,10 @@ app:
 mqtt:
   broker: "localhost"
   port: 1883
-  qos_safety: 1
-  qos_telemetry: 0
+  # qos_safety/qos_telemetry removed (2026-09-10): dead keys, never read.
+  # Effective wire QoS is hardcoded (qos=1 for subscribe and publish in
+  # src/hardware/mqtt.py); relay-command delivery is additionally assured by
+  # app-level retries in MQTTClientManager.publish_command.
   topics:
     reads: "home/sensor/+/power"
     writes: "home/plug/+/command"
@@ -33,13 +35,10 @@ protonet:
   embedding_size: 128
   distance_threshold: 15.0
   confidence_threshold: 0.90
-  # The five primary appliance classes this deployment recognises. A window
-  # outside every enrolled/known envelope is reported UNRECOGNISED and fires
-  # the LABEL_REQUEST flow instead of being forced onto one of these.
-  classes: ['phone', 'laptop', 'bulb', 'projector', 'fan']
-  # Open-set / out-of-distribution gate tau. Best-window confidence below
-  # this is reported as Unrecognised/Unknown and routed to labeling.
-  open_set_threshold: 0.65
+  # classes/open_set_threshold removed 2026-09-10: neither had a runtime
+  # reader. Recognition scope lives in `appliances:` below (which scopes the
+  # heuristic channel); the live gates are recognition_threshold and
+  # heuristic_min_confidence below.
   # Bar a *confirmed* classification must clear to be reported as recognised.
   # Deliberately NOT the same quantity as confidence_threshold above: that one
   # gates a single softmax, this one gates the noisy-OR of two independent
@@ -88,19 +87,22 @@ devices:
   node_monitor:   { simulated: true, rated: 60,  tier0: false }
   node_desktop:   { simulated: true, rated: 350, tier0: false }
   node_charger:   { simulated: true, rated: 120, tier0: false }
-  # Five-class demo fleet additions (phone/laptop/bulb/projector/fan)
   node_bulb:      { simulated: true, rated: 60,  tier0: false }
+  # Out-of-scope device (2026-09-10): fan was dropped from the demo
+  # recognition scope, but node_fan stays in the simulator fleet — an
+  # out-of-family load the system should handle gracefully.
   node_fan:       { simulated: true, rated: 75,  tier0: false }
 
-# The five primary appliance classes (matches protonet.classes above and the
-# enrolled registry). Operator-labelled classes are exempt from this list —
-# see _eligible_classes.
+# Demo recognition scope (2026-09-10): phone, laptop, bulb, projector. Fan is
+# out of scope — node_fan stays in the simulator fleet above as an
+# out-of-scope device. This list scopes the heuristic channel; enrolled /
+# operator-labelled classes are exempt from it (see _eligible_classes), so the
+# registry's enrolled `fan` envelope still names node_fan.
 appliances:
   - phone
   - laptop
   - bulb
   - projector
-  - fan
 
 # Scaled so the safety path is actually demonstrable at bench power levels.
 # 600 W ceiling: a laptop + projector + monitor together (~530 W) sits in the
@@ -129,6 +131,40 @@ system_safety:
 system:
   max_tracked_devices: 200
   device_ttl_seconds: 3600
+
+# Phantom/standby-load channel (Run 1.2). 15 W keeps the LED bulb (5-12 W)
+# tracked: such loads never cross the 20 W transient threshold, so they reach
+# PhantomTracker only via the no-transient branch. Loads in (10, 15] W stay
+# unattributed because that branch marks devices ON above 10 W — accepted
+# and documented.
+phantom:
+  baseline_threshold_watts: 15.0
+
+analytics:
+  # INR per kWh (India) — the dashboard renders ₹. The previous hardcoded
+  # 0.15 (USD-ish) understated cost ~40x.
+  cost_per_kwh: 8.0
+
+# NILM preprocessing / overlap (Run 3, WS-D). At a plug-in transient the
+# detector returns the last 128 samples ENDING at the detection sample —
+# 97-99% PRE-event data. On an idle socket that is harmless (steady_w is
+# decided by the few post-event samples), but on a socket already carrying a
+# load the window's steady_w is the OLD load's level and the old load is
+# named at confidence ~1.0 (measured: 60 W running + phone plugs in →
+# "bulb" @ 1.000, 10/10). With delta_overlap the pipeline instead classifies
+# the post-event DELTA (steady-after − steady-before) once post-event power
+# has been stable for delta_stability_samples samples, through the same
+# envelope gates as the window path.
+#   - delta_min_baseline_w: pre-event steady below this = idle socket → the
+#     proven sequential window path, untouched.
+#   - Negative delta (unplug): no classification event (documented decision).
+#   - Delta in a band gap: UNRECOGNISED → the existing label loop.
+# Flip delta_overlap to false to restore the pure window behaviour (the
+# pre-Run-3 fallback).
+preprocessing:
+  delta_overlap: true
+  delta_min_baseline_w: 20.0
+  delta_stability_samples: 5
 
 # ── Demo caveats ─────────────────────────────────────────────────────────────
 # 1. Phone charger / Powerbank Detection:

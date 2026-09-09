@@ -6,7 +6,7 @@ import EnergyChart from '../../components/EnergyChart/EnergyChart';
 import DigitalTwinVisualization from '../../components/DigitalTwinVisualization/DigitalTwinVisualization';
 import { Zap } from 'lucide-react';
 
-const OverviewPage = ({ devices = {}, powerHistory = [] }) => {
+const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {} }) => {
   return (
     <div className="space-y-6">
       {/* ── Top Row: Summary KPI Widgets ── */}
@@ -58,7 +58,7 @@ const OverviewPage = ({ devices = {}, powerHistory = [] }) => {
 
         {/* Device Fleet Cards */}
         <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-3xl p-6 shadow-sm">
-          <DeviceCards devices={devices} />
+          <DeviceCards devices={devices} telemetry={telemetry} />
         </div>
       </section>
     </div>

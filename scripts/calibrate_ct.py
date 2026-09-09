@@ -42,7 +42,7 @@ class PZEMCalibrator:
         self.broker = broker
         self.port = port
         self.username = username or os.getenv("MQTT_USERNAME", "pipeline")
-        self.password = password or os.getenv("MQTT_PASSWORD", "changeme_pipeline_password")
+        self.password = password or os.getenv("MQTT_PASSWORD")
 
         self.power_samples: List[float] = []
         self.telemetry_samples: List[dict] = []
@@ -183,7 +183,7 @@ def main():
     parser.add_argument("--broker", default=os.getenv("MQTT_BROKER", "localhost"), help="MQTT broker address")
     parser.add_argument("--port", type=int, default=int(os.getenv("MQTT_PORT", "1883")), help="MQTT broker port")
     parser.add_argument("--username", default=os.getenv("MQTT_USERNAME", "pipeline"), help="MQTT username")
-    parser.add_argument("--password", default=os.getenv("MQTT_PASSWORD", "changeme_pipeline_password"), help="MQTT password")
+    parser.add_argument("--password", default=os.getenv("MQTT_PASSWORD"), help="MQTT password")
     args = parser.parse_args()
 
     calibrator = PZEMCalibrator(

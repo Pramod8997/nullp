@@ -36,6 +36,19 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("FIRMWARE_AI_E2E")
 
 
+def _fw_rated_watts() -> float:
+    """RATED_WATTS parsed from the firmware source — bench-parity site
+    (HARDWARE_ALIGNMENT_CONTRACT §3: parse, never hardcode; same drift-guard
+    pattern as scripts/hil_hardware_test.py and the parity test)."""
+    import re
+    import pathlib
+    firmware_src = (pathlib.Path(__file__).resolve().parents[1]
+                    / "firmware" / "esp32_node" / "src" / "main.cpp").read_text()
+    m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', firmware_src)
+    assert m, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
+    return float(m.group(1))
+
+
 def print_stage_header(num: int, title: str, description: str):
     print("\n" + "═" * 78)
     print(f" 🔹 STAGE {num}: {title.upper()}")
@@ -292,24 +305,30 @@ class ClosedLoopE2ESimulator:
     async def stage7_arc_fault_edge_cutoff(self):
         print_stage_header(
             7, "Physical Arc-Fault Injection & Sub-100ms Edge Cutoff",
-            "Simulates loose terminal wire arcing (dP/dt = 14,000 W/s). Verifies instant trip."
+            "Simulates loose terminal wire arcing (dP/dt ~10,448 W/s). Verifies instant trip."
         )
         kettle = self.nodes["node_kettle"]
         kettle.set_relay(True)
         kettle.pzem.set_load(100.0)
         kettle.core0_safety_step(sim_dt=0.1)
 
-        # Sudden arc flash: jumps from 100W to 1500W in 100ms (dP/dt = 14,000 W/s)
+        # Sudden arc flash: jumps from 100W to 1500W — ~10,448 W/s at the
+        # hardware dt clamp (PZEM-004T register cadence, effective dt 0.134 s)
         kettle.pzem.set_load(1500.0)
         kettle.core0_safety_step(sim_dt=0.1)
         await kettle.core1_telemetry_tick(force_publish=True)
+        arc_alerts = [p for t, p in self.mqtt_log
+                      if t == kettle.topic_status and p.startswith("EDGE_ARC_FAULT")]
 
-        print(f"  • Electrical Arc Injected:  100W -> 1,500W in 100ms")
-        print(f"  • Measured dP/dt:           14,000 W/s (Threshold: 1,000 W/s)")
+        print(f"  • Electrical Arc Injected:  100W -> 1,500W step")
+        print(f"  • Measured dP/dt:           ~10,448 W/s (Threshold: 1,000 W/s)")
         print(f"  • ESP32 Core 0 Reaction:    ⚡ INSTANT PHYSICAL RELAY OPEN (GPIO 18 -> LOW)")
         print(f"  • Relay Status:             {'CLOSED (ON)' if kettle.gpio18_relay_state else 'OPEN (OFF - Cutoff)'}")
         print(f"  • Anti-Thrashing Lockout:   ACTIVE (5-minute relay lockout engaged)")
-        print(f"  • MQTT Safety Alert:        EDGE_ARC_FAULT:dP/dt=14000W/s")
+        print(f"  • MQTT Safety Alert:        {arc_alerts[-1] if arc_alerts else 'MISSING'}")
+        assert kettle.gpio18_relay_state is False and arc_alerts, (
+            "STAGE 7 FAILED: arc-fault cutoff/alert missing"
+        )
         print("  ✅ STAGE 7 PASSED: Arc-fault detected in Core 0; relay cut off instantly.")
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -318,18 +337,29 @@ class ClosedLoopE2ESimulator:
     async def stage8_overcurrent_protection(self):
         print_stage_header(
             8, "Overcurrent Safety Protection (125% Rated Power)",
-            "Simulates 280W load on 200W rated line. Verifies local cutoff."
+            "Simulates 350W load on 250W rated line. Verifies local cutoff."
         )
         microwave = self.nodes["node_microwave"]
-        microwave.rated_watts = 200.0  # Test rated
+        microwave.rated_watts = _fw_rated_watts()  # parsed from main.cpp — bench-parity site (HARDWARE_ALIGNMENT_CONTRACT §3: parse, never hardcode)
         microwave.set_relay(True)
         microwave.relay_locked = False
-        microwave.pzem.set_load(280.0)  # 140% of rated
-        for _ in range(2):
-            microwave.core0_safety_step(sim_dt=0.1)
+        microwave.pzem.set_load(350.0)  # 140% of rated, above 312.5W critical
+        microwave.core0_safety_step(sim_dt=0.1)
+        # Core 0 opens the relay; the core-1 loop takes the lockout and
+        # publishes the OVERCURRENT status (main.cpp:427-437).
+        await microwave.core1_telemetry_tick(force_publish=True)
 
-        print(f"  • Line Rated Capacity:      200.0 W (Critical Limit: 250.0 W)")
-        print(f"  • Measured Load:            280.0 W (140% Overload)")
+        relay_open = microwave.gpio18_relay_state is False
+        lockout_engaged = microwave.relay_locked is True
+        status_payloads = [p for t, p in self.mqtt_log if t == microwave.topic_status]
+        overcurrent_alerted = any(p.startswith("OVERCURRENT:") for p in status_payloads)
+        assert relay_open and lockout_engaged and overcurrent_alerted, (
+            f"STAGE 8 FAILED: relay_open={relay_open}, "
+            f"lockout_engaged={lockout_engaged}, status={status_payloads}"
+        )
+
+        print(f"  • Line Rated Capacity:      250.0 W (Critical Limit: 312.5 W)")
+        print(f"  • Measured Load:            350.0 W (140% Overload)")
         print(f"  • Core 0 Trip:              ⚡ OVERCURRENT CUTOFF TRIGGERED")
         print(f"  • Relay Pin Status:         {'CLOSED' if microwave.gpio18_relay_state else 'OPEN (Safe - Relay Tripped)'}")
         print("  ✅ STAGE 8 PASSED: Overcurrent cutoff verified.")

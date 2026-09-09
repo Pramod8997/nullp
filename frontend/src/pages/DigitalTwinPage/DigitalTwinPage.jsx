@@ -12,7 +12,7 @@ const DigitalTwinPage = ({
   twinEvents = [],
   pmvScore = 0,
   phantomData = {},
-  pendingUnknowns = [],
+  telemetry = {},
 }) => {
   return (
     <div className="space-y-6">
@@ -37,14 +37,14 @@ const DigitalTwinPage = ({
         </div>
 
         <div className="lg:col-span-5 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-3xl p-6 shadow-sm">
-          <DigitalTwin events={twinEvents} pmvScore={pmvScore} unknownDevices={pendingUnknowns} />
+          <DigitalTwin events={twinEvents} pmvScore={pmvScore} />
         </div>
       </div>
 
       {/* Bottom Row: Device Fleet + Phantom Load Tracker */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div className="lg:col-span-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-3xl p-6 shadow-sm">
-          <DeviceCards devices={devices} />
+          <DeviceCards devices={devices} telemetry={telemetry} />
         </div>
 
         <div className="lg:col-span-4 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-3xl p-6 shadow-sm">

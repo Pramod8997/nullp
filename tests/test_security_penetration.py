@@ -396,29 +396,33 @@ class TestUnauthorizedRelayControl:
 
     @pytest.mark.asyncio
     async def test_relay_command_case_sensitivity(self, firmware_node):
-        """Only uppercase ON/OFF/WARNING should be accepted.
-        The firmware does .strip().upper(), so mixed case is accepted."""
-        test_cases = [
-            ("on", True),       # Uppercased to ON → accepted
-            ("On", True),       # Uppercased to ON → accepted
-            ("oN", True),       # Uppercased to ON → accepted
-            ("OFF", False),     # Standard OFF → accepted
-            ("off", False),     # Uppercased to OFF → accepted
-            ("oFf", False),     # Uppercased to OFF → accepted
-        ]
-        for cmd, expected_on_after_cmd in test_cases:
-            firmware_node.set_relay(False)
+        """Mixed-case command payloads must be REJECTED with no state change.
+
+        The firmware compares the raw payload with == against "ON"/"OFF"/
+        "WARNING" (main.cpp:269-284); there is no .strip().upper()
+        normalization, so "on"/"On"/"oN" are not commands at all. (This test
+        previously asserted the twin's permissive .upper() behavior, which the
+        firmware never had.)
+        """
+        for cmd in ["on", "On", "oN", "off", "oFf", "Off"]:
+            firmware_node.set_relay(True)
             firmware_node.relay_locked = False
             await firmware_node.handle_mqtt_command(cmd)
-            if cmd.strip().upper() == "ON":
-                assert firmware_node.gpio18_relay_state is True, f"Failed for '{cmd}'"
-            elif cmd.strip().upper() == "OFF":
-                assert firmware_node.gpio18_relay_state is False, f"Failed for '{cmd}'"
+            assert firmware_node.gpio18_relay_state is True, (
+                f"mixed-case command '{cmd}' must be rejected with no state change"
+            )
+        # Positive control: the exact uppercase payload still actuates.
+        firmware_node.set_relay(False)
+        await firmware_node.handle_mqtt_command("ON")
+        assert firmware_node.gpio18_relay_state is True
 
     @pytest.mark.asyncio
     async def test_relay_command_with_whitespace(self, firmware_node):
-        """Commands with leading/trailing whitespace must be handled
-        (firmware does .strip())."""
+        """Commands with leading/trailing whitespace must be REJECTED.
+
+        The firmware does an exact == comparison on the raw payload
+        (main.cpp:269-284) and never strips it, so " ON " is not "ON".
+        """
         whitespace_commands = [
             " ON ",
             "ON\n",
@@ -428,20 +432,17 @@ class TestUnauthorizedRelayControl:
         ]
         for cmd in whitespace_commands:
             firmware_node.relay_locked = False
-            firmware_node.set_relay(False)
+            firmware_node.set_relay(True)
             await firmware_node.handle_mqtt_command(cmd)
-            stripped = cmd.strip().upper()
-            if stripped == "ON":
-                assert firmware_node.gpio18_relay_state is True, (
-                    f"Whitespace command '{repr(cmd)}' should have been accepted"
-                )
-            elif stripped == "OFF":
-                assert firmware_node.gpio18_relay_state is False
+            assert firmware_node.gpio18_relay_state is True, (
+                f"whitespace-padded command {cmd!r} must be rejected with no state change"
+            )
 
     @pytest.mark.asyncio
     async def test_relay_command_with_invalid_prefix(self, firmware_node):
         """Commands with prefixes (FORCE_ON, ADMIN_ON, sudo ON) must be
-        rejected — firmware only matches exact ON/OFF/WARNING after strip+upper."""
+        rejected — firmware only matches the exact payloads ON/OFF/WARNING
+        (main.cpp:269-284)."""
         invalid_commands = [
             "FORCE_ON",
             "ADMIN_ON",

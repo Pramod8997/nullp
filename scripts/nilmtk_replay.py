@@ -51,7 +51,7 @@ async def replay(hdf5_path: str, broker: str = "localhost", port: int = 1883,
         return
 
     username = username or os.getenv("MQTT_USERNAME", "pipeline")
-    password = password or os.getenv("MQTT_PASSWORD", "changeme_pipeline_password")
+    password = password or os.getenv("MQTT_PASSWORD")
 
     shutdown = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -165,7 +165,7 @@ def main():
                         help="Playback speed multiplier (e.g., 10 = 10x faster)")
     parser.add_argument("--username", type=str, default=os.getenv("MQTT_USERNAME", "pipeline"),
                         help="MQTT broker username")
-    parser.add_argument("--password", type=str, default=os.getenv("MQTT_PASSWORD", "changeme_pipeline_password"),
+    parser.add_argument("--password", type=str, default=os.getenv("MQTT_PASSWORD"),
                         help="MQTT broker password")
     args = parser.parse_args()
 

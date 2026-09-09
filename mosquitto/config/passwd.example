@@ -1,0 +1,20 @@
+# mosquitto/config/passwd.example — documentation of the broker credential
+# file format. The REAL passwd file is generated on the deployment machine
+# and is deliberately NOT tracked (it contains password hashes):
+#
+#   sudo mosquitto_passwd -c /etc/mosquitto/passwd ems_pipeline   # backend/API user
+#   mosquitto_passwd -b <passwd-file> esp32 <device-password>     # device user (see acl)
+#
+# Format (one `username:hash` per line; the hash is PBKDF2, `$7$`-prefixed):
+#
+#   ems_pipeline:$7$101$<salt>$<hash>
+#   esp32:$7$101$<salt>$<hash>
+#
+# Users and their grants are defined in mosquitto/config/acl:
+#   - esp32        : the physical ESP32 (sensors/acks write, commands read)
+#   - ems_pipeline : the backend + API + healthcheck (commands/events/label
+#                    write, sensors/acks/label/$SYS read)
+#   - ems_api      : present in the historical passwd but unused (compose
+#                    connects the API as ems_pipeline) — delete it or wire
+#                    it with grants; do not leave it zero-permission.
+# See claude_debug/BRINGUP_RUNBOOK.md Gate 0 for the deployment procedure.

@@ -167,8 +167,10 @@ def main() -> int:
                     help="encoder checkpoint to embed the enrolment windows with")
     ap.add_argument("--base", default="backend/models/weights_demo/prototype_registry.pt",
                     help="shipped registry to start from ('' for an empty one)")
-    ap.add_argument("--out", default="backend/models/weights_demo/prototype_registry_enrolled.pt",
-                    help="where to write the enrolled registry")
+    ap.add_argument("--out", default="backend/models/weights_demo/prototype_registry_bench.pt",
+                    help="where to write the enrolled registry (bench file — NOT the "
+                         "prototype_registry_enrolled.pt the demo config loads, "
+                         "which the pipeline's next save would overwrite)")
     ap.add_argument("--capture", default=None, metavar="NPZ",
                     help="real captured windows instead of the simulator profiles")
     ap.add_argument("--k", type=int, default=K_ENROLL,

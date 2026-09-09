@@ -351,7 +351,15 @@ class DatabaseSession:
             except asyncio.CancelledError:
                 pass
         if self._flush_task:
-            await self._flush_task
+            # Cancel BEFORE awaiting: otherwise close() blocks up to the 10 s
+            # queue.get timeout whenever the flush loop is idle-parked (the
+            # Ctrl-C stall). The loop's CancelledError handler drains the
+            # queue and writes the final batch, so no data is lost.
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
         if self._conn:
             await self._conn.close()
         logger.info("Database connection closed gracefully.")

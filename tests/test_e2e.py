@@ -80,10 +80,11 @@ async def test_e2e_label_flow(page: Page, mqtt_client):
         "home/sensor/unknown_plug/power",
         json.dumps({"power": 350.0}),
     )
-    # Wait for LABEL_REQUEST prompt in DigitalTwin panel
+    # Wait for LABEL_REQUEST prompt in DigitalTwin panel (the working
+    # LabelRequestCard keys its elements by device_id)
     await page.wait_for_selector("[data-testid*='label-request']", timeout=5000)
-    await page.fill("[data-testid='label-input']", "Coffee Machine")
-    await page.click("[data-testid='label-submit']")
+    await page.fill("#label-input-unknown_plug", "Coffee Machine")
+    await page.click("#label-submit-unknown_plug")
     # The next power update for this device should show its label
     await page.wait_for_selector("[data-testid='device-card-unknown_plug']", timeout=5000)
     label_text = await page.inner_text("[data-testid='device-label-unknown_plug']")

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import SafetyAlerts from '../../components/SafetyAlerts';
 import { Bell, ShieldAlert, ShieldCheck, AlertTriangle, Zap, CheckCircle2 } from 'lucide-react';
 
@@ -9,6 +9,26 @@ const AlertsPage = ({ alerts = [] }) => {
     (a) => (a.level || a.severity || '').toUpperCase() === 'CRITICAL' || (a.message && a.message.includes('ARC'))
   ).length;
   const warningCount = alerts.length - criticalCount;
+
+  // Breaker status is derived from the live alert feed, not hardcoded:
+  // a cutoff / overcurrent / arc-fault alert WITHIN THE LOCKOUT WINDOW
+  // (5 min, the firmware's SAFETY_LOCKOUT_MS) means the relay is open.
+  // Older alerts leave it "Armed & Nominal" — the lockout has expired and
+  // the relay can be re-energized, so a stale alert must not claim TRIPPED
+  // forever. The alert id is Date.now()-based at append time, so it doubles
+  // as the machine timestamp; the interval re-render lets the window expire.
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, []);
+  const LOCKOUT_MS = 5 * 60 * 1000;
+  const isTripped = alerts.some(
+    (a) =>
+      (a?.type === 'SAFETY_CUTOFF' ||
+        /OVERCURRENT|ARC[_ ]?FAULT|RELAY.*FORCED OFF|RELAY FORCED OFF/i.test(a?.message || '')) &&
+      nowMs - (a?.id || 0) < LOCKOUT_MS
+  );
 
   const filteredAlerts = alerts.filter((alert) => {
     if (filter === 'critical') {
@@ -77,16 +97,33 @@ const AlertsPage = ({ alerts = [] }) => {
 
       {/* Safety Summary KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-2xl p-4 border border-gray-200/80 dark:border-gray-700/80 shadow-sm flex items-center justify-between">
+        <div
+          data-testid="breaker-status"
+          className={`bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-2xl p-4 border shadow-sm flex items-center justify-between ${
+            isTripped
+              ? 'border-rose-300 dark:border-rose-800'
+              : 'border-gray-200/80 dark:border-gray-700/80'
+          }`}
+        >
           <div>
             <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Breaker Status</span>
-            <div className="text-lg font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5 mt-0.5">
-              <CheckCircle2 size={16} />
-              <span>Armed & Nominal</span>
+            <div
+              className={`text-lg font-bold mt-0.5 flex items-center gap-1.5 ${
+                isTripped
+                  ? 'text-rose-600 dark:text-rose-400'
+                  : 'text-emerald-600 dark:text-emerald-400'
+              }`}
+            >
+              {isTripped ? <ShieldAlert size={16} /> : <CheckCircle2 size={16} />}
+              <span>{isTripped ? 'TRIPPED — relay open' : 'Armed & Nominal'}</span>
             </div>
           </div>
-          <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-500">
-            <ShieldCheck size={20} />
+          <div
+            className={`p-2.5 rounded-xl ${
+              isTripped ? 'bg-rose-500/10 text-rose-500' : 'bg-emerald-500/10 text-emerald-500'
+            }`}
+          >
+            {isTripped ? <ShieldAlert size={20} /> : <ShieldCheck size={20} />}
           </div>
         </div>
 

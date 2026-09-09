@@ -427,9 +427,13 @@ class TestSafetyIntegrationUnderCorruption:
         # Small power increase with tiny dt
         firmware.pzem.set_load(101.0)  # 1W increase
         firmware.core0_safety_step(sim_dt=1e-10)
-        # roc = 1.0 / 1e-10 = 1e10 W/s — this IS > 1000, but it's a tiny
-        # power change amplified by tiny dt. The firmware would trip here.
-        # This is an edge case worth documenting.
+        # The twin clamps the effective ROC dt to [0.134, 0.16] s (PZEM-004T
+        # register cadence + transaction time), so a 1 W step reads ~7.5 W/s
+        # and cannot trip. Hardware can never see dt=1e-10: the PZEM updates
+        # its registers every 200 ms.
+        assert firmware.gpio18_relay_state is True, \
+            "tiny dt must NOT trip the arc-fault channel (clamped ROC ≈7.5 W/s)"
+        assert firmware.shared_arc_fault is False
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -491,9 +495,13 @@ class TestHILStressTests:
             else:
                 firmware.pzem.active_power = float('nan')
             firmware.core0_safety_step(sim_dt=0.1)
-        
-        # System should not have crashed
-        assert True
+
+        # System did not crash, the relay is still energized (no load here
+        # crosses the cutoff), and NaN cycles were skipped without latching
+        # fault state.
+        assert firmware.gpio18_relay_state is True
+        assert firmware.relay_locked is False
+        assert firmware.shared_power_watts != float('nan')
 
     def test_electromagnetic_interference_simulation(self, firmware):
         """Simulate EMI by randomly perturbing register values around
@@ -515,9 +523,13 @@ class TestHILStressTests:
             firmware.pzem.voltage = 230.0 + random.gauss(0, 5)
             firmware.core0_safety_step(sim_dt=0.1)
             
-            if firmware.relay_locked:
+            if firmware.relay_locked or firmware.shared_overcurrent_latch:
+                # Core 0 raises the overcurrent latch; the core-1 tick turns
+                # it into relay_locked (main.cpp:427-437). Watch both so a
+                # nuisance trip is still detected before any tick runs.
                 false_trips += 1
                 firmware.relay_locked = False
+                firmware.shared_overcurrent_latch = False
                 firmware.set_relay(True)
         
         # With 100W baseline and 200W rated, critical = 250W.

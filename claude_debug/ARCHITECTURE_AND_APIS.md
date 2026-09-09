@@ -16,7 +16,7 @@ class ESP32FirmwareNode:
         self,
         device_id: str,
         rated_watts: float = 200.0,
-        relay_active_low: bool = False,   # tracks RELAY_ACTIVE_LOW at main.cpp:85
+        relay_active_low: bool = False,   # tracks the RELAY_ACTIVE_LOW constant in main.cpp
         mqtt_publish_fn: Optional[Callable[[str, str], Coroutine]] = None,
     ) -> None: ...
 

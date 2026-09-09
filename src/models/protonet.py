@@ -12,6 +12,7 @@ Legacy compatibility classes are preserved below the new implementations.
 """
 import os
 import pickle
+import tempfile
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any, Union
 
@@ -650,7 +651,18 @@ class PrototypeRegistry:
         payload = {k: (v[0].cpu(), v[1]) for k, v in self.prototypes.items()}
         if self.envelopes:
             payload[self.ENVELOPE_KEY] = dict(self.envelopes)
-        torch.save(payload, path)
+        # Atomic write: a crash mid-save must not truncate the registry into a
+        # corrupt file that silently reverts the deployment to heuristic-only
+        # mode and refuses every future label. Write to a temp file in the
+        # same directory, then rename over the target (atomic on POSIX).
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".pt.tmp")
+        os.close(fd)
+        try:
+            torch.save(payload, tmp)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
     def load(self, path: str):
         data = torch.load(path, map_location=self.device)

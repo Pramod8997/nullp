@@ -189,6 +189,19 @@ DEFAULT_RULES: List[ApplianceRule] = [
     # Consumer electronics (demo profile & low-power appliances)
     ApplianceRule("phone_charger",    steady_w=(5, 125),     peak_w=(8, 145),
                   duty=(0.10, 1.0), overshoot=(1.0, 3.0),  volatility=(0.0, 0.8)),
+    # `phone` = the modern USB-PD fast charger (18-120 W per the device
+    # power regimes; the enrolled demo envelope sits at 44-48 W). The band
+    # rule exists so the degraded (weights-deleted) mode CAN name the
+    # physical scope's phone class (WS-B.4) — but note the centroid path
+    # above takes precedence, and NO phone centroid is fitted (no real
+    # USB-PD windows exist in UK-DALE — see the phone_charger/router note
+    # above CLASS_CENTROIDS). Until Run 2's bench capture supplies real
+    # phone windows (then `scripts/fit_heuristic_centroids.py --capture`),
+    # a 45 W query falls to the fitted laptop centroid at LOW confidence
+    # (~0.19) — rejected by the 0.55 gate -> unknown -> label loop. Safe,
+    # not confident-wrong. `phone_charger` below is the UK-DALE-era name.
+    ApplianceRule("phone",            steady_w=(18, 130),    peak_w=(20, 150),
+                  duty=(0.10, 1.0), overshoot=(1.0, 3.0),  volatility=(0.0, 0.8)),
     ApplianceRule("router",           steady_w=(5, 35),      peak_w=(8, 45),
                   duty=(0.40, 1.0), overshoot=(1.0, 2.0),  volatility=(0.0, 0.4)),
     ApplianceRule("monitor",          steady_w=(15, 80),     peak_w=(20, 100),

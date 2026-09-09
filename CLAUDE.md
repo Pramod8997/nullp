@@ -6,14 +6,16 @@ Optimize for: **correctness > simplicity > speed > completeness of architecture*
 Do not build a "better" system. Repair the existing one.
 
 ## HARD SCOPE LOCK
-The required appliance recognition demo scope is ONLY (updated 2026-09-08 per
-explicit user instruction — supersedes the earlier phone/laptop/projector/monitor
-list; see `claude_debug/SESSION_2026-09-08.md`):
+The required appliance recognition scope is ONLY (updated 2026-09-10 per
+explicit user instruction — supersedes the 2026-09-08 5-class list; see
+`claude_debug/GOD_TIER_PLAN_2026-09-10.md`):
 1. phone
 2. laptop
-3. bulb
-4. projector
-5. fan
+3. projector
+
+The LED bulb is **phantom-load-tracked only** (9 W sits below the 20 W detection
+threshold — never classified). Fan is dropped. `bulb`/`fan` stay in the simulator
+demo profile only.
 
 Do NOT expand appliance classes, redesign the NILM architecture, add new agents, add speculative ML models, or build generalized frameworks unless a currently failing test or existing production contract strictly requires it.
 
@@ -80,7 +82,7 @@ If the same failure appears twice:
 If 2 fixes fail for the same symptom, stop broad coding and perform a minimal data-flow trace from input -> transform -> classifier/output.
 
 ## ML FIX STRATEGY
-For phone/laptop/bulb/projector/fan recognition:
+For phone/laptop/projector recognition (LED bulb phantom-tracked, fan dropped):
 - Prefer the existing working recognition path and existing demo weights/data.
 - Do not replace ProtoNet/OpenMax/heuristics unless the current code proves that component is the root cause.
 - First verify: input units -> preprocessing -> feature vector -> model input -> label mapping -> confidence/gate -> output.
@@ -89,10 +91,11 @@ For phone/laptop/bulb/projector/fan recognition:
 - Check model/weight loading paths before training anything.
 - Use existing real-data/demo fixtures before collecting or generating new data.
 - If ML confidence is broken, verify the fallback/label-loop behavior already present before inventing a new confidence scheme.
-- The goal is reliable recognition of the FIVE required classes, not a research-grade generalized NILM platform.
+- The goal is reliable recognition of the THREE classifiable classes (phone, laptop, projector; LED bulb phantom-tracked, fan dropped), not a research-grade generalized NILM platform.
 
 ## HARDWARE INTEGRATION STRATEGY
-Required recognition/integration target: phone, laptop, bulb, projector, fan
+Required recognition/integration target: phone, laptop, projector (LED bulb
+phantom-tracked; fan dropped)
 (demo/simulator scope — the physical rig itself stays per `claude_debug/HARDWARE_FINAL_SPEC.md`).
 Bench wiring for the current 38-pin DevKit build: `claude_debug/WIRING_STEP_BY_STEP.md`.
 Keep the locked hardware safety contract:

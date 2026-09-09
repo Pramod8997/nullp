@@ -1,5 +1,6 @@
 import json
 import asyncio
+import hmac
 import logging
 import logging.handlers
 import math
@@ -241,7 +242,11 @@ def _mqtt_connect_kwargs() -> dict:
 async def verify_api_key(x_api_key: str = Header(None)):
     """Dependency that checks X-API-Key header against EMS_API_KEY env var."""
     expected = os.environ.get("EMS_API_KEY")
-    if not expected or x_api_key != expected:
+    # compare_digest on bytes: constant-time and no ASCII-only TypeError on
+    # a hostile non-ASCII header value.
+    if not expected or not hmac.compare_digest(
+        (x_api_key or "").encode("utf-8"), expected.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -398,6 +403,10 @@ async def mqtt_listener_task():
                         device_id = topic.split("/")[-2]
                         try:
                             power_watts = float(payload)
+                            # NaN/Inf payloads parse cleanly as floats; never
+                            # let them into the state or the WS broadcast.
+                            if not math.isfinite(power_watts):
+                                raise ValueError("non-finite power")
                             if device_id not in system_state["devices"]:
                                 system_state["devices"][device_id] = {}
                             system_state["devices"][device_id]["power"] = power_watts
@@ -512,9 +521,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Digital Twin EMS", lifespan=lifespan)
 app.state.broadcast = manager.broadcast
 
-# Issue #8: Restrict CORS to specific trusted origins
+# Issue #8: Restrict CORS to specific trusted origins. 127.0.0.1 variants
+# included because browsers treat localhost and 127.0.0.1 as distinct
+# origins (and the WS origin check reuses this list) — LAN-IP origins must
+# be added via CORS_ORIGINS when the dashboard is viewed from another
+# device (see claude_debug/BRINGUP_RUNBOOK.md, demo-day notes).
 allowed_origins = os.environ.get(
-    "CORS_ORIGINS", "http://localhost:3000,http://localhost:5173"
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://localhost:5173,"
+    "http://127.0.0.1:3000,http://127.0.0.1:5173"
 ).split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -619,7 +634,11 @@ async def get_safety_warnings():
 # Bug 3.5 fix: Accept segments in LabelSubmission for ProtoNet registry update
 class LabelSubmission(BaseModel):
     device_id: str = Field(..., max_length=64)
-    label: str = Field(..., max_length=64)
+    # Log-forging guard: the label ends up in logs, MQTT payloads and audit
+    # entries — no newlines, control chars or path-ish content.
+    label: str = Field(
+        ..., max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _-]*$"
+    )
     segments: List[List[float]] = Field(
         default=[],
         description=(
@@ -692,6 +711,12 @@ async def submit_label(submission: LabelSubmission, _: None = Depends(verify_api
                 await client.publish("home/ml/label", mqtt_payload)
     except Exception as e:
         logger.error(f"Failed to publish label to MQTT: {e}")
+        # Never report success when the orchestrator never received the label:
+        # the dashboard would show "successfully enrolled" for a no-op.
+        raise HTTPException(
+            status_code=503,
+            detail="MQTT publish failed — label NOT enrolled, retry",
+        )
 
     await manager.broadcast({
         "type": "LABEL_SUBMITTED",
@@ -716,7 +741,8 @@ signature_buffer: Dict[str, Dict[str, Any]] = {}
 _signature_lock = asyncio.Lock()
 SIGNATURE_BUFFER_MAX = 200  # bound memory; keep most recent
 
-# Classes recognised by this deployment (config protonet.classes).
+# Classes recognised by this deployment (the profile's top-level
+# `appliances:` list; the old `protonet.classes` key was deleted 2026-09-10).
 _target_classes: List[str] = []
 try:
     import yaml as _yaml
@@ -725,7 +751,7 @@ try:
         _cfg_path = "config/config.yaml"
     with open(_cfg_path) as _fh:
         _cfg = _yaml.safe_load(_fh) or {}
-    _target_classes = list((_cfg.get("protonet") or {}).get("classes") or [])
+    _target_classes = list(_cfg.get("appliances") or [])
 except Exception:
     _target_classes = []
 
@@ -752,7 +778,10 @@ async def _capture_signature(device_id: str, entry: Dict[str, Any]) -> None:
 class LabelUnrecognizedRequest(BaseModel):
     """POST /api/v1/appliances/label-unrecognized body."""
     signature_id: str = Field(..., max_length=64)
-    label: str = Field(..., max_length=64)
+    # Same charset contract as LabelSubmission.label (log-forging guard).
+    label: str = Field(
+        ..., max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _-]*$"
+    )
     # Optional direct segments (K x 128 raw watts). When absent the buffered
     # windows captured at LABEL_REQUEST time are used.
     segments: List[List[float]] = Field(
@@ -986,6 +1015,14 @@ async def export_csv():
 # ─── WebSocket Endpoint ─────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # CORS middleware only guards HTTP, not the WebSocket handshake. Browsers
+    # always send Origin on a WS handshake; non-browser clients (our own
+    # tooling) usually omit it and are allowed.
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in allowed_origins:
+        logger.warning(f"Rejected WebSocket handshake: disallowed Origin {origin!r}")
+        await websocket.close(code=1008)
+        return
     await manager.connect(websocket)
     # Issue #23: Send initial state snapshot ONCE on connection only
     try:

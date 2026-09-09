@@ -18,8 +18,10 @@ app:
 mqtt:
   broker: "localhost"
   port: 1883
-  qos_safety: 1
-  qos_telemetry: 0
+  # qos_safety/qos_telemetry removed (2026-09-10): dead keys, never read.
+  # Effective wire QoS is hardcoded (qos=1 for subscribe and publish in
+  # src/hardware/mqtt.py); relay-command delivery is additionally assured by
+  # app-level retries in MQTTClientManager.publish_command.
   topics:
     reads: "home/sensor/+/power"
     writes: "home/plug/+/command"
@@ -81,14 +83,26 @@ devices:
   # something to disaggregate. One device at a time is single-appliance
   # classification, not disaggregation, and does not exercise
   # OverlapAwareNILMDetector.
-  node_bench_agg: { simulated: false, rated: 250, tier0: false }
+  # tier0: true = NEVER_SHED (Run 0.8, RL opt-out). The pipeline passes THIS
+  # file to the RL agent, and tier0 devices feed its SHED blacklist — with
+  # exploration enabled, the agent could otherwise open the physical relay
+  # uncommanded (~1 stray OFF per cooldown window once the promotion gate
+  # latches). Re-checked as defense-in-depth at the publish site
+  # (run_pipeline.py, device_is_critical).
+  node_bench_agg: { simulated: false, rated: 250, tier0: true }
 
 # Only the two classes the prototype can physically produce. The trained model
 # still has all 7 heads; restricting the list here keeps the UI from advertising
 # appliances that no socket on this rig can ever present.
+# The 3 classifiable physical classes (locked scope, 2026-09-10). The LED
+# bulb is deliberately ABSENT: 9 W sits below the 20 W transient threshold,
+# so it is phantom-load-tracked on the dashboard, never classified.
+# `phone_charger` (the old UK-DALE-era name) is retired here — the physical
+# USB-PD charger enrolls and classifies as `phone`.
 appliances:
+  - phone
   - laptop
-  - phone_charger
+  - projector
 
 # 250 W ceiling, sized so the cutoff is reachable with the loads on hand:
 #   laptop 65 W + USB-PD charger 120 W + 100 W lamp = 285 W -> WARNING (275 W)
@@ -108,3 +122,44 @@ system_safety:
   device_wattage_limits:
     default: 250.0
     node_bench_agg: 250.0
+
+# RL agent (Run 0.8). The pipeline now passes THIS file to the agent, so the
+# profile must carry its own rl: section — without one the agent falls back
+# to its 15 s cooldown default instead of the 5-minute anti-short-cycling
+# lockout the other profiles configure.
+rl:
+  cooldown_seconds: 300.0
+
+# Phantom/standby-load channel (Run 1.2). 15 W keeps the LED bulb (5-12 W)
+# tracked: such loads never cross the 20 W transient threshold, so they reach
+# PhantomTracker only via the no-transient branch. Loads in (10, 15] W stay
+# unattributed because that branch marks devices ON above 10 W — accepted
+# and documented.
+phantom:
+  baseline_threshold_watts: 15.0
+
+analytics:
+  # INR per kWh (India) — the dashboard renders ₹. The previous hardcoded
+  # 0.15 (USD-ish) understated cost ~40x.
+  cost_per_kwh: 8.0
+
+# NILM preprocessing / overlap (Run 3, WS-D). At a plug-in transient the
+# detector returns the last 128 samples ENDING at the detection sample —
+# 97-99% PRE-event data. On this one-port rig any plug-in onto an already
+# running load would name the OLD load at confidence ~1.0. With delta_overlap
+# the pipeline instead classifies the post-event DELTA (steady-after −
+# steady-before) once post-event power has been stable for
+# delta_stability_samples samples, through the same envelope gates as the
+# window path. The rig has no enrolled registry yet (see protonet above), so
+# until Run 2 enrolls one both paths route to the label loop — the flag is
+# on so the delta layer is live the moment the bench registry lands.
+#   - delta_min_baseline_w: pre-event steady below this = idle socket → the
+#     proven sequential window path, untouched.
+#   - Negative delta (unplug): no classification event (documented decision).
+#   - Delta in a band gap: UNRECOGNISED → the existing label loop.
+# Flip delta_overlap to false to restore the pure window behaviour (the
+# pre-Run-3 fallback).
+preprocessing:
+  delta_overlap: true
+  delta_min_baseline_w: 20.0
+  delta_stability_samples: 5

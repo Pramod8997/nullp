@@ -13,7 +13,8 @@ no file.
 Method
 ------
 The firmware publishes `home/sensor/{DEVICE_ID}/power` as a plain float at 1 Hz
-(main.cpp:441-446), so one 128-sample window spans 128 SECONDS of wall clock.
+(the "Publish Fast Power at 1Hz" block in the core-1 loop of main.cpp), so one
+128-sample window spans 128 SECONDS of wall clock.
 Capturing K windows back-to-back would take K*128 s, so windows are taken with
 a sliding stride (default 16 s): K=8 windows costs 128 + 7*16 = 240 s per class.
 Strided windows overlap and are therefore correlated — fine for a prototype mean
@@ -54,8 +55,12 @@ except ImportError:
 
 SEQ_LEN = 128
 PROVENANCE_KEY = "__provenance__"
-VALID_CLASSES = ("phone_charger", "laptop", "projector", "monitor",
+VALID_CLASSES = ("phone", "phone_charger", "laptop", "projector", "monitor",
                  "desktop_computer", "incandescent_lamp")
+# `phone` = the 2026-09-10 physical scope (a USB-PD charger enrolled under
+# its own class name, matching the demo registry's `phone` envelope);
+# `phone_charger` is retained for UK-DALE-era replays only — capture the
+# physical rig's charger as `phone` (WS-B.2).
 
 
 async def collect(broker, port, username, password, topic, n_windows, stride,

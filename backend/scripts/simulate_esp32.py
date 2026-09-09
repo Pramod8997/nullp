@@ -314,7 +314,7 @@ async def main():
     parser.add_argument("--broker", type=str, default=os.getenv("MQTT_BROKER", "localhost"), help="MQTT Broker address")
     parser.add_argument("--port", type=int, default=int(os.getenv("MQTT_PORT", "1883")), help="MQTT Broker port")
     parser.add_argument("--username", type=str, default=os.getenv("MQTT_USERNAME", "pipeline"), help="MQTT Username")
-    parser.add_argument("--password", type=str, default=os.getenv("MQTT_PASSWORD", "changeme_pipeline_password"), help="MQTT Password")
+    parser.add_argument("--password", type=str, default=os.getenv("MQTT_PASSWORD"), help="MQTT Password")
     parser.add_argument("--all", action="store_true", default=True, help="Simulate all devices regardless of simulated flag in config.yaml")
     parser.add_argument("--demo", action="store_true", help="Simulate demo bench electronics (laptop, monitor, projector, desktop, charger)")
     args = parser.parse_args()

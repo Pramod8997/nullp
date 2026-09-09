@@ -104,6 +104,20 @@ async def test_safety_warnings_endpoint(transport):
 
 
 # ─── Submit Label — Auth (Issue #7) ─────────────────────────────────
+class _FakeMQTTClient:
+    """Stands in for the shared aiomqtt client so publish success/failure
+    is controlled by the test instead of whatever broker happens to run."""
+
+    def __init__(self, exc: Exception = None):
+        self._exc = exc
+        self.published = []
+
+    async def publish(self, topic, payload):
+        if self._exc:
+            raise self._exc
+        self.published.append((topic, payload))
+
+
 @pytest.mark.asyncio
 async def test_submit_label_without_api_key_when_key_is_set(transport):
     """Issue #7: Should reject if EMS_API_KEY is set but no header provided."""
@@ -121,8 +135,12 @@ async def test_submit_label_without_api_key_when_key_is_set(transport):
 
 @pytest.mark.asyncio
 async def test_submit_label_with_valid_api_key(transport):
-    """Issue #7: Should accept with correct API key."""
+    """Issue #7: correct API key + MQTT publish succeeds → 200 ok."""
+    from src.api import main as api_main
+
     os.environ["EMS_API_KEY"] = "test-secret-key"
+    fake = _FakeMQTTClient()
+    api_main._shared_mqtt_client = fake
     try:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
@@ -130,9 +148,33 @@ async def test_submit_label_with_valid_api_key(transport):
                 json={"device_id": "test_device", "label": "fridge"},
                 headers={"X-API-Key": "test-secret-key"},
             )
-            # 200 OK (MQTT publish may fail in test, but endpoint logic succeeds)
             assert response.status_code == 200
+            assert response.json()["status"] == "ok"
+        assert fake.published and fake.published[0][0] == "home/ml/label"
     finally:
+        api_main._shared_mqtt_client = None
+        del os.environ["EMS_API_KEY"]
+
+
+@pytest.mark.asyncio
+async def test_submit_label_returns_503_when_mqtt_publish_fails(transport):
+    """Run 0.10 F1: a failed MQTT publish must NOT report success — the
+    dashboard would show "successfully enrolled" when nothing was enrolled."""
+    from src.api import main as api_main
+
+    os.environ["EMS_API_KEY"] = "test-secret-key"
+    api_main._shared_mqtt_client = _FakeMQTTClient(exc=RuntimeError("broker down"))
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/submit-label",
+                json={"device_id": "test_device", "label": "fridge"},
+                headers={"X-API-Key": "test-secret-key"},
+            )
+            assert response.status_code == 503
+            assert "NOT enrolled" in response.json()["detail"]
+    finally:
+        api_main._shared_mqtt_client = None
         del os.environ["EMS_API_KEY"]
 
 
@@ -198,6 +240,53 @@ async def test_submit_label_rejects_long_device_id(transport):
             headers={"X-API-Key": "test-key"},
         )
         assert response.status_code == 422
+
+
+# ─── Label charset (Run 0.9: log-forging prevention) ────────────────
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_label",
+    [
+        "../../../etc/passwd",  # path-ish content
+        "fridge\nEVIL: forged log line",  # newline = forged log/audit entries
+        " leading-space",  # must start alphanumeric
+    ],
+)
+async def test_submit_label_rejects_bad_label_charset(transport, bad_label):
+    """Labels land in logs, audit entries and MQTT payloads — reject
+    anything outside ^[A-Za-z0-9][A-Za-z0-9 _-]*$ with 422."""
+    os.environ["EMS_API_KEY"] = "test-key"
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/submit-label",
+                json={"device_id": "test_device", "label": bad_label},
+                headers={"X-API-Key": "test-key"},
+            )
+            assert response.status_code == 422
+    finally:
+        del os.environ["EMS_API_KEY"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_label",
+    ["../../../etc/passwd", "fridge\nEVIL: forged log line"],
+)
+async def test_label_unrecognized_rejects_bad_label_charset(transport, bad_label):
+    """Same charset contract on the label-unrecognized body (422 before any
+    enrollment logic runs)."""
+    os.environ["EMS_API_KEY"] = "test-key"
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/appliances/label-unrecognized",
+                json={"signature_id": "sig_1", "label": bad_label},
+                headers={"X-API-Key": "test-key"},
+            )
+            assert response.status_code == 422
+    finally:
+        del os.environ["EMS_API_KEY"]
 
 
 # ─── CSV Export (Issue #1) ──────────────────────────────────────────

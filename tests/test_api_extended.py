@@ -207,3 +207,36 @@ async def test_label_request_only_for_unknown():
         msg = await ws.receive_json(timeout=1.0)
         received.append(msg)
     assert any(e.get("event_type") == "LABEL_REQUEST" or e.get("type") == "LABEL_REQUEST" for e in received)
+
+
+# Run 0.9: WebSocket handshake Origin check (CORS middleware does not cover WS)
+@pytest.mark.asyncio
+async def test_ws_rejects_disallowed_origin():
+    """A browser Origin outside the CORS allowlist must be refused (1008)."""
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect):
+        async with TestClient(app).websocket_connect(
+            "/ws", headers={"origin": "http://evil.example"}
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_ws_accepts_allowed_origin():
+    """An allowlisted Origin completes the handshake and receives broadcasts."""
+    async with TestClient(app).websocket_connect(
+        "/ws", headers={"origin": "http://localhost:5173"}
+    ) as ws:
+        await app.state.broadcast({"event_type": "ORIGIN_OK"})
+        msg = await ws.receive_json(timeout=1.0)
+        assert msg["event_type"] == "ORIGIN_OK"
+
+
+@pytest.mark.asyncio
+async def test_ws_allows_missing_origin():
+    """Non-browser clients (no Origin header) stay allowed."""
+    async with TestClient(app).websocket_connect("/ws") as ws:
+        await app.state.broadcast({"event_type": "NO_ORIGIN_OK"})
+        msg = await ws.receive_json(timeout=1.0)
+        assert msg["event_type"] == "NO_ORIGIN_OK"

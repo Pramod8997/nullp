@@ -4,13 +4,13 @@ import {
   Cpu,
   BarChart3,
   Box,
-  Calendar,
   Bell,
-  Settings,
   ChevronLeft,
   ChevronRight,
   Zap,
   Activity,
+  // Calendar,   // hidden with the Schedule nav entry (mock page)
+  // Settings,   // hidden with the Settings nav entry (non-persisting page)
 } from 'lucide-react';
 
 const navItems = [
@@ -18,9 +18,11 @@ const navItems = [
   { id: 'appliances', label: 'Devices', icon: Cpu },
   { id: 'analytics', label: 'Analytics', icon: BarChart3 },
   { id: 'digital-twin', label: 'Digital Twin', icon: Box },
-  { id: 'schedule', label: 'Schedule', icon: Calendar },
+  // Schedule + Settings pages are 100% hardcoded mock / non-persisting UI.
+  // Hidden from demo navigation until they are wired to real data.
+  // { id: 'schedule', label: 'Schedule', icon: Calendar },
   { id: 'alerts', label: 'Alerts', icon: Bell },
-  { id: 'settings', label: 'Settings', icon: Settings },
+  // { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
 const Sidebar = ({ activeTab, onTabChange, collapsed, onToggleCollapse, alertCount = 0 }) => {

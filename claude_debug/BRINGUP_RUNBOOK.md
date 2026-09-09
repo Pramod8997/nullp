@@ -8,6 +8,20 @@
 
 ---
 
+## PROCEDURAL RULES (read before every bench session)
+
+* 🔴 **Never run `backend/scripts/simulate_esp32.py` while the physical rig is live.**
+  It ACKs commands for **ANY device id** — including `node_bench_agg`, clearing the
+  pipeline's cooldowns with fake hardware ACKs — and injects simulated telemetry on the
+  same topics the real PZEM publishes to. One stray run mid-demo corrupts the demo and
+  the safety state.
+* Exactly **one broker** may own port 1883 (see the Gate 0 pre-step). Two listeners =
+  silently split traffic.
+* Every tool that talks to the authed broker needs credentials — including
+  `mosquitto_sub`/`mosquitto_pub` and `scripts/calibrate_ct.py` (Gate 6 note).
+
+---
+
 ## Completed before the bench session
 
 | Gate | Status | Evidence |
@@ -28,16 +42,47 @@ because installing it there downgrades `uvicorn`/`starlette`). Recreate with
 The system broker is bound to loopback, so no ESP32 can reach it. Decision taken:
 **bind 0.0.0.0 with password auth**, canonical user **`ems_pipeline`**.
 
+**Pre-step — exactly one broker owner.** The docker-compose stack, the system service and
+`scripts/start_broker.py` all want port 1883; two of them running means silently split
+traffic (the collision is verification finding BROKER-1). Before anything else:
+
+```bash
+docker ps --format '{{.Names}}  {{.Ports}}' | grep 1883   # if the compose broker is up:
+docker compose down                                        # stop it before the bench session
+systemctl status mosquitto --no-pager                      # confirm which broker is live
+ss -ltn | grep 1883                                        # must show exactly ONE listener
+```
+
 ```bash
 # 1. Pick a broker password and create the user (you will type it twice)
 sudo mosquitto_passwd -c /etc/mosquitto/passwd ems_pipeline
 
-# 2. Open the listener and require auth
+# 1b. Dedicated ESP32 device user — the firmware must NOT hold the pipeline credential
+#     (with only the shared user, anyone holding the one password can publish
+#     home/plug/node_bench_agg/command, i.e. toggle mains). Set EMS_MQTT_USER in
+#     secrets.h to esp32.
+sudo mosquitto_passwd /etc/mosquitto/passwd esp32
+
+# 2. Open the listener and require auth, and enforce the ACL grant matrix
 sudo tee /etc/mosquitto/conf.d/ems.conf >/dev/null <<'EOF'
 listener 1883 0.0.0.0
 allow_anonymous false
 password_file /etc/mosquitto/passwd
+acl_file /etc/mosquitto/acl
 EOF
+
+# 2b. System-broker equivalent of the repo ACL: copy the grant matrix and deploy it.
+#     The repo's mosquitto/config/acl (docker path) is the authority — the same
+#     matrix applies here. Grants, in full (a sketchy ACL breaks the stack):
+#       esp32       read  home/plug/+/command;
+#                   write home/sensor/+/power, home/sensor/+/telemetry,
+#                               home/sensor/+/status, home/plug/+/ack
+#       ems_pipeline read  home/sensor/#, home/plug/+/ack, home/ml/label, $SYS/#
+#                   write home/plug/+/command, home/ui/events, home/ml/label
+#     ($SYS/# read is what the docker healthcheck needs; the home/ml/label write is
+#     what the API label loop needs. Do not trim either.)
+sudo cp mosquitto/config/acl /etc/mosquitto/acl
+sudo chown mosquitto:mosquitto /etc/mosquitto/acl
 
 sudo systemctl restart mosquitto
 ss -ltn | grep 1883          # must now show 0.0.0.0:1883, not 127.0.0.1:1883
@@ -67,10 +112,11 @@ $EDITOR firmware/esp32_node/include/secrets.h
 ```
 
 Fill in: 2.4 GHz SSID (**the ESP32 has no 5 GHz radio**), Wi-Fi password, the LAN
-IP from Gate 0, the broker password from Gate 0. Leave `EMS_MQTT_USER` as
-`ems_pipeline` and `EMS_DEVICE_ID` as `node_bench_agg` — the latter must match
-`devices:` in `config/config.hardware.yaml` or the backend silently ignores every
-reading.
+IP from Gate 0, the **`esp32` user's** password from Gate 0 step 1b. Set
+`EMS_MQTT_USER` to `esp32` (the dedicated device user — the firmware must not hold
+the pipeline credential) and `EMS_DEVICE_ID` to `node_bench_agg` — the latter must
+match `devices:` in `config/config.hardware.yaml` or the backend silently ignores
+every reading.
 
 ```bash
 cd firmware/esp32_node && /tmp/pio-venv/bin/pio run     # PASS = SUCCESS
@@ -102,8 +148,8 @@ mosquitto_sub -h localhost -u ems_pipeline -P <pw> -t 'home/#' -v
 `rc=5` is not authorised. Fix the credential or IP, do not move on.
 
 **Expect zeros or NaN-skips from the PZEM here** — no mains is connected yet.
-Core 0 skips non-finite reads (`main.cpp:167`), so the power topic may publish
-`0.00`. That is correct at this gate.
+Core 0 skips non-finite reads (the `isnan()` guard in `SafetySamplingTask`), so the power topic
+may publish `0.00`. That is correct at this gate.
 
 ---
 
@@ -124,9 +170,16 @@ against a reference meter.
 I ≈ W / V. **FAIL** = zeros (UART wiring: RX/TX swapped on GPIO 16/17), or
 constant values (PZEM not refreshing).
 
-> Known gap: the backend does **not** subscribe to `/telemetry`, so V/I/PF never
-> reach the dashboard. Read it with `mosquitto_sub` for this gate. Fixing the
-> subscription is audit item D7, deferred.
+> If W is off by > 5 %, run the calibration tool with the 100 W lamp as the
+> reference — **it needs credentials against the authed broker** (its defaults are
+> the wrong user `pipeline` / a placeholder password, so auth fails silently into
+> a connection error):
+> `python scripts/calibrate_ct.py node_bench_agg --ref-power 100 --username ems_pipeline --password <pw>`
+> (or `export MQTT_USERNAME=ems_pipeline MQTT_PASSWORD=<pw>` — same effect).
+
+> (Resolved 2026-09-10: the backend now subscribes `home/sensor/+/telemetry`
+> and broadcasts V/I/PF to the dashboard — read them there, or with
+> `mosquitto_sub` for this gate.)
 
 ---
 
@@ -134,8 +187,8 @@ constant values (PZEM not refreshing).
 
 Continuity meter across the relay's load contacts, nothing plugged in.
 
-1. Power-on / reset → contacts must read **OPEN**. `setRelay(false)` runs before
-   Wi-Fi (`main.cpp:287`) and the 100 kΩ pull-down holds the input low while
+1. Power-on / reset → contacts must read **OPEN**. The pre-Wi-Fi `setRelay(false)` call in
+   `setup()` and the 100 kΩ pull-down holds the input low while
    GPIO 18 is high-impedance during boot.
 2. `mosquitto_pub -t home/plug/node_bench_agg/command -m ON` → **CLOSED**, and
    `home/plug/node_bench_agg/ack` publishes `ON_CONFIRMED`.
@@ -173,7 +226,7 @@ At 150 ms, above 150 W. Write the number down before Gate 9.
 ## GATE 9 — Arc-fault behaviour (⚠ expect a trip; safety gate)
 
 Inrush suppression only applies while the 5-sample baseline is **below 50 W**
-(`main.cpp:97`, `isNormalInrush`). The rig's intended baseline is 65-220 W, so
+(the `BASELINE_INRUSH_CEIL` constant, via `isNormalInrush`). The rig's intended baseline is 65-220 W, so
 suppression is off for every load added after the first.
 
 | test | action | predicted |
@@ -268,3 +321,21 @@ GATE n — <name>
   EVIDENCE: <measured numbers / serial excerpt / mosquitto_sub output>
   NEXT:     <next gate, or STOP + reason>
 ```
+
+
+---
+
+## DEMO-DAY NOTES (added 2026-09-10, wave-3 close-out)
+
+1. **Viewing the dashboard from another device (LAN):** run the frontend with
+   `npm run dev -- --host` AND export `CORS_ORIGINS=http://<lan-ip>:5173` for
+   the API — the WS origin check reuses the CORS allowlist, and the defaults
+   cover only localhost/127.0.0.1. Without this the page loads but the live
+   event stream is silently rejected.
+2. **Same-socket event spacing:** space plug-in/unplug events on one socket at
+   least ~20 s apart (the delta-overlap baseline refills over a 30-sample
+   history; two events closer than the stability window land inside one
+   pending delta event and are treated as near-simultaneous — out of scope).
+3. **Sequencing:** projector-first (cold start is inrush-suppressed); never
+   add the projector onto a >= 50 W running baseline (arc-fault trip,
+   expected firmware behavior — see GOD_TIER_PLAN C3).

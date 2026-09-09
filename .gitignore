@@ -210,7 +210,18 @@ core
 core.*
 *.core
 Screenshot*.png
+Screenshot*.jpg
+Screenshot*.jpeg
 Screenshot from *.png
+Screen Shot *.png
+Screen Shot *.jpg
+ChatGPT Image*.png
+ChatGPT Image*.jpg
+ChatGPT_Image*.png
+ChatGPT_Image*.jpg
+ChatGPT*.png
+Pasted image *.png
+CleanShot*.png
 
 # ── Environment & Secrets ───────────────────────────────────────────────────
 .env
@@ -258,6 +269,12 @@ graphify-out/
 .graphify*
 **/.graphify*
 .system_generated/
+**/system_generated/
+brain/
+**/brain/
+.agent/
+_agent/
+_agents/
 
 # ── Ephemeral Checkpoints, Scripts & Prompts ────────────────────────────────
 fix_*.py
@@ -275,6 +292,7 @@ PRODUCTION_AUDIT_ARCHIVE.md
 nullp_exhaustive_test_prompt.md
 prompt.md
 FAST_FIX_*.md
+GOD_TIER_PLAN*.md
 Project_Overview.pdf
 *.pdf
 *.md
@@ -297,6 +315,8 @@ Project_Overview.pdf
 !claude_debug/
 !claude_debug/**/*
 claude_debug/claude/
+claude_debug/GOD_TIER_PLAN*.md
+!claude_debug/GOD_TIER_PLAN_2026-09-10.md
 !claude_context/
 !claude_context/**/*
 !.github/**/*
@@ -310,3 +330,8 @@ claude_debug/claude/
 firmware/esp32_node/include/secrets.h
 **/secrets.h
 !**/secrets.h.example
+
+# Mosquitto MQTT credentials (copy from passwd.example, never commit)
+mosquitto/config/passwd
+**/mosquitto/config/passwd
+!**/mosquitto/config/passwd.example

@@ -2,7 +2,7 @@
 
 > **Target:** Smart Energy Monitoring & Edge Safety Platform (EMS)  
 > **Location:** `claude_debug/debug_status.md`  
-> **Current Baseline:** 549/549 Tests Passing (100%) | Physical Stress: 7/7 PASS | HIL: 10/10 PASS | Closed-Loop E2E: 8/8 PASS | HW Sim Stress: 7/7 PASS  
+> **Current Baseline:** 626/626 (2026-09-10 close-out; was 549 at the 2026-09-08 session) Tests Passing (100%) | Physical Stress: 7/7 PASS | HIL: 10/10 PASS | Closed-Loop E2E: 8/8 PASS | HW Sim Stress: 7/7 PASS  
 > **Status:** Three debug passes completed — §0 hardware/NILM (2026-08-25, 6 defects), §0b ML recognition (2026-08-25, 4 defects + the recognition rewire), §0c five-class scope + label API (2026-09-08). Open items in §5.
 > **Session logs:** [`DEBUG_SESSION_2026-08-25.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/DEBUG_SESSION_2026-08-25.md) (hardware/NILM), [`ML_PIPELINE_FIX_2026-08-25.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ML_PIPELINE_FIX_2026-08-25.md) (ML recognition + label loop), [`SESSION_2026-09-08.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/SESSION_2026-09-08.md) (five-class scope, label-unrecognized API, wiring guide) — root causes, measured evidence, verification commands.
 
@@ -19,9 +19,9 @@ pre-fix source and passes after (verified by reverting `src/` and re-running).
 
 | ID | Defect | Root cause | Fix |
 |----|--------|-----------|-----|
-| **H-1** | Twin tolerated a 140% overload indefinitely: 280 W on a 200 W-rated line left the relay **closed** on a cold baseline | `core0_safety_step` gated overcurrent on `and not is_normal_inrush`. `main.cpp:207-217` makes this path **unconditional by design** (spec D11′) — the twin was *weaker* than the shipped firmware | Gate removed; overcurrent now trips on the first sample above 125% rated, matching firmware |
-| **H-2** | A NaN PZEM read poisoned safety state and reached the wire: `_last_watts`, `_baseline_ring` and `shared_power_watts` all latched NaN, Core 1 published a bare `nan` power payload and non-standard JSON (`{"w": NaN}`) | No finite-value guard; `main.cpp:167` skips the whole cycle on `isnan()` | Same skip-cycle guard added — `_last_watts`, the ring and shared state are left untouched |
-| **H-3** | Relay polarity was **entirely unmodelled**. `relay_active_low` was stored and never read, so no observable differed between active-HIGH and active-LOW; defect **B-7** was undetectable by any test | `set_relay()` only wrote the logical state. `test_active_low_logic_correctness` asserted only that state, so it passed under either polarity — and its comment described active-LOW, contradicting the shipped `RELAY_ACTIVE_LOW = false` | Added read-only `gpio18_level` property (electrical pin level, mirrors `setRelay()` at `main.cpp:137`); default `relay_active_low` corrected `True → False` to track the locked spec; test now asserts pin level under both polarities |
+| **H-1** | Twin tolerated a 140% overload indefinitely: 280 W on a 200 W-rated line left the relay **closed** on a cold baseline | `core0_safety_step` gated overcurrent on `and not is_normal_inrush`. The overcurrent cutoff in `SafetySamplingTask` is **unconditional by design** (spec D11′) — the twin was *weaker* than the shipped firmware | Gate removed; overcurrent now trips on the first sample above 125% rated, matching firmware |
+| **H-2** | A NaN PZEM read poisoned safety state and reached the wire: `_last_watts`, `_baseline_ring` and `shared_power_watts` all latched NaN, Core 1 published a bare `nan` power payload and non-standard JSON (`{"w": NaN}`) | No finite-value guard; the `isnan()` guard in `SafetySamplingTask` skips the whole cycle | Same skip-cycle guard added — `_last_watts`, the ring and shared state are left untouched |
+| **H-3** | Relay polarity was **entirely unmodelled**. `relay_active_low` was stored and never read, so no observable differed between active-HIGH and active-LOW; defect **B-7** was undetectable by any test | `set_relay()` only wrote the logical state. `test_active_low_logic_correctness` asserted only that state, so it passed under either polarity — and its comment described active-LOW, contradicting the shipped `RELAY_ACTIVE_LOW = false` | Added read-only `gpio18_level` property (electrical pin level, mirrors the `setRelay()` GPIO write in `main.cpp`); default `relay_active_low` corrected `True → False` to track the locked spec; test now asserts pin level under both polarities |
 
 ### Fixed — ML / NILM
 
@@ -90,7 +90,7 @@ held-out seeds at conf ≥ 0.65; microwave/vacuum → `UNRECOGNISED` conf 0.0 wi
 populated distance map; full loop: unrecognized → LABEL_REQUEST with watts
 segments → `handle_label_submitted` → recognised next event → persisted to the
 registry file; endpoint 200/401/404/422; GET listing). Targeted regression 79/79.
-**Full suite 549/549** (was 511).
+**Full suite 626/626 (2026-09-10 close-out; was 549 at the 2026-09-08 session)** (was 511).
 
 **Honesty boundary (unchanged):** enrolled on the *simulator* distribution —
 demo-verifiable, **not** physical validation. Physical 5-class recognition
@@ -100,24 +100,52 @@ attested PZEM windows. Reject channel remains the physical power-envelope gate +
 
 ---
 
+## 0d. Hardware Alignment, Overlap Delta & God-Tier Close-Out (2026-09-10)
+
+Fourth pass, executing the 3-wave system-wide alignment, overlap NILM delta-windowing, digital-twin hardware parity, and broker security hardening. Full narrative in [`SESSION_2026-09-10.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/SESSION_2026-09-10.md), machine-checkable proofs in [`VERIFICATION_LEDGER_2026-09-10.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/VERIFICATION_LEDGER_2026-09-10.md), and parity contract in [`HARDWARE_ALIGNMENT_CONTRACT.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_ALIGNMENT_CONTRACT.md).
+
+| ID | Area / Defect | Root Cause | Fix & Parity Contract |
+|----|---------------|------------|------------------------|
+| **G-1** | **Digital Twin Parity** | Twin differed from `firmware/esp32_node/src/main.cpp`: cutoff was 200 W (fw is 250 W); ROC `dt` assumed ~10 ms (PZEM read takes 134–160 ms, so 120 W step falsely tripped ROC); lockout timer fired only once on command rather than continuous per-tick expiry; status strings had casing mismatches (`"OVERCURRENT"` vs `"OVERCURRENT:"`); GPIO18 active-HIGH state unreflected. | Added `ROC_DT_MIN=0.134, ROC_DT_MAX=0.160` clamp; default cutoff aligned to 250 W; command parser enforces exact case & 256-byte buffer cap; `SERVER_TIMEOUT` arms at ONLINE and republishes every 30 s; lockout expiry windowed to 300 s; `gpio18_level` models physical pin drive. |
+| **G-2** | **Overlap Delta-Window NILM** | Plugging in a second appliance or unplugging an appliance on an active baseline either failed recognition or falsely re-classified the old pre-event window (stale verdict). | Implemented delta classification: evaluates `steady_after - steady_before` through the physical envelope gate; guarded by variance stabilization so soft-starts do not trip prematurely; baseline handoff after events; unplugs emit no spurious recognition event. Feature-flagged `preprocessing.delta_overlap` (ON in demo & hardware). |
+| **G-3** | **Safety & RL Isolation** | RL agent could theoretically schedule shed actions affecting critical safety-tier loads without enforcement; safety branch coverage was incomplete. | Configured `tier0: true` (NEVER_SHED) and `rl.cooldown_seconds: 300` in demo and hardware configs; safety monitor subscribes with valid credentials; expanded `tests/test_safety.py` from 8 to 33 tests achieving **100% statement and branch coverage** on `src/pipeline/safety.py`. |
+| **G-4** | **MQTT Broker & Security** | Host demo broker lacked local isolation and per-user authorization; `mosquitto.conf` referenced docker-only paths (`/mosquitto/*`); `mosquitto/config/passwd` with credentials was tracked in git. | Created `mosquitto-host.conf` with relative paths; restricted host broker to loopback `127.0.0.1:1883`; implemented fine-grained topic ACL matrix (`mosquitto/config/acl`); untracked `passwd` and provided `passwd.example` template; swept hardcoded defaults. |
+| **G-5** | **API Robustness & Integrity** | `/api/submit-label` returned HTTP 200 even when MQTT broker publish failed (dashboard lied); `PrototypeRegistry.save()` was non-atomic; SQLite connection teardown caused 10-second stall on SIGINT; WebSocket lacked origin validation. | Label submission endpoint returns 503 if broker publish fails; atomic file replace (`tmp + os.replace`) for registry save; task cancellation on DB shutdown (close stall reduced from 10s to 0.006s); added WS origin check & `hmac.compare_digest` for API keys. |
+| **G-6** | **Frontend Parity** | Device table showed "—" in confidence column; dead duplicate label card; UI lacked live V/I/PF display; breaker status remained TRIPPED after 5-minute lockout expired. | Wired confidence display to pipeline event `confidence`; added live `TELEMETRY` consumer updating V/I/PF per device; time-windowed breaker status to lockout duration; removed mock controls and added illustrative disclaimer. Vitest passed 20/20. |
+
+**Verification Suites Added (2026-09-10):**
+- `tests/test_hardware_alignment.py` (14/14 PASS): Static AST verification of `main.cpp` constants, twin parity, topic symmetry, and status string exactness.
+- `tests/test_detector_path_e2e.py` (PASS): E2E verification of physical push path through transient detector.
+- `tests/test_overlap_delta.py` (PASS): Verification of delta-windowing across appliance superposition and step changes.
+- `tests/test_phantom_integration.py` (PASS): Verifies 9 W LED bulb sub-threshold tracking via phantom producer.
+- `tests/test_hardware_rl_optout.py` (PASS): Verifies RL agent cannot shed tier-0 loads.
+
+**Suite Count:** **626 passed, 0 failed** in `tests/` + **20/20 vitest passed**.
+
+---
+
 ## 1. Master Verification & Task Status
 
 | # | Task | Scope | Status | Notes |
 |---|------|-------|:------:|-------|
-| 1 | Full regression baseline | `pytest tests/ -q` | ✅ **PASS** | **549/549 passing** (100%) — 467 before the 2026-08-25 hardware pass, 474 after it, 511 after the ML pass, 549 after the 2026-09-08 five-class pass |
+| 1 | Full regression baseline | `pytest tests/ -q` | ✅ **PASS** | **626/626 passing** (100%) — 467 (pre-08-25) → 474 (08-25 HW) → 511 (08-25 ML) → 549 (09-08 5-class) → **626 (09-10 close-out)** |
 | 2 | Physical & electrical stress harness | `scripts/real_world_physical_stress.py` | ✅ **PASS** | **7/7 scenarios passed** |
 | 3 | Hardware-in-the-loop (HIL) suite | `scripts/hil_hardware_test.py` | ✅ **PASS** | **10/10 scenarios passed** |
 | 4 | Closed-loop E2E firmware & AI simulation | `scripts/test_firmware_and_ai_e2e.py` | ✅ **PASS** | **8/8 stages passed** |
 | 5 | Hardware simulation stress suite | `scripts/stress_test_hardware_sim.py` | ✅ **PASS** | **7/7 scenarios passed** |
 | 6 | Real-data NILM & ML fallback suite | `tests/test_real_data_and_ml_fallback.py` | ✅ **PASS** | **36/36 passing** |
-| 6b | ML recognition & label-loop suite | `tests/test_ml_pipeline_recognition.py` | ✅ **PASS** | All passing — M-5…M-8 regressions + the OpenMax deadness contract (§5.3); re-anchored to the 5-class registry 2026-09-08 |
-| 6c | Five-class e2e recognition + open-set label loop | `tests/test_e2e_five_class_recognition.py` | ✅ **PASS** | **21/21 passing** (new 2026-09-08) — §0c |
+| 6b | ML recognition & label-loop suite | `tests/test_ml_pipeline_recognition.py` | ✅ **PASS** | All passing — M-5…M-8 regressions + the OpenMax deadness contract (§5.3) |
+| 6c | Five-class e2e recognition + open-set label loop | `tests/test_e2e_five_class_recognition.py` | ✅ **PASS** | **21/21 passing** — §0c |
+| 6d | Hardware alignment & twin parity suite | `tests/test_hardware_alignment.py` | ✅ **PASS** | **14/14 passing** (new 2026-09-10) — §0d |
+| 6e | Overlap delta-window & detector e2e suites | `tests/test_overlap_delta.py` & `test_detector_path_e2e.py` | ✅ **PASS** | All passing (new 2026-09-10) — §0d |
+| 6f | Safety coverage gate | `pytest tests/test_safety.py --cov=src/pipeline/safety --cov-branch` | ✅ **PASS** | **100% statement (135/135) and 100% branch (40/40)** coverage |
+| 6g | Frontend component & page tests | `cd frontend && npm test -- --run` | ✅ **PASS** | **20/20 passing** (Vitest) |
 | 7 | Demo profile CLI argument support | `scripts/run_pipeline.py` | ✅ **DONE** | Added `--config` parameter to load `config/config.demo.yaml` |
 | 8 | Heuristic fallback pipeline integration | `scripts/run_pipeline.py` | ✅ **DONE** | Integrated `HeuristicApplianceClassifier` for zero-torch fallback |
 | 9 | Demo fleet simulation profiles | `backend/scripts/simulate_esp32.py` | ✅ **DONE** | Added `DEMO_DEVICES` and `--demo` CLI flag |
 | 10 | Full system demo runner wiring | `scripts/demo_full_system.py` | ✅ **DONE** | Added `--demo` support & fixed WebSocket URL to `/ws` |
-| 11 | Knowledge graph synchronization | `graphify update .` | ✅ **DONE** | Rebuilt 2026-09-08 after the five-class pass: 2,557 nodes, 5,022 edges, 172 communities |
-| 12 | Recognition thresholds stated in config | `config/config*.yaml` | ✅ **DONE** | `recognition_threshold: 0.45` and `heuristic_min_confidence: 0.55` now explicit in all three profiles, with the rationale for why they are *not* `confidence_threshold` |
+| 11 | Knowledge graph synchronization | `graphify update .` | ✅ **DONE** | Rebuilt 2026-09-10: 2,783 nodes, 5,350 edges, 176 communities |
+| 12 | Recognition thresholds stated in config | `config/config*.yaml` | ✅ **DONE** | Explicit recognition and confidence gates configured in demo and hardware profiles |
 
 ---
 
@@ -215,7 +243,8 @@ mechanical fix, so none were changed unilaterally.
 
 2. **H-4 — lockout is set on a different core than the firmware does it.** The twin sets
    `relay_locked` synchronously inside Core 0 alongside the cutoff. The firmware sets
-   `relayLocked`/`lockStartMs` in **Core 1** (`main.cpp:395-418`), after observing `sharedArcFault`.
+   `relayLocked`/`lockStartMs` in **Core 1** (the command/lockout handler, after observing
+   `sharedArcFault`).
    Real hardware therefore has a window — up to one Core-1 loop period — in which a cutoff has
    fired but the relay is not yet locked, so an `ON` command arriving in that window would
    re-close the relay onto an un-cleared fault. The twin cannot expose this race by construction.

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BrainCircuit, Zap, HelpCircle, ShieldOff, Thermometer, Tag, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { BrainCircuit, Zap, ShieldOff, Thermometer, Tag, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 const API_BASE = `http://${window.location.hostname}:8000`;
 
@@ -107,25 +107,14 @@ const DigitalTwin = ({
   pmvScore,
   pmv,
   rlLog = [],
-  unknownDevices = [],
-  onLabel,
   ...rest
 }) => {
   const currentPmv = typeof pmv === 'number' ? pmv : (typeof pmvScore === 'number' ? pmvScore : 0);
   const pmvInfo = getPmvLabel(currentPmv);
   const [labeled, setLabeled] = useState({});
-  const [unknownInputs, setUnknownInputs] = useState({});
-  const [dismissedUnknowns, setDismissedUnknowns] = useState({});
 
   const handleLabeled = (deviceId, className) => {
     setLabeled((prev) => ({ ...prev, [deviceId]: className }));
-  };
-
-  const handleUnknownSubmit = (reqId, labelVal) => {
-    if (onLabel) {
-      onLabel(reqId, labelVal);
-    }
-    setDismissedUnknowns((prev) => ({ ...prev, [reqId]: true }));
   };
 
   const combinedEvents = events.length > 0 ? events : rlLog;
@@ -174,45 +163,8 @@ const DigitalTwin = ({
         </div>
       </div>
 
-      {/* Unknown Devices Label Requests */}
-      {unknownDevices.map((dev) => {
-        const reqId = dev.requestId || dev.id;
-        if (dismissedUnknowns[reqId]) return null;
-        const currentVal = unknownInputs[reqId] || '';
-
-        return (
-          <div
-            key={reqId}
-            data-testid={`label-request-${reqId}`}
-            className="label-request-card p-4 rounded-2xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800/60 shadow-sm transition-all"
-          >
-            <div className="flex items-center gap-2 text-xs font-bold text-amber-800 dark:text-amber-300 mb-2">
-              <HelpCircle size={15} />
-              <span>Unknown Device Detected: {dev.id}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                role="textbox"
-                placeholder="Enter appliance name (e.g. Dishwasher)..."
-                value={currentVal}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setUnknownInputs((prev) => ({ ...prev, [reqId]: val }));
-                }}
-                className="flex-1 px-3 py-2 bg-white dark:bg-gray-800 border border-amber-300 dark:border-amber-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
-              />
-              <button
-                type="button"
-                onClick={() => handleUnknownSubmit(reqId, currentVal)}
-                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-gray-950 font-bold text-xs shadow-sm transition-all cursor-pointer"
-              >
-                Submit
-              </button>
-            </div>
-          </div>
-        );
-      })}
+      {/* Unknown-device label requests render inline in the Agent Event Log
+          below (LABEL_REQUEST branch) — that is the wired enrollment flow. */}
 
       {/* Agent Event Log */}
       <div className="space-y-3">

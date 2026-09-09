@@ -102,9 +102,15 @@ class SystemOrchestrator:
             print("  ✅ Local MQTT broker detected on port 1883")
         else:
             if shutil.which("mosquitto"):
-                print("  🔌 Launching local Mosquitto daemon...")
+                # The repo conf (mosquitto/config/mosquitto.conf) uses
+                # container-only /mosquitto/* paths — on the HOST it dies
+                # instantly. Prefer the host conf (repo-root-relative paths).
+                conf = ("mosquitto/config/mosquitto-host.conf"
+                        if os.path.exists("mosquitto/config/mosquitto-host.conf")
+                        else "mosquitto/config/mosquitto.conf")
+                print(f"  🔌 Launching local Mosquitto daemon ({conf})...")
                 self.start_process(
-                    ["mosquitto", "-c", "mosquitto/config/mosquitto.conf"],
+                    ["mosquitto", "-c", conf],
                     "Mosquitto Broker"
                 )
                 time.sleep(1.0)
@@ -115,6 +121,17 @@ class SystemOrchestrator:
                     "Python MQTT Broker"
                 )
                 time.sleep(1.5)
+            # Fail loud: a brokerless demo is a silently-broken demo (the
+            # pipeline just logs MQTT connection errors forever).
+            if not self.check_broker():
+                print("  ❌ No MQTT broker is reachable on port 1883.")
+                print("     Fix, then re-run:")
+                print("       1. sudo systemctl start mosquitto  (Gate 0 of BRINGUP_RUNBOOK.md),")
+                print("          or install mosquitto + mosquitto-clients;")
+                print("       2. ensure credentials: export MQTT_USERNAME=ems_pipeline MQTT_PASSWORD=<pw>")
+                print("          (the broker requires auth; the defaults were removed).")
+                self.stop_all()
+                sys.exit(1)
 
         # Step 2: Start Pipeline Orchestrator
         pipeline_cmd = [sys.executable, "scripts/run_pipeline.py"]
@@ -124,9 +141,13 @@ class SystemOrchestrator:
         time.sleep(1.5)
 
         # Step 3: Start FastAPI Backend
+        # verify_api_key fails closed when EMS_API_KEY is unset, so without a
+        # default here every protected route (incl. the label loop) 401s in
+        # the non-docker demo.
         self.start_process(
             [sys.executable, "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"],
-            "FastAPI Backend"
+            "FastAPI Backend",
+            env_extra={"EMS_API_KEY": os.environ.get("EMS_API_KEY", "changeme-ems-prod-key")},
         )
         time.sleep(1.5)
 

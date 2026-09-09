@@ -1,12 +1,20 @@
 """
-End-to-end ML-pipeline integration test — 5-class recognition + open-set loop.
+End-to-end ML-pipeline integration test — 4-class recognition + open-set loop,
+on STEADY windows fed directly to _classify_device (gate-plumbing coverage;
+see the honest-criteria note below and tests/test_detector_path_e2e.py for
+the transient/detector path).
+
+(File name kept from its five-class era — renaming churns git history.)
 
 Verifies, against the real shipped demo artefacts (no mocks):
 
-  a) Simulated signatures for the five primary classes
-     (phone, laptop, bulb, projector, fan), generated exactly as
+  a) Simulated signatures for the four in-scope demo classes
+     (phone, laptop, bulb, projector), generated exactly as
      backend/scripts/simulate_esp32.py:DEMO_DEVICES publishes them, are each
-     recognised as the right class.
+     recognised as the right class. Fan is out of demo scope since
+     2026-09-10: node_fan stays in the simulator fleet as an out-of-scope
+     device (see TestFanOutOfScope below for what the classifier does with
+     it).
 
   b) An anomalous/unseen signature (microwave / vacuum-style spike) is
      reported as Unrecognised, triggers the labeling prompt/event
@@ -19,6 +27,23 @@ The bulb and fan classes are enrolled into a *writable copy* of the registry
 inside the test (the shipped enrolled artifact carries only the original demo
 five), which is exactly the few-shot enrollment path the API endpoint uses.
 Weights are copied to tmpdir so the checked-in artefacts are never mutated.
+
+What this file does and does NOT cover (honest criteria, 2026-09-10):
+
+  * Every recognition test here feeds steady windows DIRECTLY to
+    `_classify_device`, bypassing `NILMTransientDetector.push()`. That
+    validates the gate plumbing (envelope gate, enrolled precedence,
+    recognition threshold, label loop) on steady windows ONLY — it is not
+    evidence about the transient path a physical plug-in actually takes.
+    Detector-path coverage (plug-ins routed through push(), the 97-99%
+    pre-event trigger window, the C1 loaded-socket misclassification, the
+    C9 unplug semantics) lives in tests/test_detector_path_e2e.py.
+  * A confidence of ~1.0 on these windows is an ARTIFACT of the
+    single-envelope-survivor renormalisation in `_classify_device` (one class
+    survives the power-envelope gate, so the softmax over one candidate is
+    exactly 1.0) — it is NOT P(correct) and must not be read as one. The
+    meaningful gates are band-correct classification of the drawn watts and
+    zero confidently-wrong answers, both asserted below.
 
 Hardware note: this runs on the software simulator path, not physical
 hardware — per CLAUDE.md it does NOT constitute physical validation.
@@ -60,8 +85,8 @@ def _fleet_window(rated: float, var: float, seed: int, n: int = SEQ_LEN,
 
 
 # rated/var read from backend/scripts/simulate_esp32.py:DEMO_DEVICES — the
-# generator the demo fleet actually publishes from. bulb and fan are the two
-# fleet nodes added for the five-class scope.
+# generator the demo fleet actually publishes from. fan is kept here even
+# though it is out of demo scope: TestFanOutOfScope needs its profile.
 def _load_fleet_profiles() -> dict:
     sys.path.insert(0, os.path.join(os.getcwd(), "backend", "scripts"))
     from simulate_esp32 import DEMO_DEVICES  # noqa: E402
@@ -81,7 +106,9 @@ def _load_fleet_profiles() -> dict:
 
 
 FLEET = _load_fleet_profiles()
-FIVE_CLASSES = ("phone", "laptop", "bulb", "projector", "fan")
+# Demo recognition scope since 2026-09-10 (fan dropped; node_fan stays in the
+# simulator fleet as an out-of-scope device).
+FOUR_CLASSES = ("phone", "laptop", "bulb", "projector")
 
 # Microwave (900 W) / vacuum (1200 W) spikes — far outside every enrolled
 # envelope and every plausible consumer-electronics band.
@@ -101,8 +128,9 @@ def pipeline(tmp_path):
 
     The shipped enrolled registry (prototype_registry_enrolled.pt, generated
     by scripts/enroll_demo_devices.py with held-out seeds) already carries
-    the five classes; the writable copy is so label-enrollment inside the
-    tests cannot mutate the checked-in artefact.
+    the enrolled five (including the now-out-of-scope fan); the writable copy
+    is so label-enrollment inside the tests cannot mutate the checked-in
+    artefact.
     """
     weights_dir = tmp_path / "weights"
     shutil.copytree(DEMO_WEIGHTS, weights_dir)
@@ -117,18 +145,18 @@ def pipeline(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# (a) The five primary classes are each recognised
+# (a) The four in-scope demo classes are each recognised
 # ══════════════════════════════════════════════════════════════════════════
 
-class TestFiveClassesRecognised:
+class TestFourClassesRecognised:
 
-    def test_config_declares_the_five_classes(self):
-        for cfg_file in ("config/config.yaml", "config/config.demo.yaml"):
-            with open(cfg_file) as fh:
-                cfg = yaml.safe_load(fh)
-            proto = cfg["protonet"]
-            assert proto["classes"] == list(FIVE_CLASSES), cfg_file
-            assert proto["open_set_threshold"] == 0.65, cfg_file
+    def test_config_declares_the_four_class_demo_scope(self):
+        with open("config/config.demo.yaml") as fh:
+            cfg = yaml.safe_load(fh)
+        assert cfg["appliances"] == list(FOUR_CLASSES)
+        # protonet.classes / open_set_threshold were removed 2026-09-10 as
+        # dead keys (no runtime reader); the recognition scope now lives in
+        # `appliances:`, which scopes the heuristic channel.
 
     def test_all_four_artifacts_load(self, pipeline):
         # protonet.pt, openmax_weibull.pkl, prototype_registry.pt (+enrolled)
@@ -142,14 +170,14 @@ class TestFiveClassesRecognised:
         assert pipeline.calibrated_scaler is not None, \
             "temperature_scaler.pt failed to load"
 
-    def test_enrolled_five_target_classes_are_in_the_registry(self, pipeline):
+    def test_enrolled_target_classes_are_in_the_registry(self, pipeline):
         names = set(pipeline.prototype_registry.class_names())
-        for cls in FIVE_CLASSES:
+        for cls in FOUR_CLASSES:
             assert cls in names, f"{cls} not in registry: {sorted(names)}"
             assert pipeline.prototype_registry.power_envelope(cls) is not None, \
                 f"{cls} has no power envelope"
 
-    @pytest.mark.parametrize("cls", FIVE_CLASSES)
+    @pytest.mark.parametrize("cls", FOUR_CLASSES)
     def test_class_recognised_on_held_out_windows(self, pipeline, cls):
         rated, var = FLEET[cls]
         got = [pipeline._classify_device(
@@ -158,14 +186,42 @@ class TestFiveClassesRecognised:
                for s in TEST_SEEDS]
         assert got.count(cls) == len(got), f"{cls}: got {got}"
 
-    @pytest.mark.parametrize("cls", FIVE_CLASSES)
-    def test_confidence_clears_the_open_set_threshold(self, pipeline, cls):
-        # tau = 0.65 from config; a recognised window must clear it, i.e. the
-        # open-set gate rejects below it and accepts above it.
+    @pytest.mark.parametrize("cls", FOUR_CLASSES)
+    def test_confidence_clears_the_recognition_threshold(self, pipeline, cls):
+        # A recognised window must clear recognition_threshold (0.45), the
+        # live confirmed-classification gate. The old open_set_threshold
+        # (tau = 0.65) was a dead config key, removed 2026-09-10.
         rated, var = FLEET[cls]
         _, conf, _ = pipeline._classify_device(
             f"node_{cls}", rated, filtered_segment=_fleet_window(rated, var, 0))
-        assert conf >= 0.65, f"{cls} conf={conf}"
+        assert conf >= pipeline.recognition_threshold, f"{cls} conf={conf}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# (a2) Fan is out of demo scope — pinned behaviour of the out-of-scope fleet node
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestFanOutOfScope:
+
+    def test_fan_absent_from_demo_scope_but_still_named_via_enrolled_envelope(self, pipeline):
+        """Fan was dropped from the demo `appliances:` scope (2026-09-10).
+
+        It is NOT reported unrecognised, and that is deliberate: the enrolled
+        registry still carries a `fan` power envelope, and enrolled (operator-
+        confirmed) classes are exempt from the `appliances:` scope filter in
+        _eligible_classes — operator labels outrank the deployment list. So
+        node_fan, kept in the simulator fleet as an out-of-scope device, still
+        classifies as fan. Pinned so a future scope change is a conscious one:
+        to make fan read unrecognised, remove its envelope from the registry,
+        not the exemption.
+        """
+        assert "fan" not in (pipeline.config.get("appliances") or [])
+        rated, var = FLEET["fan"]
+        got = [pipeline._classify_device(
+                   "node_fan", rated,
+                   filtered_segment=_fleet_window(rated, var, s))[0]
+               for s in TEST_SEEDS]
+        assert got.count("fan") == len(got), f"fan: got {got}"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -391,4 +447,8 @@ class TestLabelUnrecognizedEndpoint:
         assert r.status_code == 200
         sigs = r.json()["unrecognized_signatures"]
         assert any(s["signature_id"] == "node_vacuum" for s in sigs)
-        assert r.json()["target_classes"] == list(FIVE_CLASSES)
+        # protonet.classes was removed as a dead key (2026-09-10) and the
+        # API's target_classes echo re-pointed at the profile's appliances:
+        # list (the honest scope prompt for the labeling UI).
+        assert r.json()["target_classes"] == [
+            "phone", "laptop", "bulb", "projector"]

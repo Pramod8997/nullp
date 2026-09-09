@@ -190,17 +190,16 @@ For mixed deployment with physical ESP32 nodes alongside simulated devices:
 # 1. Start infrastructure
 make run
 
-# 2. Flash physical nodes (adjust /dev/ttyUSB* ports)
+# 2. Flash the physical node (adjust /dev/ttyUSB* port)
 ./scripts/flash_firmware.sh
 
-# 3. Calibrate CT clamps on each node
-python scripts/calibrate_ct.py node_fridge
-python scripts/calibrate_ct.py node_microwave
-python scripts/calibrate_ct.py node_kettle
-python scripts/calibrate_ct.py node_hvac
+# 3. Calibrate the metering node — the physical rig is ONE node (node_bench_agg),
+#    and the tool needs broker credentials (its defaults fail auth):
+python scripts/calibrate_ct.py node_bench_agg --ref-power 100 \
+    --username ems_pipeline --password <pw>
 ```
 
-Physical nodes publish to `home/sensor/{DEVICE_ID}/power` and accept commands on `home/plug/{DEVICE_ID}/command`. The pipeline automatically detects physical vs. simulated devices via `config/config.yaml`.
+Physical nodes publish to `home/sensor/{DEVICE_ID}/power` and accept commands on `home/plug/{DEVICE_ID}/command`. The pipeline detects physical vs. simulated devices via the active config profile (`config/config.hardware.yaml` for the rig — one `node_bench_agg`; `config/config.demo.yaml` for the simulated fleet).
 
 ---
 
@@ -502,7 +501,7 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
 | Stale database | Run `make clean` to reset |
 | Latency panel shows > 200ms (red) | Check system load; reduce logging verbosity in `config.yaml` |
 | ESP32 enters safe mode | Server heartbeat lost — verify pipeline and Mosquitto connectivity |
-| CT clamp readings off by > 5% | Re-run `python scripts/calibrate_ct.py <DEVICE_ID>` with known 100W load |
+| PZEM readings off by > 5% | Re-run `python scripts/calibrate_ct.py <DEVICE_ID> --ref-power 100 --username ems_pipeline --password <pw>` with a known 100W load (the rig meters via a PZEM shunt, not a CT clamp) |
 | `OSError: Bad file descriptor` on shutdown | Harmless asyncio cleanup noise on Ctrl+C — does not affect data integrity |
 
 ---

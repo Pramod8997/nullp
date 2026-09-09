@@ -9,7 +9,7 @@ const formatDeviceName = (id) => {
     .toUpperCase();
 };
 
-const DeviceCards = ({ devices = {} }) => {
+const DeviceCards = ({ devices = {}, telemetry = {} }) => {
   const deviceIds = Object.keys(devices || {});
 
   if (deviceIds.length === 0) {
@@ -112,6 +112,20 @@ const DeviceCards = ({ devices = {} }) => {
                     <div className="text-2xl font-black font-mono tracking-tight text-gray-900 dark:text-white flex items-baseline gap-1">
                       <span>{power.toFixed(1)}</span>
                       <span className="text-sm font-semibold text-gray-500 dark:text-gray-400 font-sans">W</span>
+                    </div>
+                  )}
+
+                  {/* Live PZEM electrical telemetry (V / I / PF), when published */}
+                  {telemetry[id] && (
+                    <div
+                      data-testid={`device-telemetry-${id}`}
+                      className="text-[10px] font-mono text-gray-400 dark:text-gray-500 mt-1"
+                    >
+                      {telemetry[id].v != null && `${telemetry[id].v.toFixed(1)}V`}
+                      {telemetry[id].v != null && telemetry[id].i != null && ' · '}
+                      {telemetry[id].i != null && `${telemetry[id].i.toFixed(2)}A`}
+                      {telemetry[id].i != null && telemetry[id].pf != null && ' · '}
+                      {telemetry[id].pf != null && `PF ${telemetry[id].pf.toFixed(2)}`}
                     </div>
                   )}
                 </div>

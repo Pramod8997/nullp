@@ -10,7 +10,10 @@ config = {
     'listeners': {
         'default': {
             'type': 'tcp',
-            'bind': '0.0.0.0:1883',
+            # Loopback only: this is the last-resort dev fallback broker and
+            # it allows anonymous connects — binding 0.0.0.0 would silently
+            # expose an unauthenticated broker (direct relay control) to the LAN.
+            'bind': '127.0.0.1:1883',
         },
     },
     'sys_interval': 10,
@@ -20,10 +23,17 @@ config = {
 }
 
 async def start_broker():
+    # Loud on purpose: this is an anonymous, loopback-only dev fallback —
+    # never to be mistaken for the authenticated broker the rig uses.
+    print("!!! SECURITY: anonymous dev fallback broker on 127.0.0.1:1883 !!!\n"
+          "!!! Loopback-only, no authentication — NOT for the rig or any LAN !!!\n"
+          "!!! Use the authenticated mosquitto stack for anything real.      !!!")
+    logger.warning("Anonymous dev fallback broker starting on 127.0.0.1:1883 "
+                   "(loopback-only, NOT for the rig)")
     broker = Broker(config)
     try:
         await broker.start()
-        logger.info("MQTT Broker started on 0.0.0.0:1883")
+        logger.info("MQTT Broker started on 127.0.0.1:1883")
         # Keep running until cancelled
         stop_event = asyncio.Event()
         await stop_event.wait()

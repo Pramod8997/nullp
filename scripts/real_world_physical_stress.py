@@ -20,11 +20,14 @@ Usage:
     python scripts/real_world_physical_stress.py
 """
 
+import asyncio
 import math
 import random
+import re
 import sys
 import os
 import time
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -33,6 +36,15 @@ from src.hardware.esp32_firmware_sim import ESP32FirmwareNode, VirtualPZEM004T
 from src.pipeline.safety import FleetDiagnosticsMonitor
 from src.pipeline.aggregate_nilm import NILMTransientDetector
 from src.pipeline.watchdog import SoftAnomalyWatchdog
+
+# Firmware rated-power anchor (same drift-guard pattern as
+# tests/test_relay_safety_boot_brownout.py:100-109): the overcurrent bench
+# numbers below must track RATED_WATTS in main.cpp, never a local constant.
+_FIRMWARE_SRC = (Path(__file__).resolve().parents[1]
+                 / "firmware" / "esp32_node" / "src" / "main.cpp").read_text()
+_FIRMWARE_RATED = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', _FIRMWARE_SRC)
+assert _FIRMWARE_RATED, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
+FIRMWARE_RATED_WATTS = float(_FIRMWARE_RATED.group(1))
 
 
 class PhysicalStressReport:
@@ -143,7 +155,8 @@ def test_inrush_vs_arc_fault_discrimination(report: PhysicalStressReport):
     """Scenario 4: inrush suppression must protect the dP/dt arc-fault channel ONLY.
 
     Inrush suppression gates the dP/dt channel and nothing else — per
-    HARDWARE_FINAL_SPEC.md D11' and main.cpp:207-217 the overcurrent cutoff is
+    HARDWARE_FINAL_SPEC.md D11' and the unconditional overcurrent cutoff in
+    main.cpp (the `powerWatts > criticalWatts` block) the overcurrent cutoff is
     unconditional. The load is therefore rated so the inrush stays under the
     125% ceiling, isolating the dP/dt channel as the thing under test; the
     unconditional overcurrent contract is asserted separately at the end.
@@ -151,7 +164,8 @@ def test_inrush_vs_arc_fault_discrimination(report: PhysicalStressReport):
     This scenario previously drove a 1200W inrush into a 200W-rated node and
     asserted no trip, which only held because the twin wrongly gated overcurrent
     on inrush suppression. Real hardware opens the relay on the first sample
-    above 250W, so the old expectation contradicted the shipped firmware.
+    above 312.5 W (250 × 1.25), so the old expectation contradicted the
+    shipped firmware.
     """
     RATED = 1200.0          # critical ceiling = 1500W
     node = ESP32FirmwareNode(device_id="node_fridge", rated_watts=RATED)
@@ -162,8 +176,8 @@ def test_inrush_vs_arc_fault_discrimination(report: PhysicalStressReport):
         node.pzem.set_load(0.0)
         node.core0_safety_step(sim_dt=0.1)
 
-    # Inrush spike: 0W -> 1200W in 0.1s = 12,000 W/s on the dP/dt channel,
-    # while staying below the 1500W overcurrent ceiling.
+    # Inrush spike: 0W -> 1200W, ~8,955 W/s on the dP/dt channel at the
+    # hardware dt clamp (0.134 s), while staying below the 1500W ceiling.
     node.pzem.set_load(1200.0)
     node.core0_safety_step(sim_dt=0.1)
     # With inrush suppression active (baseline_avg < 50W), relay should NOT trip
@@ -176,20 +190,24 @@ def test_inrush_vs_arc_fault_discrimination(report: PhysicalStressReport):
         node.core0_safety_step(sim_dt=0.1)
     relay_running = node.gpio18_relay_state
 
-    # Genuine arc-fault after steady state: 150W -> 1500W in 0.1s = 13,500 W/s.
-    # Baseline is now 150W (> 50W ceiling) so suppression no longer applies, and
-    # 1500W is not *above* the 1500W ceiling, so the dP/dt channel alone trips.
+    # Genuine arc-fault after steady state: 150W -> 1500W, ~10,075 W/s at the
+    # hardware dt clamp. Baseline is now 150W (> 50W ceiling) so suppression no
+    # longer applies, and 1500W is not *above* the 1500W ceiling, so the dP/dt
+    # channel alone trips.
     node.pzem.set_load(1500.0)
     node.core0_safety_step(sim_dt=0.1)
     relay_after_arc = node.gpio18_relay_state
     arc_flagged = node.shared_arc_fault
+    # Core 0 opens the relay; the core-1 loop takes the lockout when it
+    # consumes the arc-fault flag (the sharedArcFault acknowledgment in loop()).
+    asyncio.run(node.core1_telemetry_tick())
     lockout_active = node.relay_locked
 
     # Unconditional overcurrent: a cold-baseline overload must still cut off,
     # even though inrush suppression would be active at this point.
-    oc_node = ESP32FirmwareNode(device_id="node_oc", rated_watts=200.0)
+    oc_node = ESP32FirmwareNode(device_id="node_oc", rated_watts=FIRMWARE_RATED_WATTS)
     oc_node.set_relay(True)
-    oc_node.pzem.set_load(280.0)                 # 140% of rated, first sample
+    oc_node.pzem.set_load(350.0)                 # above 312.5W critical, first sample
     oc_node.core0_safety_step(sim_dt=0.1)
     overcurrent_unconditional = oc_node.gpio18_relay_state is False
 
@@ -228,6 +246,9 @@ def test_ct_clamp_reverse_and_saturation(report: PhysicalStressReport):
         
     node.pzem.set_load(3500.0)  # > 2500W * 1.25 = 3125W critical
     node.core0_safety_step(sim_dt=0.1)
+    # Core 0 opens the relay; the core-1 loop takes the lockout (the
+    # overcurrent inference in loop()).
+    asyncio.run(node.core1_telemetry_tick())
     cutoff_worked = (node.gpio18_relay_state is False and node.relay_locked is True)
     
     passed = pzem_clamped and cutoff_worked

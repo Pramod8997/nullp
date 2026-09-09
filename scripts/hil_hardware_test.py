@@ -22,6 +22,8 @@ import json
 import logging
 import math
 import os
+import pathlib
+import re
 import sys
 import time
 from typing import Dict, List, Any
@@ -150,6 +152,9 @@ async def run_hil_tests():
     p_after = 1500.0
     dt = 0.1  # 100ms PZEM polling
     roc = abs(p_after - p_before) / dt  # 14000 W/s
+    # Note: pure arithmetic at the twin's 0.1 s step, NOT a rig prediction —
+    # hardware loop dt is ~0.134-0.16 s (PZEM register cadence), so the same
+    # 1400 W step reads ≈8750-10450 W/s on the bench. Either way > 1000 W/s.
     arc_tripped = roc > 1000.0
     report.record(
         "5. Edge Arc-Fault Trip (dP/dt > 1000 W/s)",
@@ -160,9 +165,16 @@ async def run_hil_tests():
     # ─────────────────────────────────────────────────────────────
     # Scenario 6: Edge Overcurrent Cutoff
     # ─────────────────────────────────────────────────────────────
-    rated_watts = 200.0
-    critical_threshold = rated_watts * 1.25  # 250W
-    test_power = 280.0
+    # Anchored to the firmware constant (same drift-guard pattern as
+    # tests/test_relay_safety_boot_brownout.py:100-109) so the bench numbers
+    # can never silently diverge from RATED_WATTS in main.cpp.
+    firmware_src = (pathlib.Path(__file__).resolve().parents[1]
+                    / "firmware" / "esp32_node" / "src" / "main.cpp").read_text()
+    m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', firmware_src)
+    assert m, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
+    rated_watts = float(m.group(1))
+    critical_threshold = rated_watts * 1.25
+    test_power = rated_watts * 1.4  # 40% overload, above the 125% cutoff
     overcurrent_tripped = test_power > critical_threshold
     report.record(
         "6. Edge Overcurrent Cutoff (125% Rated)",
@@ -244,7 +256,9 @@ async def run_hil_tests():
     # Scenario 10: DISCOM Tariff & INR Cost Calculation
     # ─────────────────────────────────────────────────────────────
     analytics = AnalyticsEngine(cost_per_kwh=6.0)
-    # Record 1 hour (3600s) of 1000W at peak rate (₹8.0/kWh)
+    # Record 1 hour (3600s) of 1000W at the engine's configured flat rate
+    # (₹6.0/kWh — the AnalyticsEngine takes a single rate, no peak/off-peak
+    # tiers, so the ₹8.0/kWh DISCOM peak figure lives in the profile docs only)
     await analytics.record("node_hvac", watts=1000.0, seconds=3600.0)
     summary = analytics.get_daily_summary()
     cost_inr = summary.get("estimated_cost_inr", 0.0)
