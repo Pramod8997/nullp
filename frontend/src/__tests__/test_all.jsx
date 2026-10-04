@@ -29,7 +29,7 @@ test("shows empty state when no devices", () => {
 
 test("does not invent energy cost or savings without backend analytics", () => {
     render(<SummaryCards devices={{ node_a: { power: 100 } }} powerHistory={[{ node_a: 100 }]} />);
-    expect(screen.getByText(/unavailable/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/unavailable/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/15% optimized/i)).not.toBeInTheDocument();
 });
 

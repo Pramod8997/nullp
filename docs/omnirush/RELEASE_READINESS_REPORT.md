@@ -1,14 +1,14 @@
 # ASTRA Release Readiness Report
 
-**Report date:** 2026-10-04  
-**Checkpoint:** CP-001-SAFETY-PARSER  
+**Report date:** 2026-10-05
+**Checkpoint:** CP-002-ACL-DASHBOARD
 **Recommendation:** **NOT READY**  
 **Physical validation:** **NOT RUN**  
 **Status:** software partial; physical-validation-pending is not yet a release approval.
 
 ## Executive summary
 
-The current audit baseline was reproduced against the live repository. Four meaningful software defects were red: dead-at-boot PZEM `ON`, safety-trip plus `ON` interleaving, live parser coercion of invalid power, and malformed API MQTT events terminating the bridge. CP-001 applies the smallest verified fixes for those paths.
+The current audit baseline was reproduced against the live repository. Four meaningful software defects were red: dead-at-boot PZEM `ON`, safety-trip plus `ON` interleaving, live parser coercion of invalid power, and malformed API MQTT events terminating the bridge. CP-001 applies the smallest verified fixes for those paths. CP-002 adds a static ACL contract, physical-profile ML fail-closed behavior, firmware freshness/task-startup guards, and truthful dashboard empty states.
 
 The project remains **NO-GO** for commercial or real-world deployment. H3 measurement freshness, H4 safety-claim boundaries, H5 hardware/profile contradiction, authenticated broker behavior, physical ML enrollment/validation, dashboard truth, soak evidence, and all physical electrical validation remain open or blocked.
 
@@ -21,7 +21,7 @@ The project remains **NO-GO** for commercial or real-world deployment. H3 measur
 - H5: authoritative 250 W laptop/phone-only hardware spec conflicts with projector profile/scope.
 - B1/B2/parser: ACL identity mismatch, malformed-frame bridge failure, and inconsistent parser contracts.
 - M1–M3: no physical registry/enrollment/held-out unknown rejection or physical overlap evidence.
-- U1/U2: synthetic/hardcoded energy views and stale/inferred state not fully separated from live truth.
+- U1/U2: stale/inferred/offline state is not fully separated from live truth; fabricated energy/cost/savings fallbacks are now removed.
 
 ## CP-001 changes
 
@@ -31,17 +31,24 @@ The project remains **NO-GO** for commercial or real-world deployment. H3 measur
 - API: undecodable and schema/type-invalid UI event frames are dropped per frame instead of terminating the MQTT listener.
 - Tests: preserved the four red audit tests, changed the two conflicting dry-relay/never-valid tests to assert production fail-closed behavior, and added a firmware structure guard for relay ownership.
 
+## CP-002 changes
+
+- Mosquitto ACL: `ems_pipeline` now has static-contract coverage for reading `home/ui/events` and `home/plug/+/command`; authenticated broker deployment and replay behavior remain unrun.
+- Physical ML profile: missing or incomplete model/registry/class/envelope artifacts now block classification and return `unknown` with zero confidence rather than silently falling back.
+- Firmware: added source-level successful PZEM-read-age, blind-time, safety-task-liveness, and task-creation guards. Installed-library transaction timing remains unmeasured.
+- Frontend: removed random historical energy generation and fixed-assumption cost/savings values. Energy history and non-live KPIs now show unavailable until backend analytics/history are supplied.
+
 ## Tests before/after
 
 | Evidence | Before CP-001 | After CP-001 |
 |---|---:|---:|
-| Python full suite | 641 passed + 4 intentional failures + 3 warnings | **646 passed, 3 warnings** |
-| Focused safety/protocol/API gate | 4 audit failures | **163 passed** |
-| Frontend Vitest | 20 passed | **20 passed** |
+| Python full suite | 641 passed + 4 intentional failures + 3 warnings | **650 passed, 4 warnings** |
+| Focused safety/protocol/API gate | 4 audit failures | **163 passed** CP-001; **23 passed** CP-002 focused gate |
+| Frontend Vitest | 20 passed | **22 passed** |
 | Diff whitespace check | not applicable | **PASS** |
 | Firmware PlatformIO build | not run | **NOT RUN — PlatformIO unavailable** |
 
-The three warnings are existing NumPy overflow warnings in stress tests; they are not physical evidence and were not introduced by CP-001.
+The full run has three expected NumPy overflow warnings plus one aiosqlite thread/event-loop cleanup warning. These are test-environment warnings, not physical evidence.
 
 ## P0/P1/P2 disposition
 
@@ -49,13 +56,13 @@ The three warnings are existing NumPy overflow warnings in stress tests; they ar
 |---|---|
 | H1 | **Software regression PASS / SIMULATED ONLY**; physical boot/relay test NOT RUN |
 | H2 | **Software regression PASS / SIMULATED ONLY**; physical dual-core/contact test NOT RUN |
-| H3 | **OPEN P0**; transaction age, stale finite data, task liveness, and measured deadline NOT RUN |
-| H4 | **OPEN P0**; qualified claim review/certification evidence absent |
+| H3 | **OPEN P0**; source guards added, but transaction age and measured deadline remain NOT RUN |
+| H4 | **OPEN P0**; UI wording softened, but qualified claim review/certification evidence absent |
 | H5 | **BLOCKED P1**; hardware decision and actual inventory absent |
-| B1 | **OPEN P1**; authenticated real Mosquitto/ACL identity test NOT RUN |
+| B1 | **OPEN P1**; static ACL contract passes, but authenticated real Mosquitto/identity/replay test NOT RUN |
 | B2/parser | **Software regression PASS / SIMULATED ONLY**; real broker replay/metadata behavior NOT RUN |
 | M1–M5 | **OPEN/BLOCKED P1**; physical registry and validation absent; known in-band unknown limitation remains |
-| U1/U2 | **OPEN P1**; dashboard provenance/stale/live truth gaps remain |
+| U1/U2 | **OPEN P1**; fabricated history/cost/savings removed, but dashboard provenance/stale/live truth gaps remain |
 | G11 | **NOT STARTED P1**; no soak/capacity release evidence |
 | L1/L2 | **OPEN P2**; evidence-quality/long-uptime hardening remains |
 
@@ -77,11 +84,11 @@ Software/demo tests pass for the available synthetic/demo windows and out-of-env
 
 ## MQTT/API validation
 
-CP-001 proves software isolation of malformed API UI frames and rejects invalid live pipeline power input. The shipped Mosquitto ACL/identity contract has not been proven against an isolated authenticated broker; broker collision and credential/ACL issues remain release blockers. Retained, duplicate, stale, unauthorized, and replay semantics remain open.
+CP-001 proves software isolation of malformed API UI frames and rejects invalid live pipeline power input. CP-002 statically verifies that the `ems_pipeline` ACL includes the API bridge read topics. The shipped ACL/identity contract has not been proven against an isolated authenticated broker; broker collision and credential/ACL issues remain release blockers. Retained, duplicate, stale, unauthorized, and replay semantics remain open.
 
 ## Frontend truth validation
 
-Frontend component tests pass, but the dashboard audit still finds random illustrative energy history, fixed-assumption energy/savings values, missing measurement-age/provenance enforcement, stale state after disconnect, and no physical relay/contact confirmation mapping. No physical end-to-end truth trace exists.
+Frontend component tests pass. CP-002 removes random illustrative energy history and fixed-assumption energy/savings values; the dashboard shows unavailable until backend analytics/history are supplied. Measurement-age/provenance enforcement, stale state after disconnect, and physical relay/contact confirmation mapping remain open. No physical end-to-end truth trace exists.
 
 ## Performance/soak
 
@@ -112,8 +119,8 @@ Use the existing qualified procedures in `claude_debug/HARDWARE_FINAL_SPEC.md`, 
 |---|---|---|
 | H1/H2 behavior | `tests/test_audit_reproductions.py`, simulator and source-structure tests | SOFTWARE / SIMULATED ONLY |
 | Parser/B2 behavior | focused audit regressions and API/pipeline tests | SOFTWARE / SIMULATED ONLY |
-| Python regression | 646 passing, 3 warnings | SOFTWARE |
-| Frontend regression | 20 passing | SOFTWARE / MOCKED COMPONENTS |
+| Python regression | 650 passing, 4 warnings | SOFTWARE |
+| Frontend regression | 22 passing | SOFTWARE / MOCKED COMPONENTS |
 | Hardware identity/protection | no artifact | NOT RUN / BLOCKED |
 | PZEM timing/calibration | no bench trace | NOT RUN |
 | Physical ML | no attested capture/registry | NOT RUN / BLOCKED |
@@ -121,4 +128,4 @@ Use the existing qualified procedures in `claude_debug/HARDWARE_FINAL_SPEC.md`, 
 
 ## Final recommendation
 
-**NOT READY.** CP-001 improves the defensible software safety boundary and closes four reproduced software regressions, but it does not establish physical safety, hardware compatibility, real broker correctness, physical ML behavior, truthful live dashboard state, or real-world readiness.
+**NOT READY.** CP-001 and CP-002 improve the defensible software safety boundary, broker contract coverage, ML fail-closed behavior, and dashboard truth boundary, but they do not establish physical safety, hardware compatibility, authenticated broker correctness, physical ML behavior, complete live dashboard provenance, or real-world readiness.

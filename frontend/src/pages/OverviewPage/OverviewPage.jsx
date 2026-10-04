@@ -6,12 +6,12 @@ import EnergyChart from '../../components/EnergyChart/EnergyChart';
 import DigitalTwinVisualization from '../../components/DigitalTwinVisualization/DigitalTwinVisualization';
 import { Zap } from 'lucide-react';
 
-const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {} }) => {
+const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analytics = {} }) => {
   return (
     <div className="space-y-6">
       {/* ── Top Row: Summary KPI Widgets ── */}
       <section>
-        <SummaryCards devices={devices} powerHistory={powerHistory} />
+        <SummaryCards devices={devices} analytics={analytics} />
       </section>
 
       {/* ── Middle Bento Row: Telemetry & Historical Charts ── */}
@@ -47,7 +47,7 @@ const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {} }) => {
 
         {/* Energy Consumption History Bento Box */}
         <div className="lg:col-span-5 flex flex-col">
-          <EnergyChart powerHistory={powerHistory} />
+          <EnergyChart powerHistory={powerHistory} analytics={analytics} />
         </div>
       </section>
 

@@ -50,7 +50,7 @@ const AnalyticsPage = ({
 
         {/* Energy Chart */}
         <div className="lg:col-span-5 flex flex-col">
-          <EnergyChart powerHistory={powerHistory} />
+          <EnergyChart powerHistory={powerHistory} analytics={analytics} />
         </div>
       </div>
 

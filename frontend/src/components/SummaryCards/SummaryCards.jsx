@@ -1,23 +1,19 @@
 import React from 'react';
-import { Zap, Battery, IndianRupee, Leaf, ArrowUpRight, ArrowDownRight, Activity } from 'lucide-react';
+import { Zap, Battery, IndianRupee, Leaf, Activity } from 'lucide-react';
 
-const SummaryCards = ({ devices = {}, powerHistory = [] }) => {
+const SummaryCards = ({ devices = {}, analytics = {} }) => {
   // Calculate total current power
   const totalPower = Object.values(devices).reduce(
     (sum, dev) => sum + (dev?.power || 0),
     0
   );
 
-  // Estimate today's energy (simplified: total power * hours assumed)
-  const todayEnergy = powerHistory.length > 0
-    ? (totalPower * powerHistory.length) / (3600 * 1000)
-    : (totalPower / 1000) * 0.5;
-
-  // Estimated cost at ₹8/kWh
-  const estimatedCost = (todayEnergy > 0 ? todayEnergy : totalPower * 0.012) * 8;
-
-  // Energy saved (15% of consumption)
-  const energySaved = todayEnergy * 0.15 || totalPower * 0.002;
+  const totalKwh = Number(analytics?.total_kwh);
+  const estimatedCost = Number(analytics?.estimated_cost_inr);
+  const energySaved = Number(analytics?.energy_saved_kwh);
+  const hasTotalKwh = Number.isFinite(totalKwh);
+  const hasEstimatedCost = Number.isFinite(estimatedCost);
+  const hasEnergySaved = Number.isFinite(energySaved);
 
   const cards = [
     {
@@ -34,37 +30,35 @@ const SummaryCards = ({ devices = {}, powerHistory = [] }) => {
     {
       id: 'today-energy',
       label: "Today's Consumption",
-      value: todayEnergy > 0 ? todayEnergy.toFixed(1) : (totalPower * 0.012).toFixed(1),
-      unit: 'kWh',
+      value: hasTotalKwh ? totalKwh.toFixed(3) : 'Unavailable',
+      unit: hasTotalKwh ? 'kWh' : '',
       icon: Battery,
       accentColor: 'text-emerald-600 dark:text-emerald-400',
       iconBg: 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400 border border-emerald-500/20',
-      change: '8.3%',
-      changePositive: false,
-      changeText: 'vs yesterday',
+      badge: hasTotalKwh ? 'Backend analytics' : 'Unavailable',
+      badgeType: hasTotalKwh ? 'analytics' : 'unavailable',
     },
     {
       id: 'est-cost',
       label: 'Estimated Cost',
-      value: `₹ ${(estimatedCost > 0 ? estimatedCost : totalPower * 0.096).toFixed(1)}`,
+      value: hasEstimatedCost ? `₹ ${estimatedCost.toFixed(2)}` : 'Unavailable',
       unit: '',
       icon: IndianRupee,
       accentColor: 'text-amber-600 dark:text-amber-400',
       iconBg: 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400 border border-amber-500/20',
-      change: '6.1%',
-      changePositive: true,
-      changeText: 'vs budget',
+      badge: hasEstimatedCost ? 'Backend analytics' : 'Unavailable',
+      badgeType: hasEstimatedCost ? 'analytics' : 'unavailable',
     },
     {
       id: 'energy-saved',
       label: 'Eco Efficiency & Saved',
-      value: energySaved > 0 ? energySaved.toFixed(1) : (totalPower * 0.002).toFixed(1),
-      unit: 'kWh',
+      value: hasEnergySaved ? energySaved.toFixed(3) : 'Unavailable',
+      unit: hasEnergySaved ? 'kWh' : '',
       icon: Leaf,
       accentColor: 'text-cyan-600 dark:text-cyan-400',
       iconBg: 'bg-cyan-500/10 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400 border border-cyan-500/20',
-      badge: '15% Optimized',
-      badgeType: 'eco',
+      badge: hasEnergySaved ? 'Backend baseline' : 'Unavailable',
+      badgeType: hasEnergySaved ? 'eco' : 'unavailable',
     },
   ];
 
@@ -116,21 +110,19 @@ const SummaryCards = ({ devices = {}, powerHistory = [] }) => {
                 </span>
               )}
 
-              {card.change && (
-                <div className="flex items-center gap-1">
-                  <span
-                    className={`inline-flex items-center font-bold ${
-                      card.changePositive
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-rose-600 dark:text-rose-400'
-                    }`}
-                  >
-                    {card.changePositive ? <ArrowDownRight size={14} /> : <ArrowUpRight size={14} />}
-                    {card.change}
-                  </span>
-                  <span className="text-gray-400 dark:text-gray-500">{card.changeText}</span>
-                </div>
+              {card.badgeType === 'analytics' && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
+                  <Activity size={12} />
+                  {card.badge}
+                </span>
               )}
+
+              {card.badgeType === 'unavailable' && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-semibold bg-gray-100 text-gray-600 dark:bg-gray-900/60 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
+                  {card.badge}
+                </span>
+              )}
+
             </div>
           </div>
         );

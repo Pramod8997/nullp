@@ -1,9 +1,9 @@
 # ASTRA Current State
 
-**Checkpoint:** CP-001-SAFETY-PARSER (software partial)
-**Date:** 2026-10-04  
+**Checkpoint:** CP-002-ACL-DASHBOARD (software partial)
+**Date:** 2026-10-05
 **HEAD:** `302e1b214c2a23e9d4061d847eb4abfc19baebf7` (`Updated Docs`)
-**Working tree:** dirty with CP-001 safety/parser changes and the untracked CP-000 audit artifact; unrelated work must be preserved.
+**Working tree:** dirty with CP-001/CP-002 safety, parser, ACL, ML fail-closed, firmware freshness, frontend truth, test, and documentation changes; unrelated work must be preserved.
 
 ## Baseline facts
 
@@ -18,9 +18,11 @@
 - Initial `venv/bin/python -m pytest tests/ -q`: **BLOCKED** — the venv Python symlink resolves to Python 3.12 while its populated packages are under `lib/python3.10`; `pytest` is not importable.
 - Initial matching-runtime baseline before CP-001: **641 passed, 4 intentional audit failures, 3 warnings**.
 - CP-001 full regression: `PYTHONPATH=venv/lib/python3.10/site-packages:. /usr/bin/python3.10 -m pytest tests/ -q --tb=short` → **646 passed, 3 warnings, 18.84 s**.
+- CP-002 full regression with ACL, ML fail-closed, firmware freshness guards, and frontend truth tests → **650 passed, 4 warnings, 21.78 s**.
 - Runtime packages used: Python 3.10.12, pytest 9.0.3, torch 2.11.0+cu130, numpy 2.2.6, FastAPI 0.136.0.
-- Frontend command: `cd frontend && npm test -- --run` → **20 passed, 1 file, 1.45 s**; Node v24.14.0, npm 11.9.0, Vitest 4.1.10.
+- Frontend command: `cd frontend && npm test -- --run` → **22 passed, 1 file**; Node v24.14.0, npm 11.9.0, Vitest 4.1.10.
 - CP-001 focused safety/protocol gate → **163 passed, 0 failed**; frontend remains **20 passed**.
+- CP-002 focused ACL/ML/firmware-alignment gate → **23 passed, 0 failed**; `git diff --check` passed.
 - Firmware compilation was **NOT RUN** because PlatformIO/`pio` is unavailable.
 
 ## Runtime boundaries
@@ -36,7 +38,7 @@
 
 ## Current execution phase
 
-`VERIFY → CHECKPOINT → REASSESS`. CP-001 closes the reproduced H1/H2/parser/B2 software regressions in simulator/API paths. H3 freshness, H4 claims, H5 hardware consistency, real broker ACL behavior, physical ML enrollment, dashboard truth, and physical validation remain open or blocked.
+`VERIFY → CHECKPOINT → REASSESS`. CP-001 closes the reproduced H1/H2/parser/B2 software regressions in simulator/API paths. CP-002 adds static ACL contract coverage, physical-profile ML fail-closed behavior, firmware freshness/task-startup guards, and removes fabricated dashboard energy/cost/savings values. H3 measured timing, H4 claims, H5 hardware consistency, authenticated broker behavior, physical ML enrollment, full dashboard provenance, soak evidence, and physical validation remain open or blocked.
 
 ## Known contradiction requiring human/hardware decision
 
@@ -49,6 +51,6 @@
 
 ## Next exact actions
 
-1. Human-review the CP-001 firmware safety diff and perform qualified low-voltage/bench verification before any mains claim.
-2. Resolve H3 with production PZEM transaction-age/liveness implementation and measured dependency timing.
-3. Resolve H5's authoritative hardware/projector contradiction before ceiling or physical ML claims.
+1. Human-review the CP-001/CP-002 firmware safety diff and perform qualified low-voltage/bench verification before any mains claim.
+2. Resolve H3 with measured production PZEM transaction-age/liveness timing and complete dashboard freshness/provenance wiring.
+3. Resolve H5's authoritative hardware/projector contradiction before ceiling or physical ML claims; then run an authenticated broker deployment test.

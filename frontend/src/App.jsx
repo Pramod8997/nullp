@@ -316,7 +316,7 @@ function Dashboard() {
   const renderPage = () => {
     switch (activeTab) {
       case 'overview':
-        return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} />;
+        return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} analytics={analytics} />;
 
       case 'appliances':
       case 'devices':
@@ -357,7 +357,7 @@ function Dashboard() {
         return <SettingsPage />;
 
       default:
-        return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} />;
+         return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} analytics={analytics} />;
     }
   };
 

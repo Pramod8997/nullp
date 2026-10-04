@@ -13,6 +13,18 @@
 | BASE-E2E | `python scripts/test_firmware_and_ai_e2e.py` | Closed-loop simulator evidence | NOT RUN; simulated only |
 | BASE-HIL | `python scripts/hil_hardware_test.py` | HIL simulator/harness | NOT RUN; not physical validation |
 
+## CP-002 current verification
+
+| Scope | Command/result | Classification |
+|---|---|---|
+| Python full regression | Matching-runtime `pytest tests/ -q --tb=short` → **650 passed, 4 warnings** | Software only |
+| Frontend regression | `cd frontend && npm test -- --run` → **22 passed** | Mocked/component software only |
+| ACL/ML/firmware alignment | `tests/test_mqtt_acl_contract.py tests/test_physical_ml_fail_closed.py tests/test_hardware_alignment.py` → **23 passed** | Static/simulator software only |
+| Whitespace | `git diff --check` → **PASS** | Repository hygiene |
+| Firmware build | PlatformIO/`pio` unavailable | NOT RUN |
+| Authenticated broker deployment | Isolated Mosquitto replay/ACL test | NOT RUN |
+| Physical validation | Mains, PZEM, relay, ML, calibration, dashboard trace | NOT RUN |
+
 ## Focused red reproducer result
 
 Command: `PYTHONPATH=venv/lib/python3.10/site-packages:. /usr/bin/python3.10 -m pytest tests/test_audit_reproductions.py -q --tb=short`  
