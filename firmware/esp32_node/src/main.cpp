@@ -9,8 +9,7 @@
  *   - Edge-local arc-fault proxy (dP/dt > 1000 W/s)
  *   - Dynamic inrush suppression via 5-sample sliding baseline
  *   - Unconditional overcurrent cutoff (125% of rated)
- *   - PZEM loss-of-measurement watchdog (3s blind → cutoff, fail-safe;
- *     armed only after the PZEM's first valid read — see SafetySamplingTask)
+ *   - PZEM loss-of-measurement watchdog (bounded successful-read age → cutoff)
  *   - Immediate relay cutoff — zero network dependency
  *
  * CORE 1 (Standard Priority — Arduino loop):
@@ -129,6 +128,10 @@ const unsigned long SAFETY_LOCKOUT_MS = 300000;  // 5-minute relay lockout after
 //     5 A fuse and 1.0 mm² wire) 3 s is thermally irrelevant.
 // Raise it only with evidence of nuisance trips; never above ~100 (10 s).
 const int PZEM_FAIL_TRIP_COUNT = 30;
+// Elapsed-age guard for the successful PZEM transaction, independent of how
+// long a failed getter/library timeout takes. The value is a software claim
+// until Gate 8 measures the installed dependency on the target ESP32/PZEM.
+const unsigned long PZEM_MAX_BLIND_MS = 3000;
 
 // ═══════════════════════════════════════════════════════
 //  SHARED STATE (Core 0 ↔ Core 1)
@@ -160,8 +163,23 @@ volatile bool  sharedOvercurrentLatch = false;
 // Raised by the PZEM loss-of-measurement watchdog (PZEM_FAIL_TRIP_COUNT).
 volatile bool  sharedPzemFault   = false;
 
-// Last commanded relay state, written by setRelay() on whichever core called
-// it. Read by core 0 solely to arm the PZEM watchdog: the watchdog's own
+// Core 0 is the only runtime relay owner. Core 1's MQTT callback queues a
+// request here; the safety task consumes it only after validating the current
+// PZEM sample and evaluating all cutoff conditions. This prevents a command
+// from winning the interval between a Core-0 cutoff and Core-1 lockout.
+volatile bool  pendingRelayOn  = false;
+volatile bool  pendingRelayOff = false;
+volatile bool  pendingAck      = false;
+// 0 = none, 1 = ON_CONFIRMED, 2 = OFF_CONFIRMED, 3 = LOCKOUT_NACK.
+volatile uint8_t pendingAckType = 0;
+volatile bool  safetyInhibit   = false;
+volatile bool  measurementFresh = false;
+volatile unsigned long lastSuccessfulPzemReadMs = 0;
+volatile bool safetyTaskRunning = false;
+TaskHandle_t safetyTaskHandle = nullptr;
+
+// Last commanded relay state, written by setRelay() by setup or Core 0 only.
+// Read by core 0 solely to arm the PZEM watchdog: the watchdog's own
 // cutoff clears it, so the trip fires once per fault episode instead of once
 // per 100 ms sample, and only a server `ON` (which the lockout gates) re-arms
 // it. An open relay is not an unprotected energised socket, so there is
@@ -209,6 +227,7 @@ void setRelay(bool on) {
 //  CORE 0: HIGH-PRIORITY SAFETY SAMPLING TASK
 // ═══════════════════════════════════════════════════════
 void SafetySamplingTask(void* pvParameters) {
+    safetyTaskRunning = true;
     float lastWatts = 0.0;
     float baselineRing[BASELINE_WINDOW];
     int   baselineIdx   = 0;
@@ -242,6 +261,23 @@ void SafetySamplingTask(void* pvParameters) {
         // rejects more.
         if (!isfinite(powerWatts) || !isfinite(pzemVoltage)
             || !isfinite(pzemCurrent) || !isfinite(pzemPf)) {
+            measurementFresh = false;
+            // A pending ON is rejected as soon as the safety task observes
+            // that the measurement channel is unavailable. OFF remains
+            // serviceable and is still owned by this task.
+            taskENTER_CRITICAL(&sharedMux);
+            if (pendingRelayOn) {
+                pendingRelayOn = false;
+                pendingAck = true;
+                pendingAckType = 3;
+            }
+            if (pendingRelayOff) {
+                pendingRelayOff = false;
+                setRelay(false);
+                pendingAck = true;
+                pendingAckType = 2;
+            }
+            taskEXIT_CRITICAL(&sharedMux);
             // ── PZEM Loss-of-Measurement Watchdog ──
             // This branch used to `continue` forever with the relay LEFT
             // CLOSED: a dead PZEM, a severed UART or a pulled 5 V rail
@@ -274,16 +310,15 @@ void SafetySamplingTask(void* pvParameters) {
             //     lock out for 5 minutes before COM–NO continuity can be
             //     metered. Once the sensor has proven itself alive, losing it
             //     is a real fault and still trips in 3 s.
-            // KNOWN RESIDUAL HOLE, accepted: a PZEM dead from boot never arms,
-            // so an `ON` closes the relay onto an unmeasured circuit and no
-            // trip occurs. Strictly narrower than the behaviour this watchdog
-            // replaced (which never tripped at all), and the price of Gates 5/7
-            // being performable. Gate 6 catches a never-arming node — it
-            // publishes no plausible V/I/W once mains is live.
-            if (pzemFailCount >= PZEM_FAIL_TRIP_COUNT && pzemEverValid && relayClosed) {
-                setRelay(false);   // Clears relayClosed → one trip per episode
-
+            const bool successfulReadExpired =
+                lastSuccessfulPzemReadMs > 0
+                && (unsigned long)(nowMs - lastSuccessfulPzemReadMs)
+                   >= PZEM_MAX_BLIND_MS;
+            if (pzemFailCount >= PZEM_FAIL_TRIP_COUNT && pzemEverValid
+                    && relayClosed && successfulReadExpired) {
                 taskENTER_CRITICAL(&sharedMux);
+                safetyInhibit = true;
+                setRelay(false);   // Clears relayClosed → one trip per episode
                 sharedPzemFault = true;
                 taskEXIT_CRITICAL(&sharedMux);
 
@@ -298,6 +333,8 @@ void SafetySamplingTask(void* pvParameters) {
         }
         pzemFailCount = 0;
         pzemEverValid = true;   // Latched forever: the watchdog is now armed
+        measurementFresh = true;
+        lastSuccessfulPzemReadMs = nowMs;
 
         // ── Calculate historical sliding baseline average ──
         float baselineAvg = 0.0;
@@ -320,9 +357,9 @@ void SafetySamplingTask(void* pvParameters) {
 
             if (rateOfChange > EDGE_ROC_THRESHOLD && !isNormalInrush) {
                 // ⚡ IMMEDIATE PHYSICAL RELAY CUTOFF — NO NETWORK DEPENDENCY
-                setRelay(false);
-
                 taskENTER_CRITICAL(&sharedMux);
+                safetyInhibit   = true;
+                setRelay(false);
                 sharedArcFault    = true;
                 sharedArcFaultRoC = rateOfChange;
                 taskEXIT_CRITICAL(&sharedMux);
@@ -348,9 +385,9 @@ void SafetySamplingTask(void* pvParameters) {
         // never taken and the next `ON` re-closed into the fault.
         float criticalWatts = RATED_WATTS * CRITICAL_PCT;
         if (powerWatts > criticalWatts) {
-            setRelay(false);
-
             taskENTER_CRITICAL(&sharedMux);
+            safetyInhibit = true;
+            setRelay(false);
             sharedOvercurrentLatch = true;
             taskEXIT_CRITICAL(&sharedMux);
 
@@ -371,6 +408,26 @@ void SafetySamplingTask(void* pvParameters) {
         sharedVoltage    = pzemVoltage;
         sharedCurrent    = pzemCurrent;
         sharedPf         = pzemPf;
+        taskEXIT_CRITICAL(&sharedMux);
+
+        // ── Consume queued relay requests (Core 0 is sole owner) ──
+        taskENTER_CRITICAL(&sharedMux);
+        if (pendingRelayOff) {
+            pendingRelayOff = false;
+            setRelay(false);
+            pendingAck = true;
+            pendingAckType = 2;
+        } else if (pendingRelayOn) {
+            pendingRelayOn = false;
+            if (safetyTaskRunning && !safetyInhibit && measurementFresh && !relayLocked) {
+                setRelay(true);
+                pendingAck = true;
+                pendingAckType = 1;
+            } else {
+                pendingAck = true;
+                pendingAckType = 3;
+            }
+        }
         taskEXIT_CRITICAL(&sharedMux);
 
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -395,18 +452,14 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
     if (String(topic) == String(topicCommand)) {
         if (message == "ON") {
-            if (!relayLocked) {
-                setRelay(true);
-                Serial.println("[RELAY] ON via server command");
-                client.publish(topicAck, "ON_CONFIRMED");
-            } else {
-                Serial.println("[RELAY] ON rejected — relay locked");
-                client.publish(topicAck, "LOCKOUT_NACK");
-            }
+            taskENTER_CRITICAL(&sharedMux);
+            pendingRelayOn = true;
+            taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "OFF") {
-            setRelay(false);
-            Serial.println("[RELAY] OFF via server command");
-            client.publish(topicAck, "OFF_CONFIRMED");
+            taskENTER_CRITICAL(&sharedMux);
+            pendingRelayOff = true;
+            pendingRelayOn = false;
+            taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "WARNING") {
             Serial.println("[SAFETY] Warning received from server");
         }
@@ -427,16 +480,23 @@ void setup() {
 
     // ═══ Launch Core 0 Safety Sampling Task ═══
     // Launched BEFORE WiFi so safety works offline
-    xTaskCreatePinnedToCore(
+    BaseType_t safetyTaskResult = xTaskCreatePinnedToCore(
         SafetySamplingTask,   // Task function
         "SafetySampling",     // Name
         4096,                 // Stack size (bytes)
         NULL,                 // Parameters
         2,                    // Priority (higher than loop)
-        NULL,                 // Task handle (not needed)
+        &safetyTaskHandle,    // Task handle for creation/liveness gate
         0                     // Core 0
     );
-    Serial.println("[INIT] Core 0: SafetySamplingTask launched (priority 2)");
+    if (safetyTaskResult != pdPASS || safetyTaskHandle == nullptr) {
+        safetyTaskRunning = false;
+        safetyInhibit = true;
+        setRelay(false);
+        Serial.println("[INIT] SAFETY TASK CREATION FAILED — relay inhibited");
+    } else {
+        Serial.println("[INIT] Core 0: SafetySamplingTask launched (priority 2)");
+    }
 
     // Connect WiFi with timeout
     WiFi.setAutoReconnect(true);
@@ -524,6 +584,9 @@ void loop() {
     // ── 5-Minute Anti-Thrashing Lockout ──
     if (relayLocked && (millis() - lockStartMs > SAFETY_LOCKOUT_MS)) {
         relayLocked = false;
+        taskENTER_CRITICAL(&sharedMux);
+        safetyInhibit = false;
+        taskEXIT_CRITICAL(&sharedMux);
         Serial.println("[SAFETY] 5-minute lockout complete. Relay unlocked.");
     }
 
@@ -599,6 +662,26 @@ void loop() {
         if (client.connected()) {
             client.publish(topicStatus, "PZEM_FAULT");
         }
+    }
+
+    // Publish acknowledgements generated by the Core-0 relay owner. The MQTT
+    // callback never writes GPIO or claims success before the safety task has
+    // evaluated the request.
+    bool ackReady = false;
+    uint8_t ackType = 0;
+    taskENTER_CRITICAL(&sharedMux);
+    if (pendingAck) {
+        ackReady = true;
+        ackType = pendingAckType;
+        pendingAck = false;
+        pendingAckType = 0;
+    }
+    taskEXIT_CRITICAL(&sharedMux);
+    if (ackReady && client.connected()) {
+        const char* ackPayload = (ackType == 1) ? "ON_CONFIRMED"
+                              : (ackType == 2) ? "OFF_CONFIRMED"
+                                               : "LOCKOUT_NACK";
+        client.publish(topicAck, ackPayload);
     }
 
     // ── Server Heartbeat Watchdog ──

@@ -8,6 +8,8 @@ import DigitalTwin from '../components/DigitalTwin';
 import SystemStatus from '../components/SystemStatus';
 import ApplianceTable from '../components/ApplianceTable';
 import AlertsPage from '../pages/AlertsPage/AlertsPage';
+import SummaryCards from '../components/SummaryCards/SummaryCards';
+import EnergyChart from '../components/EnergyChart/EnergyChart';
 
 // TEST 9A-1: Renders N cards for N devices
 test("renders one card per device", () => {
@@ -23,6 +25,17 @@ test("renders one card per device", () => {
 test("shows empty state when no devices", () => {
     render(<DeviceCards devices={{}} />);
     expect(screen.getByText(/no devices/i)).toBeInTheDocument();
+});
+
+test("does not invent energy cost or savings without backend analytics", () => {
+    render(<SummaryCards devices={{ node_a: { power: 100 } }} powerHistory={[{ node_a: 100 }]} />);
+    expect(screen.getByText(/unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/15% optimized/i)).not.toBeInTheDocument();
+});
+
+test("does not generate historical energy without measured history", () => {
+    render(<EnergyChart powerHistory={[]} />);
+    expect(screen.getByText(/no measured energy history/i)).toBeInTheDocument();
 });
 
 // TEST 9A-3: HIGH power state triggers glow CSS class

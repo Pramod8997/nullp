@@ -749,12 +749,11 @@ async def test_pzem_fault_published_once_per_episode():
 
 @pytest.mark.asyncio
 async def test_pzem_watchdog_retrips_within_one_sample_after_lockout_expiry():
-    """After the lockout expires, an `ON` onto a still-blind node must re-trip
-    on the FIRST sample (100 ms), not after another 3 s.
+    """After lockout expiry, a still-blind node must reject `ON` at the gate.
 
-    The saturated counter is deliberately NOT rewound by closing the relay:
-    rewinding it would hand back a full 3 s blind window on a socket already
-    known to be unmeasurable.
+    Re-energizing first and waiting for a later watchdog sample would recreate
+    H1. The production command path therefore rejects the request immediately;
+    the relay never closes onto an unmeasurable circuit.
     """
     node, published = _watchdog_node()
     node.core0_safety_step(sim_dt=0.1)          # arm
@@ -769,18 +768,12 @@ async def test_pzem_watchdog_retrips_within_one_sample_after_lockout_expiry():
     assert node.relay_locked is False, "lockout did not expire"
 
     await node.handle_mqtt_command("ON")
-    assert node.gpio18_relay_state is True
+    assert node.gpio18_relay_state is False
+    assert "LOCKOUT_NACK" in [p for t, p in published if t == node.topic_ack]
     assert node._pzem_fail_count == PZEM_FAIL_TRIP_COUNT, (
-        "closing the relay rewound the blind-read counter — the node gets a "
-        "fresh 3 s blind window on a sensor already known to be dead"
+        "the failed command changed the blind-read counter"
     )
-
-    node.core0_safety_step(sim_dt=0.1)          # ONE sample = 100 ms
-    assert node.gpio18_relay_state is False, "did not re-trip within one sample"
-    assert node.shared_pzem_fault is True
-    await node.core1_telemetry_tick()
-    assert node.relay_locked is True
-    assert _statuses(published, node).count("PZEM_FAULT") == 2
+    assert node.shared_pzem_fault is False
 
 
 def test_one_good_read_rewinds_the_blind_read_counter():
@@ -840,12 +833,10 @@ async def test_bringup_gate5_no_mains_relay_open_takes_no_lockout():
 
 @pytest.mark.asyncio
 async def test_bringup_gate7_dry_relay_close_stays_closed():
-    """BRINGUP_RUNBOOK.md GATE 7: dry relay close, NO MAINS, meter COM-NO.
+    """Production ON stays blocked when the PZEM has never been valid.
 
-    The PZEM has never been valid, so the watchdog is disarmed and the contacts
-    must STAY CLOSED for the whole gate. If the saturated counter tripped here
-    the relay would re-open ~100 ms after the close and lock out for 5 minutes,
-    making the continuity measurement impossible to take.
+    Dry relay continuity belongs to an explicitly isolated maintenance
+    procedure; it must not be reachable through the production MQTT ON path.
     """
     node, published = _watchdog_node(device_id="node_bench_agg")
     _kill_pzem(node)
@@ -853,24 +844,19 @@ async def test_bringup_gate7_dry_relay_close_stays_closed():
 
     await node.handle_mqtt_command("ON")
     acks = [p for t, p in published if t == node.topic_ack]
-    assert "ON_CONFIRMED" in acks
+    assert "LOCKOUT_NACK" in acks
 
     for i in range(600):                        # 60 s metering COM-NO continuity
         node.core0_safety_step(sim_dt=0.1)
         if i % 10 == 0:
             await node.core1_telemetry_tick()
 
-    assert node.gpio18_relay_state is True, (
-        "GATE 7 relay re-opened — the dry-close continuity check is "
-        "unperformable and bring-up cannot proceed"
-    )
-    assert node.gpio18_level is True, "active-HIGH net: a closed relay drives HIGH"
+    assert node.gpio18_relay_state is False
+    assert node.gpio18_level is False, "active-HIGH net: an inhibited relay is LOW"
     assert node.relay_locked is False
     assert "PZEM_FAULT" not in _statuses(published, node)
 
-    await node.handle_mqtt_command("OFF")
-    assert node.gpio18_relay_state is False
-    assert "OFF_CONFIRMED" in [p for t, p in published if t == node.topic_ack]
+    assert "PZEM_FAULT" not in _statuses(published, node)
 
 
 def test_overcurrent_still_trips_on_first_sample_under_watchdog():
@@ -951,4 +937,3 @@ async def test_brief_overcurrent_spike_still_takes_lockout_and_nacks_on():
     assert "ON_CONFIRMED" not in acks, "the relay re-closed into a faulted circuit"
     assert node.gpio18_relay_state is False
     assert node.gpio18_level is False, "pin must stay at the de-energising level"
-

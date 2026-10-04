@@ -1,8 +1,8 @@
 # ASTRA Omnirush Master Checklist
 
 **Created:** 2026-10-04  
-**Baseline commit:** `4e07b658`  
-**Status:** BASELINE IN PROGRESS — no remediation has been applied by this execution loop.
+**Baseline commit:** `302e1b214c2a23e9d4061d847eb4abfc19baebf7`
+**Status:** CP-001 SOFTWARE PARTIAL — physical validation remains NOT RUN.
 
 Statuses: `[ ] NOT STARTED` · `[~] IN PROGRESS` · `[✓] VERIFIED` · `[!] FAILED` · `[?] BLOCKED` · `[N/R] NOT RUN` · `[S] SIMULATED ONLY` · `[P] PHYSICAL VERIFIED`
 
@@ -18,7 +18,7 @@ items:
     priority: P0
     description: Reproducible software baseline
     status: IN PROGRESS
-    evidence: 641 Python passed/3 warnings and 20 frontend passed; default venv command is broken
+    evidence: Initial 641 pass + 4 red reproducers; CP-001 full regression 646 passed/3 warnings and frontend 20 passed
     tests: BASE-PY-MATCH, BASE-FE
     files: [docs/omnirush/CURRENT_STATE.md]
     hardware_requirement: none for software baseline
@@ -27,8 +27,8 @@ items:
   - id: H1
     priority: P0
     description: Dead-at-boot measurement state cannot energize relay
-    status: IN PROGRESS
-    evidence: Supplied audit reports a reproduction; current dirty firmware/twin changes require independent rerun
+    status: SIMULATED ONLY
+    evidence: CP-001 H1 reproducer and focused safety gate pass; firmware compile/physical boot not run
     tests: tests/test_relay_safety_boot_brownout.py
     files: [firmware/esp32_node/src/main.cpp, src/hardware/esp32_firmware_sim.py]
     hardware_requirement: physical boot test required for physical PASS
@@ -37,8 +37,8 @@ items:
   - id: H2
     priority: P0
     description: Safety trip wins atomically over ON and has one relay owner
-    status: IN PROGRESS
-    evidence: Supplied audit reports a race; current dirty changes require independent rerun
+    status: SIMULATED ONLY
+    evidence: CP-001 interleaving and sole-owner static guard pass; physical dual-core/contact test not run
     tests: tests/test_relay_safety_boot_brownout.py
     files: [firmware/esp32_node/src/main.cpp, src/hardware/esp32_firmware_sim.py]
     hardware_requirement: physical relay/lockout test required for physical PASS
@@ -87,8 +87,8 @@ items:
   - id: B2
     priority: P1
     description: Malformed MQTT events are rejected without killing bridge/readiness
-    status: IN PROGRESS
-    evidence: Supplied audit reports ValidationError escape; live reproducer pending
+    status: SIMULATED ONLY
+    evidence: CP-001 malformed-frame regression passes; authenticated broker/lifecycle not run
     tests: tests/test_api.py, tests/test_api_extended.py
     files: [src/api/main.py]
     hardware_requirement: no
@@ -97,8 +97,8 @@ items:
   - id: P1-PARSER
     priority: P1
     description: Empty, object, negative, NaN, and infinite power payloads are rejected
-    status: IN PROGRESS
-    evidence: Supplied audit reports empty/{} become 0 W and negative remains negative
+    status: SIMULATED ONLY
+    evidence: CP-001 live-handler parser regression passes; real broker replay metadata not run
     tests: tests/test_mqtt.py, tests/test_hil_uart_corruption.py
     files: [src/api/main.py, src/hardware/mqtt.py, scripts/run_pipeline.py]
     hardware_requirement: no
@@ -171,12 +171,12 @@ items:
 | ID | Priority | Gate | Status | Evidence / next proof |
 |---|---:|---|---|---|
 | G1 | P0 | Reproducible baseline | `[~]` | Run exact Python/frontend/version commands |
-| H1 | P0 | Fail-safe boot measurement gate | `[~]` | Reproduce against current dirty tree, then test-first fix |
-| H2 | P0 | Atomic safety/relay ownership | `[~]` | Reproduce safety-trip + ON race |
+| H1 | P0 | Fail-safe boot measurement gate | `[S]` | CP-001 software pass; physical boot/relay test required |
+| H2 | P0 | Atomic safety/relay ownership | `[S]` | CP-001 software pass; physical dual-core/contact test required |
 | H3 | P0 | Measurement freshness/liveness | `[~]` | Trace actual PZEM transaction timing |
 | H4 | P0 | Truthful prototype safety claims | `[~]` | Reconcile claims and mark certification absent |
 | H5 | P1 | Hardware/profile consistency | `[!]` | Resolve 250 W-only spec versus projector configuration |
-| B1/B2 | P1 | MQTT identity and malformed-input resilience | `[~]` | Real broker and bridge tests |
+| B1/B2 | P1 | MQTT identity and malformed-input resilience | `[~]` | B2 software pass; real broker/ACL B1 remains |
 | M1/M2/M3 | P1 | ML enrollment, abstention, disaggregation | `[?]/[~]` | Physical registry/evaluation unavailable in this environment |
 | U1 | P1 | Dashboard truth/provenance | `[~]` | Remove or explicitly label synthetic data |
 | G11 | P1 | Soak/capacity/storage bounds | `[ ]` | Deterministic boundedness tests |

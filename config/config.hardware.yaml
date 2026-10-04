@@ -15,6 +15,11 @@ app:
   name: "Digital Twin EMS — Physical Prototype (1 node, 1 port)"
   debug: true
 
+# Physical deployments must use an explicitly enrolled registry and complete
+# model artifact. Missing/partial demo artifacts fail closed to UNKNOWN.
+deployment:
+  require_physical_ml_artifacts: true
+
 mqtt:
   broker: "localhost"
   port: 1883

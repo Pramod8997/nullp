@@ -9,7 +9,7 @@ const SafetyAlerts = ({ alerts = [], maxAlerts = 50 }) => {
           <ShieldCheck size={36} />
         </div>
         <p className="text-sm font-bold text-emerald-600 dark:text-emerald-400">System Nominal</p>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">No safety thresholds breached. Relay breakers active.</p>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">No edge safety events reported. Relay contact state is unconfirmed.</p>
       </div>
     );
   }

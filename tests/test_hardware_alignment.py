@@ -721,3 +721,39 @@ def test_pzem_watchdog_trip_requires_all_three_conditions():
         "arming condition is stale — a disarmed watchdog on an energised "
         "socket, or a re-trip loop on an open one"
     )
+
+
+def test_runtime_relay_actuation_has_one_owner_and_health_gate():
+    """Core 1 queues commands; Core 0 alone writes the runtime relay."""
+    callback = _fn_body("callback")
+    core0 = _fn_body("SafetySamplingTask")
+
+    assert "setRelay(" not in callback, (
+        "MQTT callback regained direct GPIO authority; it must queue a request"
+    )
+    assert "pendingRelayOn = true;" in callback
+    assert "pendingRelayOff = true;" in callback
+    assert "setRelay(true);" in core0
+    assert "measurementFresh" in core0
+    assert "safetyInhibit" in core0
+    assert re.search(
+        r"if \(safetyTaskRunning\s*&&\s*!safetyInhibit\s*&&\s*"
+        r"measurementFresh\s*&&\s*!relayLocked\)",
+        core0,
+    ), "Core-0 ON consumption lost its health/inhibit/lockout gate"
+
+
+def test_pzem_watchdog_tracks_successful_read_age_and_task_creation():
+    """H3 must not rely only on a getter-loop count or unchecked task startup."""
+    code = _MAIN_CPP_STRUCT
+    assert "PZEM_MAX_BLIND_MS" in code
+    assert "lastSuccessfulPzemReadMs" in code
+    assert re.search(
+        r"lastSuccessfulPzemReadMs\s*=\s*nowMs\s*;", code
+    ), "successful PZEM reads do not update a freshness timestamp"
+    assert "(unsigned long)(nowMs - lastSuccessfulPzemReadMs)" in code
+    assert ">= PZEM_MAX_BLIND_MS" in code, (
+        "watchdog does not evaluate elapsed successful-read age"
+    )
+    assert "BaseType_t safetyTaskResult" in code
+    assert "safetyTaskResult != pdPASS" in code

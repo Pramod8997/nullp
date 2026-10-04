@@ -147,6 +147,12 @@ class EMSOrchestrator:
         self._stage_hook = stage_hook
         self._rl_hook = rl_hook
         self._connected = True
+        deployment_cfg = self.config.get("deployment", {})
+        self.ml_inference_blocked = bool(
+            isinstance(deployment_cfg, dict)
+            and deployment_cfg.get("require_physical_ml_artifacts", False)
+        )
+        self.ml_block_reason = None
 
         self._max_tracked_devices = self.config.get('system', {}).get('max_tracked_devices', 200) if isinstance(self.config.get('system'), dict) else 200
         self._device_last_seen: Dict[str, float] = {}
@@ -394,6 +400,15 @@ class EMSOrchestrator:
         anchors_path = proto_cfg.get("anchors_path", "")
         weights_dir = os.path.dirname(weights_path) if weights_path else "backend/models/weights"
 
+        physical_required = self.ml_inference_blocked
+        if physical_required and not proto_cfg.get("registry_path"):
+            self.ml_block_reason = "physical registry_path is not configured"
+            self.encoder = None
+            self.prototype_registry = None
+            self.calibrated_scaler = None
+            logger.error("Physical ML inference blocked: registry_path is not configured")
+            return
+
         # ── Try new Phase-1 weights first (protonet.pt) ──
         new_weights = os.path.join(weights_dir, "protonet.pt")
         if os.path.exists(new_weights):
@@ -427,6 +442,11 @@ class EMSOrchestrator:
                     remapped[new_key] = v
 
                 missing, unexpected = proto.load_state_dict(remapped, strict=False)
+                if physical_required and (missing or unexpected):
+                    raise RuntimeError(
+                        "physical ProtoNet checkpoint is incomplete: "
+                        f"missing={missing}, unexpected={unexpected}"
+                    )
                 if missing:
                     logger.warning(f"ProtoNet missing keys (initialized randomly): {missing}")
                 if unexpected:
@@ -463,6 +483,20 @@ class EMSOrchestrator:
                             "scripts/enroll_demo_devices.py, or label them once "
                             "through the dashboard."
                         )
+                    if physical_required:
+                        required_classes = set(self.config.get("appliances") or [])
+                        loaded_classes = set(self.prototype_registry.class_names())
+                        missing_classes = sorted(required_classes - loaded_classes)
+                        missing_envelopes = sorted(
+                            required_classes
+                            - set(self.prototype_registry.envelopes)
+                        )
+                        if missing_classes or missing_envelopes:
+                            raise RuntimeError(
+                                "physical registry is incomplete: "
+                                f"missing_classes={missing_classes}, "
+                                f"missing_envelopes={missing_envelopes}"
+                            )
                 else:
                     self.prototype_registry = None
                     if self.encoder is not None and not os.path.exists(registry_path):
@@ -478,9 +512,16 @@ class EMSOrchestrator:
                             f"scripts/train_demo_models.py then "
                             f"scripts/enroll_demo_devices.py."
                         )
+                        if physical_required:
+                            raise RuntimeError(
+                                f"physical registry missing at {registry_path}"
+                            )
             except Exception as e:
                 logger.warning(f"Prototype Registry load failed: {e}")
                 self.prototype_registry = None
+                if physical_required:
+                    self.ml_inference_blocked = True
+                    self.ml_block_reason = str(e)
 
             # Load OpenMax Weibull
             try:
@@ -527,6 +568,8 @@ class EMSOrchestrator:
             self.encoder = None
             self.prototype_registry = None
             self.calibrated_scaler = None
+            if physical_required:
+                self.ml_block_reason = "physical model weights are missing"
 
         # Legacy loaders (each isolated so failures don't cascade)
         try:
@@ -646,6 +689,9 @@ class EMSOrchestrator:
             filtered_segment: (128,) pre-filtered segment from NILMTransientDetector.
                               If provided, bypasses the legacy rolling window.
         """
+        if getattr(self, "ml_inference_blocked", False):
+            return UNRECOGNISED, 0.0, {}
+
         # Use NILM-filtered segment when available (§2.1 fix)
         if filtered_segment is not None:
             window_np = np.asarray(filtered_segment, dtype=np.float32)
@@ -935,7 +981,7 @@ class EMSOrchestrator:
             # Robust payload decoding
             if isinstance(payload, (bytes, bytearray)):
                 payload = payload.decode("utf-8", errors="replace")
-            payload_str = str(payload) if payload else ""
+            payload_str = "" if payload is None else str(payload)
 
             # Phase 2 (WS-5.1): Hardware ACK processing
             if topic.endswith("/ack"):
@@ -1007,22 +1053,32 @@ class EMSOrchestrator:
                 return
 
             # Dual-format payload extraction (plain float or JSON)
-            power_watts = 0.0
             stripped_payload = payload_str.strip()
+            if not stripped_payload:
+                logger.warning(f"🚫 Empty power payload on {topic}")
+                return
+
+            power_watts = None
             if stripped_payload.startswith("{") and stripped_payload.endswith("}"):
                 try:
                     data = json.loads(stripped_payload)
-                    if isinstance(data, dict):
-                        power_watts = float(data.get("power", data.get("watts", data.get("W", data.get("value", 0.0)))))
-                    else:
-                        power_watts = float(data)
+                    if not isinstance(data, dict):
+                        raise ValueError("power JSON must be an object")
+                    raw_power = next(
+                        (data[key] for key in ("power", "watts", "W", "value")
+                         if key in data),
+                        None,
+                    )
+                    if raw_power is None or isinstance(raw_power, bool):
+                        raise ValueError("missing power field")
+                    power_watts = float(raw_power)
                 except Exception as parse_err:
                     logger.warning(f"🚫 Failed to extract power from JSON payload on {topic}: {parse_err}")
                     return
             else:
                 try:
-                    power_watts = float(stripped_payload) if stripped_payload else 0.0
-                except ValueError:
+                    power_watts = float(stripped_payload)
+                except (TypeError, ValueError):
                     logger.warning(f"🚫 Non-numeric payload on {topic}: '{payload_str}'")
                     return
 
@@ -1030,8 +1086,9 @@ class EMSOrchestrator:
             # and SQLite data poisoning from faulty sensors
             # (math is imported at module level; a function-local import here
             # would make `math` an unbound local for the whole handler.)
-            if math.isnan(power_watts) or math.isinf(power_watts):
-                logger.warning(f"🚫 Rejected invalid payload on {topic}: {payload_str} (NaN/Inf)")
+            if (power_watts is None or not math.isfinite(power_watts)
+                    or power_watts < 0):
+                logger.warning(f"🚫 Rejected invalid payload on {topic}: {payload_str}")
                 return
             current_time = time.time()
             current_hour = datetime.now().hour

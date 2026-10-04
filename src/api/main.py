@@ -274,7 +274,15 @@ async def mqtt_listener_task():
 
                 async for message in client.messages:
                     topic = str(message.topic)
-                    payload = message.payload.decode() if isinstance(message.payload, bytes) else str(message.payload)
+                    try:
+                        payload = (message.payload.decode()
+                                   if isinstance(message.payload, bytes)
+                                   else str(message.payload))
+                    except (UnicodeDecodeError, TypeError) as exc:
+                        logger.warning(
+                            "Dropping undecodable MQTT frame on %s: %s", topic, exc
+                        )
+                        continue
 
                     # ── UI Events (structured JSON from the pipeline) ──
                     if "home/ui/events" in topic:
@@ -394,9 +402,14 @@ async def mqtt_listener_task():
                                 }))
 
                             await manager.broadcast(event_data)
-                        except json.JSONDecodeError:
-                            # Issue #11: Log instead of silently swallowing
-                            logger.debug(f"Invalid JSON on topic {topic}, payload length={len(payload)}")
+                        except Exception as exc:
+                            # A malformed or schema-invalid UI event is an
+                            # untrusted frame, not a listener-fatal error.
+                            # Keep the bridge alive and leave shared state
+                            # unchanged for that frame.
+                            logger.warning(
+                                "Dropping invalid UI event on %s: %s", topic, exc
+                            )
 
                     # ── Raw Power Readings ──
                     elif "/power" in topic:

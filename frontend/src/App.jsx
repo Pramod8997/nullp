@@ -381,14 +381,14 @@ function Dashboard() {
             </div>
             <div>
               <h2 className="text-xl font-black uppercase tracking-wider">
-                ARC FAULT DETECTED
+                 EDGE SAFETY EVENT
               </h2>
               <p className="text-sm font-semibold text-rose-100 mt-1">
-                HARDWARE RELAY CUTOFF AUTOMATICALLY TRIPPED
+                 PROTOTYPE CUTOFF REPORTED
               </p>
             </div>
             <p className="text-xs text-rose-200 bg-rose-900/50 p-3 rounded-xl border border-rose-500/40">
-              High-frequency arc signature isolated. Breakers open. Inspect appliance nodes immediately.
+               Edge software reported a safety event. Relay contact state is unconfirmed; this prototype is not certified AFCI or overcurrent protection.
             </p>
           </div>
         </div>

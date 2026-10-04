@@ -20,6 +20,8 @@ topic write home/plug/+/ack
 
 user ems_pipeline
 topic read home/sensor/#
+topic read home/ui/events
+topic read home/plug/+/command
 topic read home/plug/+/ack
 topic read home/ml/label
 topic read $SYS/#

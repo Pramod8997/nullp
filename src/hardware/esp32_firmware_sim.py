@@ -117,6 +117,17 @@ class ESP32FirmwareNode:
         # PZEM_FAIL_TRIP_COUNT consecutive cycles, and the core-1 tick consumes
         # the flag and takes the 5-minute lockout.
         self.shared_pzem_fault = False
+        # Safety inhibit is asserted by Core 0 before any safety cutoff and is
+        # only cleared when the Core-1 lockout expires.  It closes the
+        # cutoff->ON scheduling window: a command cannot re-energise the relay
+        # before the diagnostic/latch tick runs.
+        self._safety_inhibit = False
+        # MQTT commands are requests consumed by the Core-0 relay owner.  The
+        # public command coroutine emulates delivery plus one safety tick so
+        # existing simulator callers retain deterministic ACK timing without
+        # giving the command path a second relay owner.
+        self._pending_command: Optional[str] = None
+        self._pending_ack: Optional[str] = None
 
         # Core 0 State
         self._last_watts = 0.0
@@ -232,15 +243,10 @@ class ESP32FirmwareNode:
             #     within 100 ms of Gate 7's dry relay close, making Gate 7
             #     unperformable. Once the sensor has proven itself alive,
             #     losing it is a real fault and still trips in 3 s.
-            # KNOWN RESIDUAL HOLE, accepted: a PZEM dead from boot never arms,
-            # so an ON closes the relay onto an unmeasured circuit and no trip
-            # occurs. Strictly narrower than the behaviour this watchdog
-            # replaced (which never tripped at all), and the price of Gates 5/7
-            # being performable. Gate 6 catches a never-arming node — it
-            # publishes no plausible V/I/W once mains is live.
             if (self._pzem_fail_count >= PZEM_FAIL_TRIP_COUNT
                     and self._pzem_ever_valid
                     and self.gpio18_relay_state):
+                self._safety_inhibit = True
                 self.set_relay(False)
                 self.shared_pzem_fault = True
                 logger.warning(
@@ -248,6 +254,10 @@ class ESP32FirmwareNode:
                     f"{PZEM_FAIL_TRIP_COUNT} consecutive bad reads "
                     f"(~{PZEM_FAIL_TRIP_COUNT * 0.1:.1f}s blind) -> Relay CUTOFF."
                 )
+            # A command request is rejected in the same Core-0 context even
+            # when the loss watchdog is disarmed at boot.  Production ON is
+            # never allowed to use an unknown measurement channel.
+            self._consume_pending_command(measurement_valid=False)
             return
 
         # Good read — the node can see the load again, so the watchdog rewinds
@@ -278,6 +288,7 @@ class ESP32FirmwareNode:
                 # core-1 tick when it consumes shared_arc_fault, mirroring the
                 # arc-fault cutoff branch in SafetySamplingTask() + the core-1
                 # arc-fault acknowledgment block in loop() (main.cpp).
+                self._safety_inhibit = True
                 self.set_relay(False)
                 self.shared_arc_fault = True
                 self.shared_arc_fault_roc = roc
@@ -302,6 +313,7 @@ class ESP32FirmwareNode:
         # the core-1 overcurrent lockout block in loop() (main.cpp).
         critical_watts = self.rated_watts * 1.25
         if power_w > critical_watts:
+            self._safety_inhibit = True
             self.set_relay(False)
             self.shared_overcurrent_latch = True
             logger.warning(
@@ -322,6 +334,31 @@ class ESP32FirmwareNode:
         self.shared_voltage = voltage
         self.shared_current = current
         self.shared_pf = pf
+
+        # Core 0 is the sole relay owner.  A command queued by the Core-1
+        # callback is considered only after this cycle's safety checks, so a
+        # simultaneous trip always rejects ON.
+        self._consume_pending_command(measurement_valid=True)
+
+    def _consume_pending_command(self, measurement_valid: bool) -> None:
+        """Consume one Core-1 command request from the Core-0 safety context."""
+        command = self._pending_command
+        self._pending_command = None
+        if command is None:
+            return
+
+        if command == "OFF":
+            self.set_relay(False)
+            self._pending_ack = "OFF_CONFIRMED"
+            return
+
+        if command == "ON":
+            if (not measurement_valid or self.relay_locked
+                    or self._safety_inhibit):
+                self._pending_ack = "LOCKOUT_NACK"
+                return
+            self.set_relay(True)
+            self._pending_ack = "ON_CONFIRMED"
 
     # ═════════════════════════════════════════════════════════════════════
     # CORE 1: Standard Priority Arduino Loop (MQTT + Telemetry)
@@ -349,22 +386,22 @@ class ESP32FirmwareNode:
             )
             return
 
-        if command == "ON":
-            if not self.relay_locked:
-                self.set_relay(True)
-                if self.mqtt_publish:
-                    await self.mqtt_publish(self.topic_ack, "ON_CONFIRMED")
+        if command in ("ON", "OFF"):
+            # The real callback only queues this request; the following safety
+            # step models the Core-0 scheduler turn so the simulator's public
+            # async API remains deterministic.  No relay write occurs here.
+            self._pending_command = command
+            self.core0_safety_step()
+            ack = self._pending_ack
+            self._pending_ack = None
+            if ack and self.mqtt_publish:
+                await self.mqtt_publish(self.topic_ack, ack)
+            if ack == "ON_CONFIRMED":
                 logger.info(f"[{self.device_id}] Relay turned ON (ACK: ON_CONFIRMED)")
-            else:
-                if self.mqtt_publish:
-                    await self.mqtt_publish(self.topic_ack, "LOCKOUT_NACK")
-                logger.warning(f"[{self.device_id}] ON rejected: Relay locked out (NACK sent)")
-
-        elif command == "OFF":
-            self.set_relay(False)
-            if self.mqtt_publish:
-                await self.mqtt_publish(self.topic_ack, "OFF_CONFIRMED")
-            logger.info(f"[{self.device_id}] Relay turned OFF (ACK: OFF_CONFIRMED)")
+            elif ack == "LOCKOUT_NACK":
+                logger.warning(f"[{self.device_id}] ON rejected: safety gate (NACK sent)")
+            elif ack == "OFF_CONFIRMED":
+                logger.info(f"[{self.device_id}] Relay turned OFF (ACK: OFF_CONFIRMED)")
 
         elif command == "WARNING":
             # Log-only branch (WARNING in callback())
@@ -403,6 +440,7 @@ class ESP32FirmwareNode:
         # (the command handler does not expire it).
         if self.relay_locked and (now - self.lock_start_time) > self.safety_lockout_seconds:
             self.relay_locked = False
+            self._safety_inhibit = False
             logger.info(f"[{self.device_id}] 5-minute safety lockout expired. Relay unlocked.")
 
         # Core-0 arc-fault latch -> lockout + best-effort alert publish

@@ -189,7 +189,7 @@ const SettingsPage = () => {
                   Arc Fault Automated Relay Trip
                 </h3>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                  Instantly open hardware relay on high frequency arc signatures.
+                  Report prototype edge dP/dt events. This is not certified arc-fault protection.
                 </p>
               </div>
               <button

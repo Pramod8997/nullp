@@ -1,13 +1,13 @@
 # ASTRA Current State
 
-**Checkpoint:** CP-000-BASELINE (subagent review pending)  
+**Checkpoint:** CP-001-SAFETY-PARSER (software partial)
 **Date:** 2026-10-04  
-**HEAD:** `4e07b658 Fixed minor firmware issues and Ml pipeline issues`  
-**Working tree:** dirty; pre-existing user changes are present and must be preserved.
+**HEAD:** `302e1b214c2a23e9d4061d847eb4abfc19baebf7` (`Updated Docs`)
+**Working tree:** dirty with CP-001 safety/parser changes and the untracked CP-000 audit artifact; unrelated work must be preserved.
 
 ## Baseline facts
 
-- Repository is a git worktree with uncommitted modifications in firmware, simulator, and tests, plus untracked `Untitled Document 1` and `__agent__/`.
+- The current checkout contains prior documentation commits; CP-001 changes are uncommitted in firmware, simulator, parser/API, and regression tests. `Untitled Document 1` and `__agent__/` are tracked at the current HEAD.
 - The supplied audit in `Untitled Document 1` reports a prior NO-GO assessment: P0 safety issues H1/H2/H3, safety-claim issue H4, hardware contradiction H5, MQTT/parser failures, ML enrollment/open-set gaps, and dashboard truth gaps.
 - Existing project documents claim different historical baselines (224, 433, 549, 626, and 641 Python tests). The live count will be established by the current commands, not documentation.
 - `graphify-out/` exists and reports a graph built from `83ed9c1b`, but the installed `graphify` launcher currently fails with `ModuleNotFoundError: No module named 'graphify'`; the graph is therefore stale/unqueryable in this environment until tooling is repaired.
@@ -16,10 +16,12 @@
 ## Live baseline execution
 
 - Initial `venv/bin/python -m pytest tests/ -q`: **BLOCKED** — the venv Python symlink resolves to Python 3.12 while its populated packages are under `lib/python3.10`; `pytest` is not importable.
-- Reproducible matching-runtime command: `PYTHONPATH=venv/lib/python3.10/site-packages:. /usr/bin/python3.10 -m pytest tests/ -q --tb=short` → **641 passed, 3 warnings, 22.70 s**.
+- Initial matching-runtime baseline before CP-001: **641 passed, 4 intentional audit failures, 3 warnings**.
+- CP-001 full regression: `PYTHONPATH=venv/lib/python3.10/site-packages:. /usr/bin/python3.10 -m pytest tests/ -q --tb=short` → **646 passed, 3 warnings, 18.84 s**.
 - Runtime packages used: Python 3.10.12, pytest 9.0.3, torch 2.11.0+cu130, numpy 2.2.6, FastAPI 0.136.0.
 - Frontend command: `cd frontend && npm test -- --run` → **20 passed, 1 file, 1.45 s**; Node v24.14.0, npm 11.9.0, Vitest 4.1.10.
-- New focused reproductions in `tests/test_audit_reproductions.py`: **4 failed as intended** against current code (H1, H2, parser, B2). These are now the first red regression gate and must not be weakened.
+- CP-001 focused safety/protocol gate → **163 passed, 0 failed**; frontend remains **20 passed**.
+- Firmware compilation was **NOT RUN** because PlatformIO/`pio` is unavailable.
 
 ## Runtime boundaries
 
@@ -34,7 +36,7 @@
 
 ## Current execution phase
 
-`DISCOVER → BASELINE`. No source fix is authorized until the baseline suite and defect reproduction matrix are recorded. The first implementation target, if reproduced, is the highest-severity P0 safety gate; the existing dirty safety changes are not assumed correct merely because tests were added.
+`VERIFY → CHECKPOINT → REASSESS`. CP-001 closes the reproduced H1/H2/parser/B2 software regressions in simulator/API paths. H3 freshness, H4 claims, H5 hardware consistency, real broker ACL behavior, physical ML enrollment, dashboard truth, and physical validation remain open or blocked.
 
 ## Known contradiction requiring human/hardware decision
 
@@ -47,7 +49,6 @@
 
 ## Next exact actions
 
-1. Run and record current Python suite, frontend suite, versions, and targeted audit reproducers.
-2. Create CP-000 with exact counts/failures.
-3. Launch narrow domain reviewers against these artifacts; reviewers must not patch safety code before reporting.
-4. Cross-review findings and choose one P0 root cause for test-first remediation.
+1. Human-review the CP-001 firmware safety diff and perform qualified low-voltage/bench verification before any mains claim.
+2. Resolve H3 with production PZEM transaction-age/liveness implementation and measured dependency timing.
+3. Resolve H5's authoritative hardware/projector contradiction before ceiling or physical ML claims.
