@@ -8,13 +8,15 @@ Replicates:
       - Sliding baseline inrush suppression
       - Edge Arc-Fault trip (dP/dt > 1000 W/s)
       - Overcurrent cutoff (125% rated)
+      - Loss-of-measurement watchdog (30 consecutive bad PZEM reads = 3 s,
+        armed only after the PZEM's first valid read)
       - Hardware relay cutoff with zero network dependency
   • Core 1 (Standard Priority @ 1Hz):
       - 1Hz fast power telemetry (`home/sensor/{id}/power`)
       - 10s diagnostic telemetry (`home/sensor/{id}/telemetry`)
       - Relay command handling (ON/OFF/WARNING)
       - Relay ACKs (`ON_CONFIRMED`, `OFF_CONFIRMED`, `LOCKOUT_NACK`)
-      - Status alerts (`ONLINE`/`OFFLINE`/`OVERCURRENT:`/`SERVER_TIMEOUT`/`EDGE_ARC_FAULT:`)
+      - Status alerts (`ONLINE`/`OFFLINE`/`OVERCURRENT:`/`SERVER_TIMEOUT`/`EDGE_ARC_FAULT:`/`PZEM_FAULT`)
       - 5-minute anti-thrashing lockout
 """
 
@@ -27,6 +29,19 @@ import time
 from typing import Optional, Callable, Dict, Any
 
 logger = logging.getLogger("ESP32_FIRMWARE_SIM")
+
+# Loss-of-measurement watchdog threshold. Mirrors the PZEM_FAIL_TRIP_COUNT
+# constant in main.cpp: how many CONSECUTIVE failed/non-finite PZEM reads core 0
+# tolerates before it fails safe and opens the relay.
+#
+# 30 x the 100 ms core-0 cadence = 3 s with no measurement at all, and during
+# those 3 s both overcurrent and arc-fault protection are blind. This is a
+# HARDWARE TUNING KNOB, not a pure software constant: raise it if a real UART run
+# (long PZEM cable, EMI from the relay coil, a marginal 5 V rail) produces
+# nuisance trips on transient CRC failures; lower it to shorten the blind window.
+# Do not raise it far — the whole point is that the load must not stay energised
+# while protection is unmeasured.
+PZEM_FAIL_TRIP_COUNT = 30
 
 
 class VirtualPZEM004T:
@@ -96,6 +111,12 @@ class ESP32FirmwareNode:
         # tick consumes it and takes the lockout (the core-1 loop's overcurrent
         # latch block in main.cpp does the lock, not the safety task).
         self.shared_overcurrent_latch = False
+        # Core-0 -> core-1 loss-of-measurement latch. Mirrors sharedPzemFault in
+        # main.cpp and uses the same handshake as the two flags above: core 0
+        # opens the relay once the PZEM has been unreadable for
+        # PZEM_FAIL_TRIP_COUNT consecutive cycles, and the core-1 tick consumes
+        # the flag and takes the 5-minute lockout.
+        self.shared_pzem_fault = False
 
         # Core 0 State
         self._last_watts = 0.0
@@ -103,6 +124,14 @@ class ESP32FirmwareNode:
         self._baseline_idx = 0
         self._baseline_fill = 0
         self._last_read_time = time.time()
+        # Consecutive failed/non-finite PZEM reads (pzemFailCount in main.cpp).
+        # Saturates at PZEM_FAIL_TRIP_COUNT so trip timing matches the firmware
+        # sample for sample (there it also avoids signed-overflow UB on a
+        # permanently dead sensor). See the trip branch in core0_safety_step().
+        self._pzem_fail_count = 0
+        # Watchdog ARMING latch (pzemEverValid in main.cpp): set by the first
+        # all-finite read and never cleared. See the trip branch for why.
+        self._pzem_ever_valid = False
         self._core0_running = True
 
         # Core 1 State
@@ -167,7 +196,64 @@ class ESP32FirmwareNode:
                 f"[CORE 0] Invalid PZEM read on {self.device_id} "
                 f"(W={power_w}, V={voltage}, I={current}, PF={pf}) -> cycle skipped."
             )
+            # Loss-of-measurement watchdog (the pzemFailCount branch in
+            # SafetySamplingTask() in main.cpp). Skipping the cycle keeps NaN
+            # out of safety state, but skipping FOREVER is fail-dangerous: a
+            # dead PZEM or a severed UART left the relay CLOSED with both the
+            # overcurrent and arc-fault channels silently off, because neither
+            # can trip on a measurement that never arrives. Count consecutive
+            # failures and open the relay once the node has been blind for
+            # PZEM_FAIL_TRIP_COUNT cycles (3 s).
+            if self._pzem_fail_count < PZEM_FAIL_TRIP_COUNT:
+                self._pzem_fail_count += 1   # Saturate, exactly as main.cpp does
+            # Three conditions, ALL required — identical to main.cpp:
+            #  1. PZEM_FAIL_TRIP_COUNT consecutive blind samples (3 s). Any
+            #     good read rewinds the counter to 0 (below).
+            #  2. gpio18_relay_state — an open relay is not an unprotected
+            #     energised socket, so there is nothing to protect. The cutoff
+            #     below clears it (mirroring relayClosed in main.cpp), so the
+            #     trip fires once per fault episode, not once per 100 ms sample;
+            #     that gate plus saturation replaced the old `==` edge and the
+            #     counter reset in set_relay(True). The counter is NOT cleared
+            #     on close, so a node whose PZEM died while open trips 100 ms
+            #     after the next ON instead of waiting another 3 s — deliberate.
+            #  3. _pzem_ever_valid — DISARMED until the PZEM has returned one
+            #     all-finite read since boot. A node that has never measured
+            #     anything has never observed mains, so there is provably no
+            #     energised socket to protect: this refines the invariant, it
+            #     does not weaken it. The PZEM sits UPSTREAM of the relay
+            #     (WIRING_STEP_BY_STEP.md:154) and is mains-powered, so with no
+            #     mains it returns NaN forever regardless of relay state — and
+            #     the documented bring-up runs exactly that way ON PURPOSE.
+            #     Without this gate the twin fired PZEM_FAULT and took a
+            #     5-minute lockout during BRINGUP_RUNBOOK.md Gate 5 ("First
+            #     packet, USB power only, NO MAINS" — ":150 Expect zeros or
+            #     NaN-skips"), and the firmware's saturated counter tripped
+            #     within 100 ms of Gate 7's dry relay close, making Gate 7
+            #     unperformable. Once the sensor has proven itself alive,
+            #     losing it is a real fault and still trips in 3 s.
+            # KNOWN RESIDUAL HOLE, accepted: a PZEM dead from boot never arms,
+            # so an ON closes the relay onto an unmeasured circuit and no trip
+            # occurs. Strictly narrower than the behaviour this watchdog
+            # replaced (which never tripped at all), and the price of Gates 5/7
+            # being performable. Gate 6 catches a never-arming node — it
+            # publishes no plausible V/I/W once mains is live.
+            if (self._pzem_fail_count >= PZEM_FAIL_TRIP_COUNT
+                    and self._pzem_ever_valid
+                    and self.gpio18_relay_state):
+                self.set_relay(False)
+                self.shared_pzem_fault = True
+                logger.warning(
+                    f"[CORE 0] ⚡ PZEM LOSS-OF-MEASUREMENT on {self.device_id}! "
+                    f"{PZEM_FAIL_TRIP_COUNT} consecutive bad reads "
+                    f"(~{PZEM_FAIL_TRIP_COUNT * 0.1:.1f}s blind) -> Relay CUTOFF."
+                )
             return
+
+        # Good read — the node can see the load again, so the watchdog rewinds
+        # and is armed from here on (pzemEverValid = true in main.cpp).
+        self._pzem_fail_count = 0
+        self._pzem_ever_valid = True
 
         # 1. Calculate pre-step sliding baseline average from history
         baseline_avg = sum(self._baseline_ring[:self._baseline_fill]) / max(1, self._baseline_fill) if self._baseline_fill > 0 else 0.0
@@ -332,12 +418,17 @@ class ESP32FirmwareNode:
             if self.mqtt_publish:
                 await self.mqtt_publish(self.topic_status, alert_msg)
 
-        # Core-0 overcurrent latch -> lockout + alert publish. main.cpp has no
-        # latch here — its core-1 loop is a LEVEL-triggered check on
-        # sharedPowerWatts (powerWatts > criticalWatts && !relayLocked). The
-        # twin's edge-triggered flag is a behaviorally equivalent modelling
-        # construct: the relay-open zeroes the read either way, and the flag
-        # guarantees the lock is taken exactly once per trip.
+        # Core-0 overcurrent latch -> lockout + alert publish. Both sides now use
+        # the same core-0 -> core-1 edge-triggered latch: main.cpp raises its
+        # overcurrent latch in SafetySamplingTask() and consumes it here in
+        # loop(). The LEVEL-triggered check it replaced (powerWatts >
+        # criticalWatts && !relayLocked, read from sharedPowerWatts) could miss
+        # the trip entirely — core 0 opens the relay on the sample that sees the
+        # overload, so the shared reading is already back under the cutoff
+        # before the next core-1 pass, and a brief spike cut the power without
+        # ever taking the 5-minute lockout. The next ON then re-closed straight
+        # into the fault. The latch guarantees the lock is taken exactly once
+        # per trip, whether or not the overload outlives one core-1 sample.
         if self.shared_overcurrent_latch:
             self.shared_overcurrent_latch = False
             self.relay_locked = True
@@ -349,6 +440,25 @@ class ESP32FirmwareNode:
             )
             if self.mqtt_publish:
                 await self.mqtt_publish(self.topic_status, f"OVERCURRENT:{power_w:.1f}")
+
+        # Core-0 loss-of-measurement latch -> lockout + alert publish. Same
+        # core-0 -> core-1 edge-triggered handshake as the two blocks above
+        # (the sharedPzemFault acknowledgment block in loop() in main.cpp).
+        # Core 0 has already opened the relay; the lockout is what stops the
+        # pipeline's next automatic ON from re-closing into a node that still
+        # cannot measure what it is switching. PZEM_FAULT carries no value
+        # suffix — there is no trustworthy measurement to report, which is the
+        # whole point of the alert.
+        if self.shared_pzem_fault:
+            self.shared_pzem_fault = False
+            self.relay_locked = True
+            self.lock_start_time = now
+            logger.warning(
+                f"[{self.device_id}] [SAFETY] PZEM LOSS-OF-MEASUREMENT "
+                f"({PZEM_FAIL_TRIP_COUNT} consecutive bad reads). Relay LOCKED."
+            )
+            if self.mqtt_publish:
+                await self.mqtt_publish(self.topic_status, "PZEM_FAULT")
 
         # Server Heartbeat Watchdog (mirrors the lastServerHB / SERVER_TIMEOUT
         # watchdog block in loop() in main.cpp). Arming matches the firmware:

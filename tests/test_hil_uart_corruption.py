@@ -525,7 +525,7 @@ class TestHILStressTests:
             
             if firmware.relay_locked or firmware.shared_overcurrent_latch:
                 # Core 0 raises the overcurrent latch; the core-1 tick turns
-                # it into relay_locked (main.cpp:427-437). Watch both so a
+                # it into relay_locked (the sharedOvercurrentLatch block in loop() in main.cpp). Watch both so a
                 # nuisance trip is still detected before any tick runs.
                 false_trips += 1
                 firmware.relay_locked = False

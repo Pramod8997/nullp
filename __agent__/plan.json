@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "title": "inspect project and identify all active failures",
+      "status": "in-progress"
+    },
+    {
+      "title": "delegate specialized investigations and fixes",
+      "status": "pending"
+    },
+    {
+      "title": "apply focused fixes and add regression coverage",
+      "status": "pending"
+    },
+    {
+      "title": "run targeted and integration verification",
+      "status": "pending"
+    },
+    {
+      "title": "finalize checklist and work log",
+      "status": "pending"
+    }
+  ],
+  "updated_at": "2026-10-04T16:04:32.771Z",
+  "session_id": "01a107a2-9429-7125-ac79-cb90f08b0dd2"
+}

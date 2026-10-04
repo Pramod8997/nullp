@@ -1,0 +1,815 @@
+1. The Doomsday Summary                                                                                                                                                                    
+                                                                                                                                                                                            
+ Verdict: NO-GO for commercial deployment                                                                                                                                                   
+                                                                                                                                                                                            
+ Astra has a functioning software prototype, but its safety guarantees, hardware scope, recognition capability, and dashboard claims do not consistently match the implementation.          
+                                                                                                                                                                                            
+ I cannot honestly predict a catastrophic failure within exactly seven days. I can identify failures that can occur on the first boot, first malformed message, first network outage, or    
+ first concurrent safety trip and relay command:                                                                                                                                            
+                                                                                                                                                                                            
+ - A dead PZEM at boot does not prevent the relay from being energized indefinitely.                                                                                                        
+ - An ON command can re-close the relay after a safety cutoff but before Core 1 applies the lockout.                                                                                        
+ - The claimed three-second sensor-loss cutoff can take approximately fifteen seconds under the installed library’s timeout behavior.                                                       
+ - The broker ACL does not allow the API’s configured identity to read its principal UI-event topic.                                                                                        
+ - A malformed UI event can kill the API’s MQTT bridge while health/status still look connected.                                                                                            
+ - The physical profile loads a registry with no enrolled physical envelopes and no phone class.                                                                                            
+ - The “disaggregation” path stores one classification per aggregate node, not a maintained set of active appliances.                                                                       
+ - The dashboard contains random energy history and hardcoded savings, and can present stale or inferred state as live hardware truth.                                                      
+                                                                                                                                                                                            
+ ### What I actually verified                                                                                                                                                               
+                                                                                                                                                                                            
+ - Audited the current working tree, including existing uncommitted firmware changes.                                                                                                       
+ - 641 Python tests passed, with three overflow warnings.                                                                                                                                   
+ - 20 frontend tests passed.                                                                                                                                                                
+ - Reproduced, in isolated software checks:                                                                                                                                                 
+     - Dead-from-boot PZEM: relay remained closed after 600 invalid simulated safety steps, without a sensor-fault latch.                                                                   
+     - Safety trip → ON before latch consumption: relay re-closed; subsequent Core-1 processing set locked=True without reopening it.                                                       
+     - Malformed DEVICE_STATUS: ValidationError escaped the MQTT listener; status remained connected, and the client reference remained present.                                            
+     - Empty payload and {} became 0 W; negative power remained negative in the live parser.                                                                                                
+     - Three different devices could satisfy the single shared unknown-stability buffer.                                                                                                    
+     - Hardware profile: seven registry classes, zero power envelopes, no phone prototype.                                                                                                  
+                                                                                                                                                                                            
+ No source files were changed. No mains hardware, brownout waveform, EMI behavior, relay contacts, or physical calibration was validated. Passing simulator tests is not physical           
+ validation.                                                                                                                                                                                
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ 2. Critical Vulnerability Matrix                                                                                                                                                           
+                                                                                                                                                                                            
+ P0 = safety release blocker. P1 = major correctness, security, or availability blocker. P2 = lower-priority hardening.                                                                     
+                                                                                                                                                                                            
+ ┌────┬──────────┬──────────────────────────────────────────┬─────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────┐ 
+ │ ID │ Severity │ Issue / component                        │ Real-world impact                           │ Root cause and evidence                                                       │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ H1 │ P0       │ Sensor-dead-at-boot bypass — firmware    │ Energized socket with neither               │ pzemEverValid gates the loss watchdog, but ON requires only !relayLocked.     │ 
+ │    │          │                                          │ measurement-based protection channel        │ main.cpp:263–283,396–401                                                      │ 
+ │    │          │                                          │ operational                                 │                                                                               │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ H2 │ P0       │ Safety cutoff is not atomic with lockout │ Network command can re-energize a           │ Core 0 opens/latches; Core 1 sets lockout later. client.loop() runs first.    │ 
+ │    │          │ — firmware                               │ just-tripped circuit                        │ main.cpp:321–355,396–399,512–516,530–600                                      │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ H3 │ P0       │ No trustworthy measurement-age/liveness  │ Protection can operate on stale data or     │ Four timeout-prone getters; sample-count watchdog; no explicit safety-task    │ 
+ │    │          │ guarantee — firmware/dependency          │ remain blind longer than advertised         │ WDT; PZEM rollover cache defect. main.cpp:227–230,253–300,430–438; installed  │ 
+ │    │          │                                          │                                             │ PZEM004Tv30.cpp:430,476, .h:142                                               │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ H4 │ P0       │ Prototype protection presented as        │ False assurance of isolation, arc           │ Active-power threshold is called “overcurrent”; no contact feedback; low-rate │ 
+ │    │          │ commercial electrical safety —           │ protection, or contact opening              │ dP/dt is not an AFCI; TTL isolation explicitly uncertain. main.cpp:317–355;   │ 
+ │    │          │ hardware/UI                              │                                             │ Hardware.md:28–30; App.jsx:383–395                                            │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ H5 │ P1       │ Contradictory release                    │ Wrong wiring, nuisance trips, unsupported   │ Physical spec excludes projector and caps at 250 W; recognition profile       │ 
+ │    │          │ hardware/profiles/calibration            │ projector use, uncorrected meter error      │ includes projector; firmware README still gives obsolete relay wiring/demo    │ 
+ │    │          │                                          │                                             │ config. HARDWARE_FINAL_SPEC.md:8–10; config.hardware.yaml:92–119;             │ 
+ │    │          │                                          │                                             │ README_PHASE2.md:28–31                                                        │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ B1 │ P1       │ API MQTT identity lacks required read    │ Classified states, labels, diagnostics and  │ API uses ems_pipeline and subscribes to home/ui/events and commands; ACL      │ 
+ │    │          │ grants                                   │ analytics cannot reliably reach dashboard   │ grants write, not read. docker-compose.yml:45–47; src/api/main.py:271–273;    │ 
+ │    │          │                                          │ under shipped ACL                           │ mosquitto/config/acl:21–28                                                    │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ S1 │ P1       │ Cleartext transport, shared device       │ Device spoofing, forged ACKs, telemetry     │ Plain MQTT/HTTP/WS; wildcard ESP32 grants; static API key bundled into        │ 
+ │    │          │ identity, browser-exposed write key      │ disclosure, credential/command replay       │ frontend; unauthenticated reads/WS. acl:14–19; main.cpp:175;                  │ 
+ │    │          │                                          │                                             │ DigitalTwin.jsx:45–50; src/api/main.py:581–630,962–1026                       │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ S2 │ P1       │ Secrets and executable artifacts enter   │ Image disclosure can expose local secrets;  │ COPY . . with insufficient .dockerignore; unsafe model deserialization.       │ 
+ │    │          │ deployment image                         │ replaced model pickle can execute code      │ Dockerfile:10; .dockerignore; run_pipeline.py:402; protonet.py:457–459        │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ B2 │ P1       │ Bad message kills API bridge; probes do  │ Frozen dashboard with healthy HTTP and      │ Per-frame handler catches JSON syntax errors, not validation/type/UTF-8       │ 
+ │    │          │ not detect it                            │ misleading connected status                 │ errors; readiness checks object presence.                                     │ 
+ │    │          │                                          │                                             │ src/api/main.py:275–286,396–443,568–578                                       │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ D1 │ P1       │ Telemetry lacks time, sequence, quality  │ Lost events, replay/delay accepted as       │ QoS-0 firmware publishes without checking result; no spool; receive-time      │ 
+ │    │          │ and outage recovery                      │ current, false NILM transitions and energy  │ processing; stricter parser bypassed. main.cpp:616–638;                       │ 
+ │    │          │                                          │                                             │ run_pipeline.py:1009–1045,1748–1757,1871–1904                                 │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ M1 │ P1       │ Physical ML deployment is not enrolled;  │ Required classes unavailable or inference   │ Missing physical registry; strict=False followed by enabling encoder.         │ 
+ │    │          │ partial checkpoints accepted             │ uses randomly initialized layers            │ config.hardware.yaml:50–77; run_pipeline.py:429–436                           │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ M2 │ P1       │ Confidence/open-set rejection is not     │ In-band unknowns can be confidently         │ Envelope survivor renormalization, inactive OpenMax path, event-only          │ 
+ │    │          │ calibrated to deployed decision          │ misidentified; drift can silently persist   │ classification. run_pipeline.py:713–795,1143–1159;                            │ 
+ │    │          │                                          │                                             │ train_demo_models.py:180–198                                                  │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ M3 │ P1       │ Delta event naming is not complete       │ Aggregate watts attributed to last-added    │ Flat synthetic delta window and one class per meter; negative delta carries   │ 
+ │    │          │ appliance disaggregation                 │ label; unplugging does not reconcile        │ previous class. run_pipeline.py:1215–1259,1580–1596                           │ 
+ │    │          │                                          │ appliance set                               │                                                                               │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ M4 │ P1       │ Enrollment is split-brain and success is │ API says enrolled while live pipeline       │ /label-unrecognized constructs a separate pipeline; normal submit returns     │ 
+ │    │          │ unconfirmed                              │ remains unchanged; concurrent writes can    │ after publish, not enrollment ACK. src/api/main.py:700–726,867–942            │ 
+ │    │          │                                          │ lose updates                                │                                                                               │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ M5 │ P1       │ Unknown stability crosses device         │ Incorrect label requests and                │ One analyzer shared by all device IDs. run_pipeline.py:262–268,1288;          │ 
+ │    │          │ boundaries                               │ suppression/contamination between devices   │ delta_stability.py:59–100                                                     │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ B3 │ P1       │ Serial inference and incomplete memory   │ Backlog, stale processing, event-loop       │ Callback awaited serially; synchronous Torch work; API dictionaries           │ 
+ │    │          │ bounds                                   │ stalls and eventual memory growth           │ unbounded; eviction omits auxiliary maps. mqtt.py:43–46;                      │ 
+ │    │          │                                          │                                             │ run_pipeline.py:1276–1288,1800–1822; src/api/main.py:81–104                   │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ D2 │ P1       │ Persistence is not loss-/duplicate-safe  │ Missing or duplicated measurement history   │ Unbounded RAM queue; no rollback on failed batch; CSV commit-then-rename;     │ 
+ │    │          │                                          │ during crashes, disk failure or replay      │ separate CSV locks. session.py:23,87–120,206–227; run_pipeline.py:904–925     │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ D3 │ P1       │ Energy accounting depends on             │ Incorrect consumption/cost/savings          │ Persistence/analytics mainly inside known/confident branch; dashboard         │ 
+ │    │          │ recognition; UI invents metrics          │ presented to customers                      │ multiplies present power by history length and fabricates savings/history.    │ 
+ │    │          │                                          │                                             │ run_pipeline.py:1261–1446; SummaryCards.jsx:11–20;                            │ 
+ │    │          │                                          │                                             │ EnergyChart/EnergyChart.jsx:14–39                                             │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ U1 │ P1       │ Dashboard is not authoritative hardware  │ Offline nodes look active; real edge faults │ Firmware status becomes SAFETY_EVENT, which UI ignores; no freshness expiry;  │ 
+ │    │          │ state                                    │ can be missed; “cutoff” can be reported     │ ACK not mapped to relay state. run_pipeline.py:940–958; App.jsx:50–250;       │ 
+ │    │          │                                          │ without confirmation                        │ DeviceCards.jsx:59–65                                                         │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ U2 │ P1       │ Production HTTPS and degraded-network UX │ Mixed-content blocking, stuck label         │ Hardcoded HTTP/WS; no fetch timeout; no render error boundary;                │ 
+ │    │          │ fail                                     │ submissions, broken page on invalid data    │ reconnect-after-unmount race. App.jsx:13,260–313; DigitalTwin.jsx:4,45–64     │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ T1 │ P1       │ Training-data quality/cache contract is  │ Training silently consumes stale settings,  │ Unsorted timestamps used with searchsorted; corrupt samples become zero;      │ 
+ │    │          │ incomplete                               │ missing intervals or incorrect windows      │ ineffective 1,800-second gap threshold for 128-second windows; cache lacks    │ 
+ │    │          │                                          │                                             │ fingerprint. nilmtk_reader.py:170–234; unified_loader.py:308–344              │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ L1 │ P2       │ Allocation/reconnect hardening           │ Heap churn and synchronized reconnect load  │ Temporary String allocations and fixed five-second MQTT retries.              │ 
+ │    │          │                                          │ over long uptime                            │ main.cpp:391–396,488–505                                                      │ 
+ ├────┼──────────┼──────────────────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────┤ 
+ │ L2 │ P2       │ Misleading verification and performance  │ Teams ship based on tests/metrics that do   │ Host C tests implement their own watchdog/backoff; latency measures handler   │ 
+ │    │          │ claims                                   │ not exercise the claimed behavior           │ duration, not ESP32-to-browser latency. test_main_host.c:33–60;               │ 
+ │    │          │                                          │                                             │ run_pipeline.py:932,1606–1638; SystemStatus.jsx:185                           │ 
+ └────┴──────────┴──────────────────────────────────────────┴─────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────┘ 
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ 3. Deep-Dive Fixes                                                                                                                                                                         
+                                                                                                                                                                                            
+ These are remediation designs and implementation patterns—not patches already applied or hardware-certified code.                                                                          
+                                                                                                                                                                                            
+ A. Repair the safety authority first — H1, H2, H3                                                                                                                                          
+                                                                                                                                                                                            
+ ### H1: No valid measurement must mean no production ON                                                                                                                                    
+                                                                                                                                                                                            
+ The current inference—“PZEM has never returned data, therefore there is no energized circuit”—is invalid. A disconnected UART and absent mains are indistinguishable to this code.         
+                                                                                                                                                                                            
+ Required behavior:                                                                                                                                                                         
+                                                                                                                                                                                            
+ 1. Boot with relay open.                                                                                                                                                                   
+ 2. Obtain a fresh, plausible, successful Modbus transaction.                                                                                                                               
+ 3. Permit ON only while measurement freshness and safety-task liveness are valid.                                                                                                          
+ 4. Reject ON while sensor health is unknown or faulted.                                                                                                                                    
+ 5. Preserve dry continuity testing through a separate maintenance procedure/build with mains physically isolated, not a bypass in the production safety path.                              
+                                                                                                                                                                                            
+ Do not merely remove pzemEverValid while leaving the callback free to close the relay. The actuation gate itself must enforce health.                                                      
+                                                                                                                                                                                            
+ ### H2: One task must own relay actuation                                                                                                                                                  
+                                                                                                                                                                                            
+ volatile does not make “check lock → write GPIO → update state” atomic.                                                                                                                    
+                                                                                                                                                                                            
+ Use the existing safety task as the sole relay owner:                                                                                                                                      
+                                                                                                                                                                                            
+ - MQTT callback validates and queues a request; it never closes the relay directly.                                                                                                        
+ - Core 0 evaluates faults, latches the inhibit and opens the relay.                                                                                                                        
+ - Only afterward does it consider pending ON requests.                                                                                                                                     
+ - A trip inhibits closure immediately, independent of Core-1 processing.                                                                                                                   
+ - Lockout expiry alone must not automatically re-energize a load.                                                                                                                          
+Conceptual ordering:                                                                                                                                                                       
+                                                                                                                                                                                            
+ cpp                                                                                                                                                                                        
+   // Executed by the sole relay-owning safety task.                                                                                                                                        
+   evaluateMeasurementAndLiveness();                                                                                                                                                        
+                                                                                                                                                                                            
+   if (faultDetected) {                                                                                                                                                                     
+       safetyInhibit = true;                                                                                                                                                                
+       tripStartedMs = now;                                                                                                                                                                 
+       setRelay(false);                                                                                                                                                                     
+   }                                                                                                                                                                                        
+                                                                                                                                                                                            
+   if (pendingOnRequest) {                                                                                                                                                                  
+       const bool allowed =                                                                                                                                                                 
+           !safetyInhibit &&                                                                                                                                                                
+           measurementFresh &&                                                                                                                                                              
+           measurementPlausible &&                                                                                                                                                          
+           commandIsCurrent;                                                                                                                                                                
+                                                                                                                                                                                            
+       if (allowed) setRelay(true);                                                                                                                                                         
+       else rejectOnRequest();                                                                                                                                                              
+   }                                                                                                                                                                                        
+                                                                                                                                                                                            
+ The existing 312.5 W cutoff and five-minute lockout remain unchanged pending a separate safety-rated review.                                                                               
+                                                                                                                                                                                            
+ Reboot currently clears RAM lockout state. Require an explicit safe restart policy: fresh measurement plus authorized reset/re-arm; never replay an old retained ON.                       
+                                                                                                                                                                                            
+ ### H3: Track successful measurement age, not getter count                                                                                                                                 
+                                                                                                                                                                                            
+ The installed PZEM library:                                                                                                                                                                
+                                                                                                                                                                                            
+ - Caches readings for 200 ms.                                                                                                                                                              
+ - Has a 100 ms receive timeout.                                                                                                                                                            
+ - Does not advance _lastRead after failure.                                                                                                                                                
+                                                                                                                                                                                            
+ Therefore four failed getters plus the 100 ms task delay can consume approximately:                                                                                                        
+                                                                                                                                                                                            
+   4 × 100 ms + 100 ms = 500 ms per failed cycle                                                                                                                                            
+   30 cycles × 500 ms ≈ 15 seconds                                                                                                                                                          
+                                                                                                                                                                                            
+ This is a code-derived estimate, not a bench measurement.                                                                                                                                  
+                                                                                                                                                                                            
+ Fix:                                                                                                                                                                                       
+                                                                                                                                                                                            
+ - Perform one coherent register-block read.                                                                                                                                                
+ - Expose transaction success and a successful-read timestamp.                                                                                                                              
+ - Use elapsed time for measurement-loss protection.                                                                                                                                        
+ - Distinguish cached values from a newly validated frame.                                                                                                                                  
+ - Reject implausible voltage/current/PF and inconsistent measurement combinations without changing approved protection thresholds.                                                         
+ - Check xTaskCreatePinnedToCore() return value; task-creation failure must leave actuation inhibited.                                                                                      
+ - Explicitly register/monitor the safety task with the platform watchdog. An idle-task watchdog is not proof that this particular task is alive.                                           
+                                                                                                                                                                                            
+ ### Patch and pin the installed PZEM rollover defect                                                                                                                                       
+                                                                                                                                                                                            
+ The installed library stores _lastRead as uint64_t, but compares it with wrapped millis() using:                                                                                           
+                                                                                                                                                                                            
+ cpp                                                                                                                                                                                        
+   if (_lastRead + UPDATE_TIME > millis()) return true;                                                                                                                                     
+                                                                                                                                                                                            
+ After approximately 49.7 days, finite cached values can remain “valid” for an extended period.                                                                                             
+                                                                                                                                                                                            
+ Use wrap-safe elapsed arithmetic with consistent types:                                                                                                                                    
+                                                                                                                                                                                            
+ cpp                                                                                                                                                                                        
+   uint32_t lastReadMs;                                                                                                                                                                     
+   bool haveSuccessfulRead = false;                                                                                                                                                         
+                                                                                                                                                                                            
+   if (haveSuccessfulRead &&                                                                                                                                                                
+       uint32_t(millis() - lastReadMs) < UPDATE_TIME) {                                                                                                                                     
+       return true;  // cached, not a new successful transaction                                                                                                                            
+   }                                                                                                                                                                                        
+                                                                                                                                                                                            
+ Patch a pinned dependency/fork—not the generated .pio directory—and test both rollover and failed transactions.                                                                            
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ B. Stop treating a prototype relay as a certified protective device — H4, H5                                                                                                               
+                                                                                                                                                                                            
+ ### H4: Separate protection, switching and proof of isolation                                                                                                                              
+                                                                                                                                                                                            
+ Three claims must be corrected:                                                                                                                                                            
+                                                                                                                                                                                            
+ 1. Active watts are not current.                                                                                                                                                           
+    powerWatts > RATED_WATTS * 1.25 is an active-power limit. Current also depends on voltage and PF. The PZEM current register is read but not used for an independent current limit.      
+                                                                                                                                                                                            
+ 2. Low-rate dP/dt is not arc-fault detection.                                                                                                                                              
+    A PZEM register stream does not provide the high-frequency waveform needed to substantiate the UI’s “High-frequency arc signature isolated” claim.                                      
+                                                                                                                                                                                            
+ 3. GPIO low or zero current does not prove contacts opened.                                                                                                                                
+    A welded relay or an unloaded but energized socket can report zero current. OFF_CONFIRMED presently confirms a software command, not galvanic isolation.                                
+                                                                                                                                                                                            
+ Commercial solution:                                                                                                                                                                       
+                                                                                                                                                                                            
+ - Keep appropriately rated, independent overcurrent and residual-current protection.                                                                                                       
+ - Treat the ESP32 relay function as supplementary control unless the complete protective assembly has been engineered and assessed for that role.                                          
+ - Select switching hardware for the actual SMPS inrush/load category, not just a printed resistive “10 A” rating.                                                                          
+ - If confirmed contact opening is a product requirement, add a suitable independent feedback mechanism and discrepancy fault handling.                                                     
+ - Label UI states separately: commanded, GPIO/coil state, feedback-confirmed, unknown.                                                                                                     
+ - Do not claim arc protection without suitable certified protective hardware or a separately validated detection design.                                                                   
+                                                                                                                                                                                            
+ The repository explicitly says PZEM-clone TTL isolation cannot be assumed. A floating USB charger does not create isolation between an unsafe meter TTL interface and accessible ESP32     
+ wiring. Commercial hardware needs a documented isolation barrier, enclosure/terminal protection and electrical type testing by qualified personnel.                                        
+                                                                                                                                                                                            
+ ### H5: Freeze one hardware release contract                                                                                                                                               
+                                                                                                                                                                                            
+ The current physical specification says 250 W, laptop/phone only, no projector. Firmware still trips at 312.5 W, while recognition includes projector.                                     
+                                                                                                                                                                                            
+ Do not raise the threshold to make a projector demo pass.                                                                                                                                  
+                                                                                                                                                                                            
+ Before deployment:                                                                                                                                                                         
+                                                                                                                                                                                            
+ - Record actual projector nameplate, operating power and inrush.                                                                                                                           
+ - Approve the complete electrical envelope separately.                                                                                                                                     
+ - Generate/check firmware constants and backend profile against that approved release.                                                                                                     
+ - Retire the obsolete BSS138 wiring instructions in README_PHASE2.md.                                                                                                                      
+ - Lock the actual 30-pin or 38-pin board/shield pair.                                                                                                                                      
+ - Verify UART electrical levels under actual powered operation; a floating idle reading alone does not establish safe voltage during transmission.                                         
+ - Retain the documented active-high wiring and boot pull-down unless a reviewed wiring variant is selected.                                                                                
+                                                                                                                                                                                            
+ Power integrity: a 2 A charger’s nameplate does not prove acceptable voltage at the ESP32 after cable resistance and relay/Wi-Fi transients. Measure 5 V and 3.3 V at the board; determine 
+ local decoupling and wiring changes from those measurements.                                                                                                                               
+                                                                                                                                                                                            
+ Calibration: scripts/calibrate_ct.py writes a report containing a scale factor. No demonstrated runtime consumer applies it. Either:                                                       
+                                                                                                                                                                                            
+ - Treat it honestly as a verification report and reject an out-of-tolerance meter, or                                                                                                      
+ - Implement a versioned, validated calibration path with separate review of its safety consequences.                                                                                       
+                                                                                                                                                                                            
+ A lamp nameplate is not a traceable precision calibration standard.                                                                                                                        
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ C. Make the deployed transport actually work — B1                                                                                                                                          
+                                                                                                                                                                                            
+ The API subscribes to topics its configured MQTT identity cannot read.                                                                                                                     
+                                                                                                                                                                                            
+ Give the API its own account and only its required grants:                                                                                                                                 
+                                                                                                                                                                                            
+ conf                                                                                                                                                                                       
+   user ems_api                                                                                                                                                                             
+   topic read home/sensor/+/power                                                                                                                                                           
+   topic read home/sensor/+/status                                                                                                                                                          
+   topic read home/plug/+/ack                                                                                                                                                               
+   topic read home/ui/events                                                                                                                                                                
+   topic write home/ml/label                                                                                                                                                                
+                                                                                                                                                                                            
+ Then configure ems-api to use that identity.                                                                                                                                               
+                                                                                                                                                                                            
+ Do not grant command-topic reads merely to preserve the existing misleading “every command is a cutoff” presentation. Use explicit command/ACK/state events.                               
+                                                                                                                                                                                            
+ Also:                                                                                                                                                                                      
+                                                                                                                                                                                            
+ - Pass --config config/config.hardware.yaml explicitly to the physical pipeline deployment.                                                                                                
+ - Set the same profile for every component that reads it.                                                                                                                                  
+ - Provision the physical registry as a persistent deployment artifact.                                                                                                                     
+ - Fail startup when the selected profile/artifact is absent; do not silently substitute a different deployment profile.                                                                    
+ - Add an integration test using real Mosquitto and the checked-in ACL, not MockMQTTBroker.                                                                                                 
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ D. Establish real security boundaries — S1, S2                                                                                                                                             
+                                                                                                                                                                                            
+ ### S1: Identity, authorization and replay resistance                                                                                                                                      
+                                                                                                                                                                                            
+ Current improvements are real: anonymous MQTT is disabled, SQL writes use parameters, and secret files are not currently tracked. Those controls do not solve the remaining exposure.      
+                                                                                                                                                                                            
+ Required changes:                                                                                                                                                                          
+                                                                                                                                                                                            
+ - TLS for MQTT; HTTPS/WSS for the dashboard.                                                                                                                                               
+ - Unique device credentials, preferably device certificates.                                                                                                                               
+ - Bind each credential to its own topic namespace.                                                                                                                                         
+ - Separate API, pipeline and device roles.                                                                                                                                                 
+ - Authenticate sensitive REST endpoints and WebSockets.                                                                                                                                    
+ - Replace the browser-bundled global write key with short-lived authenticated sessions and authorization for enrollment.                                                                   
+ - Apply actual rate limits and body-size limits. Creating a Limiter object without attaching limits does nothing.                                                                          
+ - Define credential rotation/revocation.                                                                                                                                                   
+                                                                                                                                                                                            
+ Example per-device ACL:                                                                                                                                                                    
+                                                                                                                                                                                            
+ conf                                                                                                                                                                                       
+   user node_bench_agg                                                                                                                                                                      
+   topic read home/plug/node_bench_agg/command                                                                                                                                              
+   topic write home/sensor/node_bench_agg/power                                                                                                                                             
+   topic write home/sensor/node_bench_agg/telemetry                                                                                                                                         
+   topic write home/sensor/node_bench_agg/status                                                                                                                                            
+   topic write home/plug/node_bench_agg/ack                                                                                                                                                 
+                                                                                                                                                                                            
+ The current shared esp32 identity can forge another node’s telemetry and ACKs.                                                                                                             
+                                                                                                                                                                                            
+ Relay commands also need application freshness:                                                                                                                                            
+                                                                                                                                                                                            
+ json                                                                                                                                                                                       
+   {                                                                                                                                                                                        
+     "command_id": "unique-id",                                                                                                                                                             
+     "boot_id": "current-device-boot",                                                                                                                                                      
+     "sequence": 42,                                                                                                                                                                        
+     "action": "ON",                                                                                                                                                                        
+     "expires_at": 1790942400                                                                                                                                                               
+   }                                                                                                                                                                                        
+                                                                                                                                                                                            
+ Reject duplicate, expired and wrong-boot commands. Do not retain executable ON messages. TLS alone does not prevent an authorized or previously queued stale command from being replayed.  
+                                                                                                                                                                                            
+ ### S2: Keep secrets out of images and models data-only                                                                                                                                    
+                                                                                                                                                                                            
+ Dockerfile copies the entire checkout. .gitignore does not govern Docker build context.                                                                                                    
+                                                                                                                                                                                            
+ At minimum exclude:                                                                                                                                                                        
+                                                                                                                                                                                            
+ dockerignore                                                                                                                                                                               
+   .env                                                                                                                                                                                     
+   .env.*                                                                                                                                                                                   
+   **/.env                                                                                                                                                                                  
+   **/.env.*                                                                                                                                                                                
+   **/secrets.h                                                                                                                                                                             
+   mosquitto/config/passwd                                                                                                                                                                  
+   data/*.db*                                                                                                                                                                               
+   mosquitto/data/                                                                                                                                                                          
+   mosquitto/log/                                                                                                                                                                           
+   frontend/node_modules/                                                                                                                                                                   
+   firmware/**/.pio/                                                                                                                                                                        
+                                                                                                                                                                                            
+ Prefer explicit COPY instructions and runtime secret mounts.                                                                                                                               
+                                                                                                                                                                                            
+ For model artifacts:                                                                                                                                                                       
+                                                                                                                                                                                            
+ - Use weights_only=True for supported tensor state dictionaries.                                                                                                                           
+ - Store Weibull parameters and metadata in validated data-only formats.                                                                                                                    
+ - Verify artifact digests/signatures and architecture/schema versions.                                                                                                                     
+ - Keep immutable encoder artifacts read-only.                                                                                                                                              
+ - Keep the mutable enrollment registry separate and writable only by its designated owner.                                                                                                 
+                                                                                                                                                                                            
+ If images containing local secrets have already been distributed, inspect them and rotate affected credentials.                                                                            
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ E. Contain bad frames and expose real health — B2, D1                                                                                                                                      
+                                                                                                                                                                                            
+ ### B2: A bad message must not terminate the bridge                                                                                                                                        
+                                                                                                                                                                                            
+ Validation belongs inside the per-message boundary:                                                                                                                                        
+                                                                                                                                                                                            
+ python                                                                                                                                                                                     
+   try:                                                                                                                                                                                     
+       text = payload.decode("utf-8", errors="strict")                                                                                                                                      
+       event = validate_event(json.loads(text))                                                                                                                                             
+       await apply_event(event)                                                                                                                                                             
+   except (UnicodeDecodeError, json.JSONDecodeError,                                                                                                                                        
+           ValidationError, TypeError, ValueError):                                                                                                                                         
+       invalid_frame_counter.inc()                                                                                                                                                          
+       logger.warning("Dropped invalid MQTT event", extra={"topic": topic})                                                                                                                 
+       continue                                                                                                                                                                             
+                                                                                                                                                                                            
+ Also:                                                                                                                                                                                      
+                                                                                                                                                                                            
+ - Require finite numeric values and appropriate ranges.                                                                                                                                    
+ - Broadcast the validated/normalized event, not the original unvalidated dictionary.                                                                                                       
+ - Clear _shared_mqtt_client in finally.                                                                                                                                                    
+ - Supervise listener task completion.                                                                                                                                                      
+ - Make readiness depend on task liveness, successful DB access and recent upstream activity—not merely non-None references.                                                                
+                                                                                                                                                                                            
+ /health may remain a process-liveness endpoint. It must not be advertised as pipeline readiness.                                                                                           
+                                                                                                                                                                                            
+ ### D1: One parser and one temporal contract                                                                                                                                               
+                                                                                                                                                                                            
+ Route both tests and live MQTT through the same parser. Reject:                                                                                                                            
+                                                                                                                                                                                            
+ - Empty payloads and missing required fields.                                                                                                                                              
+ - Negative/non-finite/physically impossible power.                                                                                                                                         
+ - Invalid device identifiers.                                                                                                                                                              
+ - Oversized messages.                                                                                                                                                                      
+ - Unsupported schema versions.                                                                                                                                                             
+                                                                                                                                                                                            
+ Add device identity, boot ID, sequence, measurement time/uptime and quality flags. Preserve those through storage and WebSocket events.                                                    
+                                                                                                                                                                                            
+ Then implement:                                                                                                                                                                            
+                                                                                                                                                                                            
+ - Duplicate suppression.                                                                                                                                                                   
+ - Bounded out-of-order handling.                                                                                                                                                           
+ - Gap detection and NILM-window reset/re-warmup.                                                                                                                                           
+ - A defined policy for historical replay: persist it, but do not execute current control decisions from old data.                                                                          
+ - Explicit missing-data intervals rather than converting failures to zero.                                                                                                                 
+                                                                                                                                                                                            
+ For outages, add a bounded RAM ring and, if the commercial retention requirement demands it, a wear-managed durable spool. At 1 Hz, writing each sample as an independent flash            
+ transaction is inappropriate. Use batched records, checksums and recovery testing.                                                                                                         
+                                                                                                                                                                                            
+ The current MQTT disconnect behavior keeps local safety running when its sensor/task are healthy, but loses telemetry. That is not inherently the wrong relay policy; it is an undeclared  
+ continuity policy. The “server heartbeat” currently measures command traffic, not a real periodic heartbeat.                                                                               
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ F. Make recognition honest and deployment-specific — M1, M2, M3, M5                                                                                                                        
+                                                                                                                                                                                            
+ ### M1: Enroll the physical deployment and reject incomplete artifacts                                                                                                                     
+                                                                                                                                                                                            
+ The hardware profile cannot reliably recognize the required three-class deployment before physical enrollment. Its loaded registry contains phone_charger, not phone, and no measured      
+ envelopes.                                                                                                                                                                                 
+                                                                                                                                                                                            
+ Required release artifacts:                                                                                                                                                                
+                                                                                                                                                                                            
+ - Frozen encoder with strict state-dict compatibility.                                                                                                                                     
+ - Registry captured from the actual phone, laptop and projector operating states.                                                                                                          
+ - Artifact manifest linking encoder, registry, preprocessing version and calibration.                                                                                                      
+ - Held-out physical validation, including light-load/charging modes.                                                                                                                       
+ - Explicit degraded-mode status when artifacts are missing.                                                                                                                                
+                                                                                                                                                                                            
+ A syntactically loadable partial checkpoint must not enable randomly initialized inference:                                                                                                
+                                                                                                                                                                                            
+ python                                                                                                                                                                                     
+   state = torch.load(path, map_location="cpu", weights_only=True)                                                                                                                          
+   model.load_state_dict(remap_supported_legacy_keys(state), strict=True)                                                                                                                   
+                                                                                                                                                                                            
+ Do not substitute simulator enrollment for physical evidence.                                                                                                                              
+                                                                                                                                                                                            
+ ### M2: An envelope match is not calibrated confidence                                                                                                                                     
+                                                                                                                                                                                            
+ When one class survives the envelope gate:                                                                                                                                                 
+                                                                                                                                                                                            
+   p(class) / sum(p(surviving classes)) ≈ 1                                                                                                                                                 
+                                                                                                                                                                                            
+ That says “only candidate left,” not “99.9% probability this is the right appliance.”                                                                                                      
+                                                                                                                                                                                            
+ Further, the live path does not apply the trained OpenMax artifact as its novelty decision. Simply enabling the dormant path is not a justified fix: its names/metric contract differs,    
+ and the repository already documents poor scale discrimination.                                                                                                                            
+                                                                                                                                                                                            
+ Minimal reliable correction:                                                                                                                                                               
+                                                                                                                                                                                            
+ - Report envelope match and calibrated confidence as different fields.                                                                                                                     
+ - Abstain when the evidence cannot distinguish an in-band unknown.                                                                                                                         
+ - Validate final acceptance thresholds on the actual post-gating decision, not the original softmax.                                                                                       
+ - Test light-load laptops, different chargers and unprofiled loads at the same wattage.                                                                                                    
+ - Track rejection rate, envelope violations and confirmed-label corrections over time.                                                                                                     
+ - Reassess persistent loads periodically; a gradual change below transient threshold otherwise retains the previous classification indefinitely.                                           
+ - Keep physical RL actuation disabled until these gates pass.                                                                                                                              
+                                                                                                                                                                                            
+ ### M3: Decide whether the product identifies events or disaggregates appliances                                                                                                           
+                                                                                                                                                                                            
+ The current delta path creates:                                                                                                                                                            
+                                                                                                                                                                                            
+ python                                                                                                                                                                                     
+   delta_segment = np.full(self.seq_len, delta_w, dtype=np.float32)                                                                                                                         
+                                                                                                                                                                                            
+ This intentionally discards transient shape. It then overwrites the aggregate node’s single classification. On unplugging, it carries that classification forward.                         
+                                                                                                                                                                                            
+ Therefore “laptop running + phone added” can become one node labelled phone with the aggregate power value. That is not per-appliance energy disaggregation.                               
+                                                                                                                                                                                            
+ Two honest release options:                                                                                                                                                                
+                                                                                                                                                                                            
+ 1. Minimal prototype release: display “last detected load-change event,” aggregate watts and unattributed watts. Do not claim per-appliance consumption.                                   
+ 2. Required disaggregation release: maintain an active appliance-instance ledger; reconcile positive/negative events and uncertainty; ensure assigned plus residual watts conserves        
+    aggregate power. Simultaneous/ambiguous events remain unattributed rather than being forced into one class.                                                                             
+                                                                                                                                                                                            
+ Do not expand appliance scope or replace the model to hide a state-accounting defect.                                                                                                      
+                                                                                                                                                                                            
+ ### M5: Partition unknown stability by device                                                                                                                                              
+                                                                                                                                                                                            
+ Replace the shared analyzer with per-device instances, reset them at discontinuities/enrollment, and include them in eviction.                                                             
+                                                                                                                                                                                            
+ On the single aggregate rig, also distinguish event/signature IDs from the node ID. Multiple unknown appliance events from the same meter are not the same signature.                      
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ G. Give enrollment a single owner and durable acknowledgement — M4                                                                                                                         
+                                                                                                                                                                                            
+ /api/v1/appliances/label-unrecognized modifies a separate API-local pipeline. The active MQTT orchestrator does not automatically reload that in-memory registry.                          
+                                                                                                                                                                                            
+ Meanwhile, /api/submit-label:                                                                                                                                                              
+                                                                                                                                                                                            
+ - Removes the pending label before successful enrollment.                                                                                                                                  
+ - Publishes without awaiting an enrollment result.                                                                                                                                         
+ - Returns success that the UI renders as “successfully enrolled.”                                                                                                                          
+                                                                                                                                                                                            
+ Fix:                                                                                                                                                                                       
+                                                                                                                                                                                            
+ 1. API creates an idempotent enrollment request with signature ID and request ID.                                                                                                          
+ 2. The running pipeline is the single registry writer.                                                                                                                                     
+ 3. It validates, enrolls and durably saves the registry.                                                                                                                                   
+ 4. It emits ENROLLMENT_APPLIED with request ID and registry version—or a rejection.                                                                                                        
+ 5. Only then is the pending signature consumed and the UI marked complete.                                                                                                                 
+ 6. A timed-out request remains pending/retryable.                                                                                                                                          
+                                                                                                                                                                                            
+ Serialize updates. Atomic file replacement prevents truncation, but does not prevent two independent writers from overwriting each other’s snapshots.                                      
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ H. Bound latency, memory and storage — B3, D2                                                                                                                                              
+                                                                                                                                                                                            
+ ### B3: Separate ingestion from expensive work                                                                                                                                             
+                                                                                                                                                                                            
+ Inference runs on the backend CPU, not the ESP32. The ESP32 sends small float/JSON payloads, so serialization bandwidth is not the first bottleneck.                                       
+                                                                                                                                                                                            
+ The live MQTT loop awaits all processing serially. Synchronous Torch/NumPy work shares the asyncio event loop with fleet diagnostics. A separate asyncio task is not CPU isolation.        
+                                                                                                                                                                                            
+ Use:                                                                                                                                                                                       
+                                                                                                                                                                                            
+ - A lightweight validated ingress stage.                                                                                                                                                   
+ - A bounded queue with a declared overload policy.                                                                                                                                         
+ - Ordered per-device processing through a bounded inference worker.                                                                                                                        
+ - Separate priority handling for safety/status/ACK events.                                                                                                                                 
+ - Queue-age, queue-depth, dropped-sample and inference-time metrics.                                                                                                                       
+ - A bounded WebSocket output queue per client, with explicit disconnect on overflow.                                                                                                       
+                                                                                                                                                                                            
+ Do not indiscriminately coalesce raw NILM samples: dropping intermediate transitions can destroy recognition. Coalesce dashboard summaries; preserve or explicitly mark gaps in inference  
+ data.                                                                                                                                                                                      
+                                                                                                                                                                                            
+ Memory eviction must include unknown windows, watchdog history, phantom state, temporal-validator state and API device maps. /telemetry currently updates cardinality tracking but returns 
+ before the power-path eviction check.                                                                                                                                                      
+                                                                                                                                                                                            
+ The broker’s 50-connection limit also contradicts a nominal 200-device application capacity. Capacity must be defined and load-tested as a complete deployment.                            
+                                                                                                                                                                                            
+ ### D2: Keep SQLite if it meets the measured single-node workload—but fix its contract                                                                                                     
+                                                                                                                                                                                            
+ The main measurements table already has (timestamp, device_id) indexing. “No time-series index” would be an incorrect finding.                                                             
+                                                                                                                                                                                            
+ Actual problems:                                                                                                                                                                           
+                                                                                                                                                                                            
+ - Unbounded write queue.                                                                                                                                                                   
+ - “Ten-second batching” actually waits for the first item and flushes immediately.                                                                                                         
+ - Failed batches lack explicit rollback.                                                                                                                                                   
+ - CSV replay is not idempotent.                                                                                                                                                            
+ - Two different objects use different locks for the same fallback file.                                                                                                                    
+ - Daily VACUUM is an expensive maintenance operation, not a free retention mechanism.                                                                                                      
+ - Configured retention/fallback values are not all passed into DatabaseSession.                                                                                                            
+                                                                                                                                                                                            
+ Use a unique sample identity:                                                                                                                                                              
+                                                                                                                                                                                            
+ sql                                                                                                                                                                                        
+   CREATE UNIQUE INDEX measurement_identity                                                                                                                                                 
+   ON measurements(device_id, boot_id, sequence);                                                                                                                                           
+                                                                                                                                                                                            
+ Then make insert/replay idempotent, rollback failed transactions, bound batch size and queue depth, and use one persistence/fallback owner.                                                
+                                                                                                                                                                                            
+ Use atomic cluster upsert:                                                                                                                                                                 
+                                                                                                                                                                                            
+ sql                                                                                                                                                                                        
+   INSERT INTO unmapped_clusters (...)                                                                                                                                                      
+   VALUES (...)                                                                                                                                                                             
+   ON CONFLICT(cluster_hash) DO UPDATE SET                                                                                                                                                  
+       hit_count = unmapped_clusters.hit_count + 1,                                                                                                                                         
+       last_seen = excluded.last_seen;                                                                                                                                                      
+                                                                                                                                                                                            
+ For scale perspective, 200 devices × 1 Hz × 30 days = 518.4 million rows. That requires a measured retention/downsampling/storage design, not merely increasing a dictionary limit.        
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ I. Decouple metering truth from ML and fix the dashboard — D3, U1, U2                                                                                                                      
+                                                                                                                                                                                            
+ ### D3: Store every valid measurement before classification                                                                                                                                
+                                                                                                                                                                                            
+ Currently pending/error/low-confidence paths do not all persist and integrate energy consistently.                                                                                         
+                                                                                                                                                                                            
+ Move measurement persistence and aggregate energy accounting ahead of ML. Recognition should add attribution, never decide whether measured electricity exists.                            
+                                                                                                                                                                                            
+ - Integrate using measurement timestamps with a gap policy.                                                                                                                                
+ - Avoid charging an entire outage interval at the first returning power value.                                                                                                             
+ - Persist/reconstruct daily totals across restart.                                                                                                                                         
+ - Specify deployment timezone explicitly for tariff/day boundaries.                                                                                                                        
+ - Prefer validated cumulative energy-meter deltas where appropriate.                                                                                                                       
+                                                                                                                                                                                            
+ Remove or explicitly mark demo-only:                                                                                                                                                       
+                                                                                                                                                                                            
+ - Math.random() energy history.                                                                                                                                                            
+ - Hardcoded “15% optimized.”                                                                                                                                                               
+ - Invented comparison percentages.                                                                                                                                                         
+ - Current power × displayed history length as “today’s consumption.”                                                                                                                       
+                                                                                                                                                                                            
+ ### U1: Represent truth, freshness and uncertainty separately                                                                                                                              
+                                                                                                                                                                                            
+ The frontend currently ignores SAFETY_EVENT and HARDWARE_ACK. Consequently an actual firmware PZEM_FAULT or edge trip need not appear as the intended safety alert.                        
+                                                                                                                                                                                            
+ Normalize firmware status into structured events and consume them end-to-end:                                                                                                              
+                                                                                                                                                                                            
+ - DEVICE_OFFLINE                                                                                                                                                                           
+ - MEASUREMENT_INVALID                                                                                                                                                                      
+ - SAFETY_TRIP                                                                                                                                                                              
+ - LOCKOUT_ACTIVE                                                                                                                                                                           
+ - COMMAND_ACCEPTED/REJECTED                                                                                                                                                                
+ - RELAY_FEEDBACK                                                                                                                                                                           
+                                                                                                                                                                                            
+ Add source timestamp/sequence and freshness expiry. On missing telemetry, show STALE / state unknown, not OFF and not animated live power.                                                 
+                                                                                                                                                                                            
+ Do not emit “edge relay has been activated” merely because the server observed a threshold crossing. That is a diagnostic observation, not hardware confirmation.                          
+                                                                                                                                                                                            
+ The PMV inputs are simulated constants/model state—not measured room conditions. Label the twin accordingly.                                                                               
+                                                                                                                                                                                            
+ ### U2: Use same-origin secure URLs and bounded requests                                                                                                                                   
+                                                                                                                                                                                            
+ javascript                                                                                                                                                                                 
+   const wsUrl = new URL('/ws', window.location.href);                                                                                                                                      
+   wsUrl.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';                                                                                                                 
+                                                                                                                                                                                            
+   const response = await fetch('/api/submit-label', {                                                                                                                                      
+     method: 'POST',                                                                                                                                                                        
+     credentials: 'same-origin',                                                                                                                                                            
+     signal: AbortSignal.timeout(8000),                                                                                                                                                     
+     headers: { 'Content-Type': 'application/json' },                                                                                                                                       
+     body: JSON.stringify(request),                                                                                                                                                         
+   });                                                                                                                                                                                      
+                                                                                                                                                                                            
+ Provide a compatibility fallback where required.                                                                                                                                           
+                                                                                                                                                                                            
+ Also:                                                                                                                                                                                      
+                                                                                                                                                                                            
+ - Add a connection-generation/unmounted guard; intentional close must not schedule reconnect.                                                                                              
+ - Detect missing application heartbeats, not just socket closure.                                                                                                                          
+ - Validate message schemas before state updates.                                                                                                                                           
+ - Add a render error boundary.                                                                                                                                                             
+ - Preserve chart gaps; disable connectNulls across missing telemetry.                                                                                                                      
+ - Restore pending labels and current diagnostics on reconnect.                                                                                                                             
+ - Show submission as pending until the enrollment ACK arrives.                                                                                                                             
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ J. Make training inputs reproducible — T1                                                                                                                                                  
+                                                                                                                                                                                            
+ MAX_GAP_S=1800 is not a meaningful quality gate for a 128-second training window. Within-window gaps shorter than that can be filled by long zero-order holds.                             
+                                                                                                                                                                                            
+ Required loader contract:                                                                                                                                                                  
+                                                                                                                                                                                            
+ - Validate timestamp order and units.                                                                                                                                                      
+ - Define duplicate resolution.                                                                                                                                                             
+ - Reject non-finite measurements rather than turning them into artificial OFF events.                                                                                                      
+ - Check sample age/coverage against the source’s expected 3–6 second cadence.                                                                                                              
+ - Include the preceding held sample when testing gap coverage.                                                                                                                             
+ - Preserve quality/provenance per window.                                                                                                                                                  
+ - Keep repaired/low-coverage windows out of validation.                                                                                                                                    
+ - Fingerprint source files, canonical mapping, thresholds, sequence length and extraction version in cache metadata.                                                                       
+ - Write caches through temporary-file/atomic-replace with a lock.                                                                                                                          
+ - Store provenance as non-object strings so cached data can load without pickle.                                                                                                           
+                                                                                                                                                                                            
+ Maintain house/device/session-separated validation. A single projector instance cannot establish unseen-projector generalization.                                                          
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ K. Lower-priority hardening — L1, L2                                                                                                                                                       
+                                                                                                                                                                                            
+ - Replace callback String temporaries with length-aware comparisons. This is allocation churn; I did not prove a memory leak or inevitable fragmentation failure.                          
+ - Add bounded exponential reconnect backoff with jitter and explicit socket timeout.                                                                                                       
+ - Record free heap, largest free block, task stack high-water mark, reset reason and reconnect counters during soak tests.                                                                 
+ - Replace host tests that reimplement desired behavior with tests compiling/exercising the actual firmware logic.                                                                          
+ - Rename the current latency metric to backend handler duration. True end-to-end latency requires measurement, receipt, classification and browser-render timestamps.                      
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ 4. Production Readiness Checklist                                                                                                                                                          
+                                                                                                                                                                                            
+ These are sequential release gates. Any failed P0 gate blocks mains deployment.                                                                                                            
+                                                                                                                                                                                            
+ Gate 1 — Freeze a reproducible release                                                                                                                                                     
+                                                                                                                                                                                            
+ - [ ] Record commit, existing changes, firmware hash, dependency versions and model hashes.                                                                                                
+ - [ ] Select one physical profile explicitly.                                                                                                                                              
+ - [ ] Resolve projector scope versus the existing 250 W hardware rating.                                                                                                                   
+ - [ ] Align firmware constants, twin and backend profile without casually changing protection thresholds.                                                                                  
+ - [ ] Remove obsolete wiring/run instructions.                                                                                                                                             
+ - [ ] Verify deployment image contains no local secrets or runtime database.                                                                                                               
+                                                                                                                                                                                            
+ Gate 2 — Electrical design approval                                                                                                                                                        
+                                                                                                                                                                                            
+ Performed by qualified personnel, not inferred from software:                                                                                                                              
+                                                                                                                                                                                            
+ - [ ] Verify actual meter isolation and UART voltage compatibility.                                                                                                                        
+ - [ ] Verify relay input topology, boot pull-down and contact load category.                                                                                                               
+ - [ ] Verify protective earth continuity, polarity, terminals, strain relief, enclosure and applicable insulation requirements.                                                            
+ - [ ] Verify independent overcurrent/residual-current protection.                                                                                                                          
+ - [ ] Establish what “relay open confirmed” means and test the feedback path if claimed.                                                                                                   
+ - [ ] No exposed bench jumpers in the commercial assembly.                                                                                                                                 
+                                                                                                                                                                                            
+ Gate 3 — Firmware safety fault injection                                                                                                                                                   
+                                                                                                                                                                                            
+ Run against the compiled firmware path, then physical hardware:                                                                                                                            
+                                                                                                                                                                                            
+ - [ ] PZEM absent from boot: every production ON is rejected.                                                                                                                              
+ - [ ] PZEM lost after healthy operation: measured cutoff deadline is met.                                                                                                                  
+ - [ ] CRC errors, truncated frames, stuck finite values and implausible registers.                                                                                                         
+ - [ ] ON arriving before/during/after every safety trip: no re-energization race.                                                                                                          
+ - [ ] Reboot/brownout during lockout and during relay actuation.                                                                                                                           
+ - [ ] Safety-task creation failure and forced task hang.                                                                                                                                   
+ - [ ] millis() rollover around the PZEM cache and lockout timers.                                                                                                                          
+ - [ ] Wi-Fi/broker completely absent while local protection remains effective.                                                                                                             
+ - [ ] Retained, duplicated, expired and wrong-boot ON requests rejected.                                                                                                                   
+                                                                                                                                                                                            
+ Gate 4 — Power and EMI bench qualification                                                                                                                                                 
+                                                                                                                                                                                            
+ - [ ] Scope 5 V/3.3 V during Wi-Fi transmission and relay switching.                                                                                                                       
+ - [ ] Controlled mains sag/interruption/recovery testing with appropriate equipment.                                                                                                       
+ - [ ] Measure actual PZEM transaction/refresh latency and worst-case fault response.                                                                                                       
+ - [ ] Record UART errors during switching and representative load inrush.                                                                                                                  
+ - [ ] Thermal soak at the approved continuous envelope.                                                                                                                                    
+ - [ ] Instrumented calibration across the relevant low-power range and approved maximum.                                                                                                   
+ - [ ] Unavailable equipment means NOT RUN, not “passed by simulation.”                                                                                                                     
+                                                                                                                                                                                            
+ Gate 5 — Real broker/API integration                                                                                                                                                       
+                                                                                                                                                                                            
+ - [ ] Start real Mosquitto with the deployment ACL/TLS configuration.                                                                                                                      
+ - [ ] Verify each device can access only its own topics.                                                                                                                                   
+ - [ ] Verify API receives UI/status/ACK events and cannot issue relay commands.                                                                                                            
+ - [ ] Verify unauthorized HTTP/WS access is rejected.                                                                                                                                      
+ - [ ] Inject malformed UTF-8/JSON/schema/NaN frames; bridge stays alive.                                                                                                                   
+ - [ ] Kill the pipeline while broker/API stay alive; readiness and UI become degraded.                                                                                                     
+ - [ ] Rotate/revoke a device credential successfully.                                                                                                                                      
+                                                                                                                                                                                            
+ Gate 6 — Telemetry and persistence recovery                                                                                                                                                
+                                                                                                                                                                                            
+ - [ ] Outages of 1 second, 30 seconds and the declared spool-retention duration.                                                                                                           
+ - [ ] Duplicate/out-of-order/delayed samples preserve temporal correctness.                                                                                                                
+ - [ ] Missing intervals remain visible.                                                                                                                                                    
+ - [ ] Kill process during DB commit, CSV fallback replay and registry save.                                                                                                                
+ - [ ] Repeat recovery: no duplicate sample identities or lost acknowledged enrollment.                                                                                                     
+ - [ ] Disk full/read-only/database lock tests.                                                                                                                                             
+ - [ ] Restore backup into a clean deployment and reconcile totals.                                                                                                                         
+                                                                                                                                                                                            
+ Gate 7 — Physical ML acceptance                                                                                                                                                            
+                                                                                                                                                                                            
+ Only after the electrical envelope is approved:                                                                                                                                            
+                                                                                                                                                                                            
+ - [ ] Capture actual phone/laptop/projector states; LED remains phantom-only.                                                                                                              
+ - [ ] Separate enrollment and validation sessions.                                                                                                                                         
+ - [ ] Test charging taper, light/heavy laptop load, projector warm-up and voltage variation.                                                                                               
+ - [ ] Test all achievable ordered load-addition/removal pairs.                                                                                                                             
+ - [ ] Test simultaneous and ambiguous events; require abstention rather than fabricated certainty.                                                                                         
+ - [ ] Include in-band unknowns and out-of-envelope loads using a safe test setup.                                                                                                          
+ - [ ] Meet the existing project gates: ≥95% held-out class correctness, ≥90% ordered-pair event correctness if overlap ships, and zero confident-wrong in the defined rehearsal set.       
+ - [ ] Report coverage/rejection rate and sample counts alongside accuracy.                                                                                                                 
+                                                                                                                                                                                            
+ Gate 8 — End-to-end UX truth                                                                                                                                                               
+                                                                                                                                                                                            
+ - [ ] Physical trip appears as a hardware-originated trip.                                                                                                                                 
+ - [ ] Rejected command never appears as successful actuation.                                                                                                                              
+ - [ ] Unplugging a node produces stale/offline state.                                                                                                                                      
+ - [ ] No random consumption/savings in production.                                                                                                                                         
+ - [ ] HTTPS/WSS works through the actual proxy.                                                                                                                                            
+ - [ ] API timeout releases the label form and preserves pending work.                                                                                                                      
+ - [ ] Reconnect restores pending labels and current state without duplicate sockets.                                                                                                       
+ - [ ] Browser displays measurement age and actual end-to-end latency.                                                                                                                      
+                                                                                                                                                                                            
+ Gate 9 — Capacity and soak                                                                                                                                                                 
+                                                                                                                                                                                            
+ - [ ] Test the declared device count against broker connection limits.                                                                                                                     
+ - [ ] Measure queue age, throughput, CPU, RSS, DB growth and browser rendering.                                                                                                            
+ - [ ] Perform a seven-day soak with planned outages and restart events.                                                                                                                    
+ - [ ] Require bounded memory and storage behavior—not merely “process did not crash.”                                                                                                      
+ - [ ] Exercise long-uptime rollover deterministically; do not wait 49 days to discover it.                                                                                                 
+ - [ ] Establish alerting, backup/restore, rollback and incident procedures for the single backend/broker/storage host.                                                                     
+                                                                                                                                                                                            
+ ────────────────────────────────────────────────────────────────────────────────                                                                                                           
+                                                                                                                                                                                            
+ Fixed: Nothing changed; this was a read-only audit.                                                                                                                                        
+                                                                                                                                                                                            
+ Verified: 641 Python tests and 20 frontend tests passed. Additional isolated checks demonstrated safety-state, parser, bridge-liveness and ML-contract defects.                            
+                                                                                                                                                                                            
+ Remaining blocker: Commercial deployment is blocked by H1–H4 and the unresolved integration/data-truth issues. Physical electrical validation and deployment-specific recognition evidence 
+ are still required.              

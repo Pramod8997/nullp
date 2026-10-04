@@ -8,13 +8,18 @@
  *   - Continuous PZEM polling at 100ms intervals
  *   - Edge-local arc-fault proxy (dP/dt > 1000 W/s)
  *   - Dynamic inrush suppression via 5-sample sliding baseline
+ *   - Unconditional overcurrent cutoff (125% of rated)
+ *   - PZEM loss-of-measurement watchdog (3s blind → cutoff, fail-safe;
+ *     armed only after the PZEM's first valid read — see SafetySamplingTask)
  *   - Immediate relay cutoff — zero network dependency
  *
  * CORE 1 (Standard Priority — Arduino loop):
  *   - Non-blocking MQTT client.loop()
  *   - 1Hz telemetry broadcast (plain float)
  *   - Incoming relay command handler (ON/OFF/WARNING)
- *   - Best-effort EDGE_ARC_FAULT alert publishing
+ *   - Consumes the core-0 safety latches (arc-fault / overcurrent / PZEM
+ *     fault) → 5-minute lockout + best-effort status alert publishing.
+ *     Reporting only: every cutoff already happened on core 0.
  *
  * Shared Memory:
  *   portMUX_TYPE spinlock protects volatile float sharedPowerWatts.
@@ -111,6 +116,20 @@ const float INRUSH_HEADROOM    = 100.0;  // Extra W above baseline avg to tolera
 // ── Anti-Thrashing Constants ──
 const unsigned long SAFETY_LOCKOUT_MS = 300000;  // 5-minute relay lockout after safety trip
 
+// ── PZEM Loss-of-Measurement Watchdog ──
+// Consecutive failed/non-finite PZEM reads before the relay is opened. This is
+// the tuning knob: 30 samples at the 100 ms core-0 cadence = 3 s of measuring
+// nothing.
+//   - Long enough that transient Modbus CRC errors / UART timeouts on a noisy
+//     bench line (which arrive in ones and twos, not thirties) cannot
+//     nuisance-trip the demo.
+//   - Short enough that an energised socket is never left blind for a
+//     meaningful time: with no measurement BOTH the overcurrent and arc-fault
+//     channels are off, and at the ≤312 W trip ceiling of D8 (1.36 A through a
+//     5 A fuse and 1.0 mm² wire) 3 s is thermally irrelevant.
+// Raise it only with evidence of nuisance trips; never above ~100 (10 s).
+const int PZEM_FAIL_TRIP_COUNT = 30;
+
 // ═══════════════════════════════════════════════════════
 //  SHARED STATE (Core 0 ↔ Core 1)
 // ═══════════════════════════════════════════════════════
@@ -122,6 +141,33 @@ volatile float sharedCurrent     = 0.0;
 volatile float sharedPf          = 1.0;
 volatile bool  sharedArcFault    = false;
 volatile float sharedArcFaultRoC = 0.0;
+
+// ── Core 0 → Core 1 safety latches ──
+// Core 0 has ALREADY opened the relay by the time either of these is raised.
+// Core 1 only consumes them to take the 5-minute lockout and publish the
+// alert, so a dead broker delays the *report*, never the cutoff.
+//
+// sharedOvercurrentLatch closes a real hole. Core 1 used to LEVEL-test
+// sharedPowerWatts > criticalWatts, but core 0 opens the relay on the very
+// sample that offends, so a spike that tripped core 0 and collapsed before
+// core 1 next looked took NO lockout at all — and the next `ON` re-closed
+// straight into the fault. Core 0 sees every 100 ms sample and raises the
+// latch on each trip, so the latch is a superset of anything the level check
+// could have observed: sharedPowerWatts only ever holds a value core 0 has
+// already run the overcurrent test against.
+volatile bool  sharedOvercurrentLatch = false;
+
+// Raised by the PZEM loss-of-measurement watchdog (PZEM_FAIL_TRIP_COUNT).
+volatile bool  sharedPzemFault   = false;
+
+// Last commanded relay state, written by setRelay() on whichever core called
+// it. Read by core 0 solely to arm the PZEM watchdog: the watchdog's own
+// cutoff clears it, so the trip fires once per fault episode instead of once
+// per 100 ms sample, and only a server `ON` (which the lockout gates) re-arms
+// it. An open relay is not an unprotected energised socket, so there is
+// nothing to trip on. It does NOT gate overcurrent or arc-fault — those stay
+// unconditional. A single aligned bool is atomic on Xtensa, so no spinlock.
+volatile bool  relayClosed       = false;
 
 // ═══════════════════════════════════════════════════════
 //  CORE 1 STATE (Arduino loop — not shared)
@@ -151,6 +197,12 @@ void setRelay(bool on) {
     } else {
         digitalWrite(RELAY_PIN, on ? HIGH : LOW);
     }
+    // Recorded AFTER the pin write on purpose. If core 0's cutoff preempts a
+    // core-1 `ON` mid-call, this ordering can only leave relayClosed=true over
+    // an OPEN relay, which costs one redundant watchdog cutoff next sample.
+    // The reverse ordering could leave relayClosed=false over a CLOSED relay —
+    // a disarmed watchdog on an energised socket.
+    relayClosed = on;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -161,8 +213,14 @@ void SafetySamplingTask(void* pvParameters) {
     float baselineRing[BASELINE_WINDOW];
     int   baselineIdx   = 0;
     int   baselineFill  = 0;
+    int   pzemFailCount = 0;   // Consecutive bad reads; 0 on any good read
+    // Watchdog ARMING latch: set by the first all-finite read and never
+    // cleared. Task-local (not volatile, no spinlock): core 0 is its only
+    // reader and only writer — core 1 never looks at it. See the trip branch
+    // for why the watchdog must stay disarmed until the PZEM proves itself.
+    bool  pzemEverValid = false;
     for (int i = 0; i < BASELINE_WINDOW; i++) baselineRing[i] = 0.0;
-    
+
     unsigned long lastReadMs = millis();
 
     for (;;) {
@@ -172,14 +230,74 @@ void SafetySamplingTask(void* pvParameters) {
         float pzemPf = pzem.pf();
 
         unsigned long nowMs = millis();
-        float dt = (nowMs - lastReadMs) / 1000.0f; 
+        float dt = (nowMs - lastReadMs) / 1000.0f;
         lastReadMs = nowMs;
 
-        if (isnan(powerWatts) || isnan(pzemVoltage) || isnan(pzemCurrent) || isnan(pzemPf)) {
-            // Read failure, skip this cycle
+        // ── Reject any non-finite PZEM read ──
+        // !isfinite, not isnan: the library signals a failed Modbus frame with
+        // NAN, but a corrupted frame decoded into a float can also land on
+        // ±Inf, and an Inf reaching lastWatts/the baseline ring poisons the
+        // dP/dt channel permanently (every later comparison against it is
+        // false). isnan is a strict subset of !isfinite, so this only ever
+        // rejects more.
+        if (!isfinite(powerWatts) || !isfinite(pzemVoltage)
+            || !isfinite(pzemCurrent) || !isfinite(pzemPf)) {
+            // ── PZEM Loss-of-Measurement Watchdog ──
+            // This branch used to `continue` forever with the relay LEFT
+            // CLOSED: a dead PZEM, a severed UART or a pulled 5 V rail
+            // silently disabled BOTH the overcurrent and the arc-fault channel
+            // while the socket stayed energised — fail-DANGEROUS. After
+            // PZEM_FAIL_TRIP_COUNT consecutive blind samples, open the relay
+            // and hand the lockout to core 1. Zero network dependency: the
+            // cutoff is complete before core 1 ever hears about it.
+            if (pzemFailCount < PZEM_FAIL_TRIP_COUNT) pzemFailCount++;  // Saturate: no overflow on a permanently dead sensor
+            // Three conditions, ALL required:
+            //  1. PZEM_FAIL_TRIP_COUNT consecutive blind samples (3 s). Any
+            //     good read rewinds the counter to 0.
+            //  2. relayClosed — an open relay is not an unprotected energised
+            //     socket, so there is nothing to protect. The cutoff below
+            //     clears it, so the trip fires once per fault episode, not
+            //     once per 100 ms sample. The counter is NOT cleared on close,
+            //     so a node whose PZEM died while open trips 100 ms after the
+            //     next `ON` instead of waiting another 3 s — deliberate.
+            //  3. pzemEverValid — DISARMED until the PZEM has returned one
+            //     all-finite read since boot. A node that has never measured
+            //     anything has never observed mains, so there is provably no
+            //     energised socket to protect: this refines the invariant, it
+            //     does not weaken it. The PZEM sits UPSTREAM of the relay
+            //     (WIRING_STEP_BY_STEP.md:154) and is mains-powered, so with
+            //     no mains it returns NaN forever regardless of relay state —
+            //     and the documented bring-up runs exactly that way ON PURPOSE.
+            //     Without this, BRINGUP_RUNBOOK.md Gate 7 ("Relay, dry, NO
+            //     MAINS") is unperformable: the saturated counter trips within
+            //     100 ms of the commanded close, so the contacts re-open and
+            //     lock out for 5 minutes before COM–NO continuity can be
+            //     metered. Once the sensor has proven itself alive, losing it
+            //     is a real fault and still trips in 3 s.
+            // KNOWN RESIDUAL HOLE, accepted: a PZEM dead from boot never arms,
+            // so an `ON` closes the relay onto an unmeasured circuit and no
+            // trip occurs. Strictly narrower than the behaviour this watchdog
+            // replaced (which never tripped at all), and the price of Gates 5/7
+            // being performable. Gate 6 catches a never-arming node — it
+            // publishes no plausible V/I/W once mains is live.
+            if (pzemFailCount >= PZEM_FAIL_TRIP_COUNT && pzemEverValid && relayClosed) {
+                setRelay(false);   // Clears relayClosed → one trip per episode
+
+                taskENTER_CRITICAL(&sharedMux);
+                sharedPzemFault = true;
+                taskEXIT_CRITICAL(&sharedMux);
+
+                Serial.printf("[CORE0] ⚠ PZEM FAULT! %d consecutive invalid "
+                              "reads (%.1fs blind). Relay CUTOFF.\n",
+                              pzemFailCount, pzemFailCount * 0.1f);
+            }
+            // Read failure, skip the rest of this cycle: lastWatts, the
+            // baseline ring and the shared block stay untouched.
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
+        pzemFailCount = 0;
+        pzemEverValid = true;   // Latched forever: the watchdog is now armed
 
         // ── Calculate historical sliding baseline average ──
         float baselineAvg = 0.0;
@@ -223,9 +341,19 @@ void SafetySamplingTask(void* pvParameters) {
         // resistive lamp). A sustained draw above 125% of rated must open the
         // relay on the very first sample that sees it -- D8 makes the relay the
         // functional protective element, ahead of the 5 A fuse at 3.7x margin.
+        //
+        // The latch is what makes the trip stick. Opening the relay collapses
+        // the reading, so by the time core 1 next reads sharedPowerWatts the
+        // overload is gone; without the latch the 5-minute lockout was simply
+        // never taken and the next `ON` re-closed into the fault.
         float criticalWatts = RATED_WATTS * CRITICAL_PCT;
         if (powerWatts > criticalWatts) {
             setRelay(false);
+
+            taskENTER_CRITICAL(&sharedMux);
+            sharedOvercurrentLatch = true;
+            taskEXIT_CRITICAL(&sharedMux);
+
             Serial.printf("[CORE0] ⚡ OVERCURRENT! %.1fW > %.1fW. Relay CUTOFF.\n",
                           powerWatts, criticalWatts);
         }
@@ -422,17 +550,54 @@ void loop() {
         }
     }
 
-    // ── Overcurrent Alert Publishing ──
-    float criticalWatts = RATED_WATTS * CRITICAL_PCT;
-    if (powerWatts > criticalWatts && !relayLocked) {
+    // ── Check for overcurrent latch from Core 0 ──
+    // Latch-consume, NOT a level check on sharedPowerWatts. The level check
+    // this replaces (powerWatts > criticalWatts && !relayLocked) could miss a
+    // trip outright: core 0 opens the relay on the offending sample, so the
+    // reading collapses to a safe value before core 1 next looks and the
+    // lockout was never taken — leaving the next `ON` free to re-close into
+    // the fault. Core 0 evaluates every 100 ms sample, core 1 only ever saw
+    // the last value written to shared memory, so the latch strictly
+    // dominates: every value that could satisfy the level check was already
+    // tested by core 0 in the same cycle that wrote it.
+    bool overcurrentTripped = false;
+    taskENTER_CRITICAL(&sharedMux);
+    if (sharedOvercurrentLatch) {
+        overcurrentTripped = true;
+        sharedOvercurrentLatch = false;  // Acknowledge
+    }
+    taskEXIT_CRITICAL(&sharedMux);
+
+    if (overcurrentTripped) {
         relayLocked = true;
         lockStartMs = millis();
+        float criticalWatts = RATED_WATTS * CRITICAL_PCT;
         Serial.printf("[SAFETY] OVERCURRENT! %.1fW > %.1fW. Relay LOCKED.\n",
                       powerWatts, criticalWatts);
         if (client.connected()) {
             char alertMsg[64];
             snprintf(alertMsg, sizeof(alertMsg), "OVERCURRENT:%.1f", powerWatts);
             client.publish(topicStatus, alertMsg);
+        }
+    }
+
+    // ── Check for PZEM loss-of-measurement latch from Core 0 ──
+    // Core 0 has already opened the relay; the lockout stops an `ON` from
+    // re-energising a socket we cannot measure for the next 5 minutes.
+    bool pzemFaultTripped = false;
+    taskENTER_CRITICAL(&sharedMux);
+    if (sharedPzemFault) {
+        pzemFaultTripped = true;
+        sharedPzemFault = false;  // Acknowledge
+    }
+    taskEXIT_CRITICAL(&sharedMux);
+
+    if (pzemFaultTripped) {
+        relayLocked = true;
+        lockStartMs = millis();
+        Serial.println("[SAFETY] PZEM FAULT! No valid measurement. Relay LOCKED.");
+        if (client.connected()) {
+            client.publish(topicStatus, "PZEM_FAULT");
         }
     }
 

@@ -399,7 +399,7 @@ class TestUnauthorizedRelayControl:
         """Mixed-case command payloads must be REJECTED with no state change.
 
         The firmware compares the raw payload with == against "ON"/"OFF"/
-        "WARNING" (main.cpp:269-284); there is no .strip().upper()
+        "WARNING" (the callback() command handler in main.cpp); there is no .strip().upper()
         normalization, so "on"/"On"/"oN" are not commands at all. (This test
         previously asserted the twin's permissive .upper() behavior, which the
         firmware never had.)
@@ -421,7 +421,7 @@ class TestUnauthorizedRelayControl:
         """Commands with leading/trailing whitespace must be REJECTED.
 
         The firmware does an exact == comparison on the raw payload
-        (main.cpp:269-284) and never strips it, so " ON " is not "ON".
+        (the callback() command handler in main.cpp) and never strips it, so " ON " is not "ON".
         """
         whitespace_commands = [
             " ON ",
@@ -442,7 +442,7 @@ class TestUnauthorizedRelayControl:
     async def test_relay_command_with_invalid_prefix(self, firmware_node):
         """Commands with prefixes (FORCE_ON, ADMIN_ON, sudo ON) must be
         rejected — firmware only matches the exact payloads ON/OFF/WARNING
-        (main.cpp:269-284)."""
+        (the callback() command handler in main.cpp)."""
         invalid_commands = [
             "FORCE_ON",
             "ADMIN_ON",

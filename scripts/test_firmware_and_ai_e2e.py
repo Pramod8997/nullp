@@ -346,7 +346,7 @@ class ClosedLoopE2ESimulator:
         microwave.pzem.set_load(350.0)  # 140% of rated, above 312.5W critical
         microwave.core0_safety_step(sim_dt=0.1)
         # Core 0 opens the relay; the core-1 loop takes the lockout and
-        # publishes the OVERCURRENT status (main.cpp:427-437).
+        # publishes the OVERCURRENT status (the sharedOvercurrentLatch block in loop() in main.cpp).
         await microwave.core1_telemetry_tick(force_publish=True)
 
         relay_open = microwave.gpio18_relay_state is False

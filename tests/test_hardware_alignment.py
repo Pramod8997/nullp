@@ -22,7 +22,11 @@ import re
 import pytest
 import yaml
 
-from src.hardware.esp32_firmware_sim import ESP32FirmwareNode, VirtualPZEM004T
+from src.hardware.esp32_firmware_sim import (
+    PZEM_FAIL_TRIP_COUNT as TWIN_PZEM_FAIL_TRIP_COUNT,
+    ESP32FirmwareNode,
+    VirtualPZEM004T,
+)
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 MAIN_CPP = REPO_ROOT / "firmware" / "esp32_node" / "src" / "main.cpp"
@@ -76,6 +80,82 @@ FW_EDGE_ROC_THRESHOLD = _fw_float("EDGE_ROC_THRESHOLD")
 FW_BASELINE_INRUSH_CEIL = _fw_float("BASELINE_INRUSH_CEIL")
 FW_INRUSH_HEADROOM = _fw_float("INRUSH_HEADROOM")
 FW_SAFETY_LOCKOUT_MS = _fw_int("unsigned long", "SAFETY_LOCKOUT_MS")
+FW_PZEM_FAIL_TRIP_COUNT = _fw_int("int", "PZEM_FAIL_TRIP_COUNT")
+
+
+# ── Structural parsing of main.cpp (code only, never prose) ──────────────
+#
+# main.cpp documents its safety invariants at length, and several of those
+# comments QUOTE THE VERY CODE THEY REPLACED — `isnan`, and
+# `powerWatts > criticalWatts && !relayLocked`. A regression that deletes the
+# code would therefore still satisfy a raw substring search, because the prose
+# explaining the old hole is still in the file. Every structural assertion
+# below runs against comment-stripped, string-literal-blanked source so that
+# "the firmware still does X" cannot be satisfied by "the firmware still talks
+# about X".
+
+
+def _strip_cpp_comments(src: str) -> str:
+    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
+    return re.sub(r"//[^\n]*", "", src)
+
+
+def _blank_cpp_literals(code: str) -> str:
+    """Blank string/char literal contents in place (length preserved), so
+    braces and operators inside payload formats cannot confuse the block
+    parsing below."""
+    return re.sub(
+        r"\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'",
+        lambda m: m.group()[0] + " " * (len(m.group()) - 2) + m.group()[-1],
+        code,
+    )
+
+
+_MAIN_CPP_CODE = _strip_cpp_comments(_MAIN_CPP)
+_MAIN_CPP_STRUCT = _blank_cpp_literals(_MAIN_CPP_CODE)
+
+
+def _fn_body(name: str) -> str:
+    """Whitespace-flattened body of `void name(...)` in main.cpp.
+
+    Which CORE a safety check lives on is the whole question for the core-0 ->
+    core-1 latches, so assertions must be able to say "in SafetySamplingTask"
+    or "in loop", not merely "somewhere in the file".
+    """
+    m = re.search(rf"\bvoid\s+{name}\s*\([^)]*\)\s*\{{", _MAIN_CPP_STRUCT)
+    assert m, f"void {name}(...) not found in {MAIN_CPP}"
+    start = m.end() - 1
+    depth = 0
+    for i in range(start, len(_MAIN_CPP_STRUCT)):
+        if _MAIN_CPP_STRUCT[i] == "{":
+            depth += 1
+        elif _MAIN_CPP_STRUCT[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return " ".join(_MAIN_CPP_STRUCT[start:i + 1].split())
+    raise AssertionError(f"unbalanced braces in {name}() in {MAIN_CPP}")
+
+
+def _guarded_block(body: str, statement: str):
+    """The unique `if (<cond>) { <block> }` in `body` whose block performs
+    `statement`, returned as (cond, block).
+
+    This is what lets a test assert WHAT a cutoff is gated on rather than that
+    the identifiers merely appear: dropping one condition from a safety `if`
+    leaves every substring in the file intact.
+    """
+    hits = [
+        m
+        for m in re.finditer(r"if \((?P<cond>[^{};]*)\) \{(?P<blk>[^{}]*)\}", body)
+        if statement in m.group("blk")
+    ]
+    assert len(hits) == 1, (
+        f"expected exactly one `if (...) {{ ... }}` performing {statement!r} in "
+        f"{MAIN_CPP}, found {len(hits)} — the safety branch was moved, "
+        "duplicated or deleted"
+    )
+    return hits[0].group("cond"), hits[0].group("blk")
+
 
 
 # ── 1. Pins & polarity ───────────────────────────────────────────────────
@@ -141,7 +221,8 @@ def test_twin_inrush_suppression_constants_match_firmware():
 
 
 def test_virtual_pzem_default_power_factor_is_one():
-    """PF init 1.0 mirrors POWER_FACTOR / sharedPf at main.cpp:75/:122."""
+    """PF init 1.0 mirrors the POWER_FACTOR constant / the sharedPf
+    initialiser in main.cpp."""
     assert VirtualPZEM004T().power_factor == 1.0
 
 
@@ -298,6 +379,12 @@ def test_status_and_ack_strings_present_in_firmware_and_twin():
         "LOCKOUT_NACK",
         "ON_CONFIRMED",
         "OFF_CONFIRMED",
+        # PZEM loss-of-measurement watchdog. The operator's ONLY signal that a
+        # node has gone blind is this string: the relay is already open and
+        # locked out for 5 minutes, and PZEM_FAULT is what distinguishes
+        # "sensor/UART dead" from "overload" in the status stream. If either
+        # side drops it the fault reports as silence.
+        "PZEM_FAULT",
     ):
         assert s in _MAIN_CPP, f"status string {s!r} missing from main.cpp"
         assert s in _TWIN_PY, f"status string {s!r} missing from the twin"
@@ -362,7 +449,8 @@ def test_device_id_chain_matches_config():
 def test_overcurrent_cutoff_is_immediate_and_latches_for_core1():
     """Above CRITICAL_PCT x RATED_WATTS the relay must open in core 0 on the
     first sample (unconditional); the anti-thrashing lockout itself is taken
-    by the core-1 tick that consumes the latch (main.cpp:226-231 + :427-437)."""
+    by the core-1 tick that consumes the latch (the overcurrent cutoff in
+    SafetySamplingTask() + the sharedOvercurrentLatch block in loop())."""
     node = ESP32FirmwareNode(device_id="parity_probe")
     node.set_relay(True)
     node.pzem.set_load(FW_RATED_WATTS * FW_CRITICAL_PCT + 50.0)
@@ -378,7 +466,8 @@ def test_overcurrent_cutoff_is_immediate_and_latches_for_core1():
 @pytest.mark.asyncio
 async def test_overcurrent_status_published_after_core1_tick():
     """The core-1 tick consumes the overcurrent latch, takes the lockout and
-    publishes the OVERCURRENT:<watts> status alert (main.cpp:425-437)."""
+    publishes the OVERCURRENT:<watts> status alert (the sharedOvercurrentLatch
+    block in loop() in main.cpp)."""
     published = []
 
     async def publish(topic, payload):
@@ -398,7 +487,8 @@ async def test_overcurrent_status_published_after_core1_tick():
 
 @pytest.mark.asyncio
 async def test_oversized_command_payload_is_dropped():
-    """Payloads over 256 bytes are dropped before parsing (main.cpp:258-262):
+    """Payloads over 256 bytes are dropped before parsing (the
+    MAX_MQTT_PAYLOAD guard in callback() in main.cpp):
     no relay change, no ACK."""
     published = []
 
@@ -411,3 +501,223 @@ async def test_oversized_command_payload_is_dropped():
     assert node.gpio18_relay_state is True, "an oversized payload changed relay state"
     assert node.relay_locked is False
     assert published == []
+
+
+# ── 9. Core-0 safety structure ───────────────────────────────────────────
+#
+# These pin the SHAPE of three core-0 safety mechanisms in main.cpp, not just
+# the presence of their identifiers. The firmware cannot be compiled or run
+# here (platformio is not installed), so static structure is the only thing
+# standing between a plausible-looking edit and a re-opened hazard on an
+# energised socket. Each test names the hazard its regression reopens.
+
+
+def test_core0_rejects_every_non_finite_pzem_read():
+    """Core 0's PZEM guard must reject ALL non-finite values on ALL FOUR
+    reads, not just NaN.
+
+    The library signals a failed Modbus frame with NAN, but a corrupted frame
+    decoded into a float can land on +/-Inf. An Inf reaching lastWatts and the
+    baseline ring poisons the arc-fault channel PERMANENTLY: every later
+    `powerWatts > lastWatts` comparison against Inf is false, so dP/dt can
+    never trip again on that node until it reboots. isnan() is a strict subset
+    of !isfinite(), so a revert to isnan() is a silent loss of protection with
+    no visible symptom.
+    """
+    body = _fn_body("SafetySamplingTask")
+    m = re.search(r"if \((?P<cond>!isfinite\(.*?)\) \{", body)
+    assert m, (
+        "core 0's PZEM validity guard is no longer an `if (!isfinite(...))` "
+        f"in SafetySamplingTask() in {MAIN_CPP} — a non-finite read can now "
+        "reach lastWatts / the baseline ring and permanently disable dP/dt"
+    )
+    cond = m.group("cond")
+    guarded = set(re.findall(r"!isfinite\((\w+)\)", cond))
+    assert guarded == {"powerWatts", "pzemVoltage", "pzemCurrent", "pzemPf"}, (
+        "core 0 must guard all four PZEM reads against non-finite values; "
+        f"guarded = {sorted(guarded)}. An unguarded channel is an unguarded "
+        "path into shared safety state."
+    )
+    assert "&&" not in cond, (
+        "the PZEM guard was weakened from OR to AND — it would now skip the "
+        "cycle only when EVERY read is bad, letting a single Inf through"
+    )
+    assert "isnan(" not in _MAIN_CPP_CODE, (
+        f"a bare isnan() guard is back in {MAIN_CPP}. isnan() passes +/-Inf "
+        "straight into the safety state it is supposed to protect — use "
+        "!isfinite()."
+    )
+    # Twin parity: HIL evidence on this path only transfers if both sides
+    # reject the same set of values.
+    m = re.search(
+        r"if not all\(math\.isfinite\(v\) for v in \(([^)]*)\)\)", _TWIN_PY
+    )
+    assert m, "the twin's all(math.isfinite(...)) PZEM guard is gone"
+    assert {s.strip() for s in m.group(1).split(",") if s.strip()} == {
+        "power_w",
+        "voltage",
+        "current",
+        "pf",
+    }, "the twin guards a different set of PZEM reads than main.cpp"
+
+
+def test_overcurrent_latch_replaced_the_core1_level_check():
+    """The core-0 -> core-1 overcurrent LATCH must exist, and the old
+    level-triggered core-1 check must be GONE.
+
+    This is the specific hole the latch closes, and the one a well-meaning
+    "simplification" would silently reopen: core 0 opens the relay on the very
+    sample that offends, which collapses the reading. A spike that tripped
+    core 0 and cleared before core 1's next pass therefore failed
+    `powerWatts > criticalWatts` when core 1 finally looked, so the 5-minute
+    anti-thrashing lockout was NEVER TAKEN — and the next `ON` re-closed the
+    relay straight into the fault, cycling the contacts into a live overload.
+    The latch is set by core 0 on every 100 ms sample it trips on, so it
+    strictly dominates anything the level check could observe.
+    """
+    core0 = _fn_body("SafetySamplingTask")
+    core1 = _fn_body("loop")
+
+    assert re.search(
+        r"volatile bool\s+sharedOvercurrentLatch\s*=\s*false\s*;", _MAIN_CPP_STRUCT
+    ), "the volatile bool sharedOvercurrentLatch declaration is gone from main.cpp"
+
+    # Raised by core 0, in the same branch that opens the relay.
+    cond, blk = _guarded_block(core0, "sharedOvercurrentLatch = true;")
+    assert re.search(r"powerWatts\s*>\s*criticalWatts", cond), (
+        "the overcurrent latch is no longer raised by the "
+        f"`powerWatts > criticalWatts` cutoff in core 0: cond = {cond!r}"
+    )
+    assert "setRelay(false);" in blk, (
+        "core 0 raises the overcurrent latch without opening the relay — the "
+        "cutoff must be complete before core 1 ever hears about it"
+    )
+    assert "relayLocked" not in cond, (
+        "the core-0 overcurrent cutoff must stay UNCONDITIONAL — gating it on "
+        "the core-1 lockout state would skip the cutoff during a lockout"
+    )
+
+    # Consumed and acknowledged by core 1.
+    assert "sharedOvercurrentLatch" in core1, (
+        "core 1 no longer consumes the overcurrent latch: core 0 opens the "
+        "relay but the 5-minute lockout is never taken, so the next `ON` "
+        "re-closes into the fault"
+    )
+    assert "sharedOvercurrentLatch = false;" in core1, (
+        "core 1 reads the overcurrent latch but never acknowledges it — the "
+        "node would re-lock on every subsequent loop() pass"
+    )
+
+    # The regression itself: the level check must not come back.
+    assert not re.search(
+        r"(shared)?[Pp]owerWatts\s*>\s*criticalWatts", core1
+    ), (
+        "the LEVEL-triggered overcurrent check is back in loop(). It misses "
+        "any spike that core 0 already cut off (the relay-open collapses the "
+        "reading before core 1 looks), so the lockout is skipped and the next "
+        "`ON` re-energises a faulted circuit. Consume sharedOvercurrentLatch "
+        "instead."
+    )
+
+
+def test_pzem_fail_trip_count_matches_twin():
+    """PZEM_FAIL_TRIP_COUNT is a hardware tuning knob (blind-window length),
+    so main.cpp and the twin must move together in one commit — exactly like
+    the RATED_WATTS drift guard above.
+
+    Drift here is invisible and corrosive: every twin-based trip-timing result
+    (HIL runs, the stress scripts, the bring-up expectations) would be
+    measuring a different blind window than the firmware actually tolerates.
+    """
+    assert TWIN_PZEM_FAIL_TRIP_COUNT == FW_PZEM_FAIL_TRIP_COUNT, (
+        f"twin PZEM_FAIL_TRIP_COUNT={TWIN_PZEM_FAIL_TRIP_COUNT} but firmware "
+        f"PZEM_FAIL_TRIP_COUNT={FW_PZEM_FAIL_TRIP_COUNT} — the twin models a "
+        f"{TWIN_PZEM_FAIL_TRIP_COUNT * 0.1:.1f}s blind window while the "
+        f"firmware tolerates {FW_PZEM_FAIL_TRIP_COUNT * 0.1:.1f}s"
+    )
+    assert 0 < FW_PZEM_FAIL_TRIP_COUNT <= 100, (
+        f"PZEM_FAIL_TRIP_COUNT={FW_PZEM_FAIL_TRIP_COUNT} leaves the socket "
+        f"energised and unmeasured for {FW_PZEM_FAIL_TRIP_COUNT * 0.1:.1f}s "
+        "with BOTH overcurrent and arc-fault blind. Raise past ~100 (10 s) "
+        "only with evidence, and never to 0 (which would trip on any read)."
+    )
+
+
+def test_pzem_watchdog_trip_requires_all_three_conditions():
+    """The loss-of-measurement watchdog must stay gated on all three
+    conditions, and the counter must saturate and rewind.
+
+    Each condition carries a distinct cost if dropped:
+      - pzemFailCount >= PZEM_FAIL_TRIP_COUNT: without it a single transient
+        Modbus CRC error opens the relay and locks the node out for 5 minutes.
+      - relayClosed: without it a node whose PZEM is dead re-trips on every
+        100 ms sample, spamming PZEM_FAULT and restarting the lockout forever
+        on a relay that is already open — there is no energised socket to
+        protect.
+      - pzemEverValid: without it documented bring-up GATE 5 (USB power, no
+        mains, PZEM NaN) self-lockouts, and GATE 7 (dry relay close, no mains)
+        becomes UNPERFORMABLE — the saturated counter re-opens the contacts
+        within 100 ms of the close, before COM-NO continuity can be metered
+        (claude_debug/BRINGUP_RUNBOOK.md Gates 5/7).
+    Conversely the trip must remain a conjunction: an `||` here would open the
+    relay on any one of them.
+    """
+    core0 = _fn_body("SafetySamplingTask")
+    cond, blk = _guarded_block(core0, "sharedPzemFault = true;")
+    for token, why in (
+        (
+            "pzemFailCount >= PZEM_FAIL_TRIP_COUNT",
+            "a single transient bad read would now open the relay and lock the "
+            "node out for 5 minutes",
+        ),
+        (
+            "pzemEverValid",
+            "bring-up GATE 5 self-lockouts and GATE 7 (dry close, no mains) "
+            "becomes unperformable — the contacts re-open before continuity "
+            "can be metered",
+        ),
+        (
+            "relayClosed",
+            "an already-open relay re-trips every 100 ms, restarting the "
+            "5-minute lockout forever and spamming PZEM_FAULT",
+        ),
+    ):
+        assert token in cond, (
+            f"the PZEM watchdog trip is no longer gated on `{token}`: "
+            f"cond = {cond!r}. Consequence: {why}."
+        )
+    assert "||" not in cond, (
+        f"the PZEM watchdog trip conditions are OR-ed: cond = {cond!r}. All "
+        "three must hold — an OR opens the relay on any one of them."
+    )
+    assert "setRelay(false);" in blk, (
+        "the PZEM watchdog raises sharedPzemFault without opening the relay — "
+        "core 0 must complete the cutoff itself, with zero network dependency"
+    )
+
+    # The counter contract the three conditions rest on.
+    assert re.search(
+        r"if \(pzemFailCount < PZEM_FAIL_TRIP_COUNT\) pzemFailCount\+\+;", core0
+    ), (
+        "the blind-read counter no longer saturates at PZEM_FAIL_TRIP_COUNT. "
+        "An unbounded int on a permanently dead sensor is signed-overflow UB "
+        "(~2.5 s per 1000 samples to INT_MAX), and saturation is also what "
+        "makes the node re-trip within ONE sample of the next `ON` instead of "
+        "waiting another 3 s blind."
+    )
+    assert "pzemFailCount = 0;" in core0, (
+        "the blind-read counter is never reset — the watchdog must count "
+        "CONSECUTIVE failures, not lifetime ones, or a healthy node "
+        "accumulates its way to a trip"
+    )
+    assert "pzemEverValid = true;" in core0, (
+        "pzemEverValid is never set, so the watchdog can never arm: a real "
+        "dead-PZEM fault on a live circuit would never trip"
+    )
+
+    # relayClosed is only trustworthy if setRelay() maintains it.
+    assert "relayClosed = on;" in _fn_body("setRelay"), (
+        "setRelay() no longer records relayClosed, so the PZEM watchdog's "
+        "arming condition is stale — a disarmed watchdog on an energised "
+        "socket, or a re-trip loop on an open one"
+    )

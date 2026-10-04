@@ -4,7 +4,7 @@ import json
 import time
 import math
 import random
-from src.hardware.esp32_firmware_sim import ESP32FirmwareNode
+from src.hardware.esp32_firmware_sim import ESP32FirmwareNode, PZEM_FAIL_TRIP_COUNT
 from src.hardware.mqtt import AsyncMQTTClient
 
 DEVICE_ID = "test_node_01"
@@ -191,6 +191,54 @@ def test_nan_pzem_read_does_not_poison_safety_state(node):
     assert node._baseline_ring == ring_before, "NaN must not enter the baseline ring"
     assert math.isfinite(node.shared_power_watts), "NaN must not reach shared state"
     assert node.gpio18_relay_state is True, "an unreadable sensor must not trip the relay"
+
+
+def test_inf_pzem_read_does_not_poison_safety_state():
+    """A NON-FINITE read means Inf too, not just NaN.
+
+    Regression for the !isfinite guard that replaced isnan() in
+    SafetySamplingTask(). The PZEM library signals a failed Modbus frame with
+    NAN, but a CORRUPTED frame decoded into a float can land on +/-Inf, and
+    isnan() passes those straight through. An Inf that reaches _last_watts
+    disables the arc-fault channel PERMANENTLY for the life of that boot:
+    every later `power_w > _last_watts` comparison is False against +Inf, so
+    dP/dt can never trip again — silently, with no alert and no symptom.
+    """
+    for register in ("active_power", "voltage", "current", "power_factor"):
+        n = ESP32FirmwareNode(device_id=DEVICE_ID, rated_watts=RATED_WATTS)
+        n.set_relay(True)
+        n.pzem.set_load(100.0)
+        n.core0_safety_step(sim_dt=0.1)
+        last_watts, ring = n._last_watts, list(n._baseline_ring)
+
+        setattr(n.pzem, register, float("inf"))
+        n.core0_safety_step(sim_dt=0.1)
+
+        assert n._last_watts == last_watts, f"Inf on {register} reached _last_watts"
+        assert n._baseline_ring == ring, f"Inf on {register} entered the baseline ring"
+        assert all(math.isfinite(v) for v in (n.shared_power_watts, n.shared_voltage,
+                                              n.shared_current, n.shared_pf)), (
+            f"Inf on {register} reached shared state and is now publishable to MQTT"
+        )
+        assert n._pzem_fail_count == 1, (
+            f"Inf on {register} was accepted as a valid read — the "
+            "loss-of-measurement watchdog does not even see it"
+        )
+
+    # The permanent-poisoning consequence, asserted directly: after an Inf
+    # sample the dP/dt channel must still be able to trip.
+    n = ESP32FirmwareNode(device_id=DEVICE_ID, rated_watts=RATED_WATTS)
+    n.set_relay(True)
+    n.pzem.set_load(100.0)
+    n.core0_safety_step(sim_dt=0.1)
+    n.pzem.active_power = float("inf")
+    n.core0_safety_step(sim_dt=0.1)
+    n.pzem.set_load(n.rated_watts * 1.25 + 100.0)
+    n.core0_safety_step(sim_dt=0.1)
+    assert n.shared_arc_fault is True, (
+        "an Inf sample latched into _last_watts and permanently disabled the "
+        "arc-fault channel — this is exactly what an isnan()-only guard does"
+    )
 
 
 @pytest.mark.asyncio
@@ -535,3 +583,372 @@ async def test_core1_status_lifecycle_and_server_timeout(mqtt_client):
 
     await n.announce_offline()
     assert statuses()[-1] == "OFFLINE"
+
+
+# ==========================================
+# Category 6: PZEM Loss-of-Measurement Watchdog
+# ==========================================
+#
+# A dead PZEM, a severed UART or a pulled 5 V rail used to leave the relay
+# CLOSED forever: the invalid-read guard skipped the cycle, so BOTH the
+# overcurrent and the arc-fault channel were silently off while the socket
+# stayed energised — fail-DANGEROUS. The watchdog opens the relay after
+# PZEM_FAIL_TRIP_COUNT consecutive blind samples, but only when all three of
+# (count reached, relay closed, PZEM has ever been valid) hold. These tests pin
+# each condition, because dropping any one of them either re-opens the hazard
+# or makes documented bring-up gates unperformable.
+
+
+def _watchdog_node(device_id="node_watchdog", rated_watts=RATED_WATTS):
+    """A node plus the list of (topic, payload) it publishes."""
+    published = []
+
+    async def publish(topic, payload):
+        published.append((topic, payload))
+
+    node = ESP32FirmwareNode(device_id=device_id, rated_watts=rated_watts,
+                             mqtt_publish_fn=publish)
+    return node, published
+
+
+def _kill_pzem(node):
+    """Model a dead sensor / severed UART the way hardware fails it: the
+    VOLTAGE register goes non-finite.
+
+    NaN-ing only active_power is NOT a dead PZEM and self-heals — core 0
+    substitutes power_w = 0.0 whenever the relay is open, so the read comes
+    back finite and the blind-read counter rewinds.
+    """
+    node.pzem.voltage = float("nan")
+
+
+def _revive_pzem(node):
+    node.pzem.voltage = 230.0
+    node.pzem.set_load(0.0)
+
+
+def _core0_steps(node, n):
+    for _ in range(n):
+        node.core0_safety_step(sim_dt=0.1)
+
+
+def _statuses(published, node):
+    return [p for t, p in published if t == node.topic_status]
+
+
+def test_pzem_watchdog_does_not_trip_while_relay_is_open():
+    """An OPEN relay is not an unprotected energised socket, so a blind PZEM
+    is nothing to trip on — and the counter must saturate, not grow.
+
+    Without the relayClosed gate a node whose sensor died would re-trip on
+    every 100 ms sample, restarting the 5-minute lockout forever on a relay
+    that is already open. Without saturation the firmware's `int` is
+    signed-overflow UB on a permanently dead sensor.
+    """
+    node, published = _watchdog_node()
+    node.core0_safety_step(sim_dt=0.1)          # one good read -> armed
+    assert node._pzem_ever_valid is True
+    _kill_pzem(node)
+    _core0_steps(node, PZEM_FAIL_TRIP_COUNT * 10)
+
+    assert node.gpio18_relay_state is False
+    assert node.shared_pzem_fault is False, (
+        "the watchdog tripped on an OPEN relay — there is no energised socket "
+        "to protect, and this restarts the lockout on every sample"
+    )
+    assert node._pzem_fail_count == PZEM_FAIL_TRIP_COUNT, (
+        f"blind-read counter reached {node._pzem_fail_count}; it must saturate "
+        f"at PZEM_FAIL_TRIP_COUNT ({PZEM_FAIL_TRIP_COUNT}) — unbounded growth "
+        "is signed-overflow UB in the firmware's int"
+    )
+    assert "PZEM_FAULT" not in _statuses(published, node)
+
+
+def test_pzem_watchdog_stays_disarmed_until_first_valid_read():
+    """A node that has NEVER measured anything has never observed mains, so
+    the watchdog must stay disarmed (pzemEverValid / _pzem_ever_valid).
+
+    The PZEM sits upstream of the relay and is mains-powered, so with no mains
+    it returns NaN forever regardless of relay state — which is exactly how the
+    documented bring-up is run, on purpose (BRINGUP_RUNBOOK.md Gates 5/7).
+    """
+    node, published = _watchdog_node()
+    _kill_pzem(node)
+    node.set_relay(True)
+    _core0_steps(node, PZEM_FAIL_TRIP_COUNT * 10)
+
+    assert node._pzem_ever_valid is False
+    assert node.gpio18_relay_state is True, (
+        "an unarmed watchdog opened the relay — bring-up Gate 7 (dry relay "
+        "close with no mains) becomes unperformable"
+    )
+    assert node.shared_pzem_fault is False
+    assert "PZEM_FAULT" not in _statuses(published, node)
+
+
+def test_pzem_watchdog_trips_at_exactly_the_trip_count():
+    """Armed and closed: no trip at PZEM_FAIL_TRIP_COUNT - 1, trip on the very
+    next sample.
+
+    Tripping early turns a transient Modbus CRC error into a 5-minute lockout;
+    tripping late leaves an energised socket with both protection channels
+    blind for longer than the 3 s the constant promises.
+    """
+    node, _ = _watchdog_node()
+    node.core0_safety_step(sim_dt=0.1)          # arm
+    node.set_relay(True)
+    _kill_pzem(node)
+
+    _core0_steps(node, PZEM_FAIL_TRIP_COUNT - 1)
+    assert node.gpio18_relay_state is True, (
+        f"tripped before {PZEM_FAIL_TRIP_COUNT} consecutive blind reads — "
+        "transient UART noise would nuisance-trip the node"
+    )
+    assert node.shared_pzem_fault is False
+    assert node._pzem_fail_count == PZEM_FAIL_TRIP_COUNT - 1
+
+    node.core0_safety_step(sim_dt=0.1)          # sample #PZEM_FAIL_TRIP_COUNT
+    assert node.gpio18_relay_state is False, (
+        f"did not trip on blind sample {PZEM_FAIL_TRIP_COUNT} — the socket "
+        "stays energised with overcurrent AND arc-fault blind"
+    )
+    assert node.gpio18_level is False, "pin must be driven to the de-energising level"
+    assert node.shared_pzem_fault is True
+    assert node.relay_locked is False, "the lockout belongs to the core-1 tick"
+
+
+@pytest.mark.asyncio
+async def test_pzem_fault_published_once_per_episode():
+    """One PZEM_FAULT per fault episode, not one per 100 ms sample.
+
+    The cutoff clears relayClosed, which disarms the trip until a server `ON`
+    re-closes the relay. Without that the status topic is flooded and the
+    5-minute lockout timer is restarted forever, so it never expires.
+    """
+    node, published = _watchdog_node()
+    node.core0_safety_step(sim_dt=0.1)          # arm
+    node.set_relay(True)
+    _kill_pzem(node)
+    _core0_steps(node, PZEM_FAIL_TRIP_COUNT)
+    await node.core1_telemetry_tick()
+
+    assert node.relay_locked is True, "core-1 tick did not consume the PZEM latch"
+    assert node.shared_pzem_fault is False, "latch not acknowledged"
+    assert _statuses(published, node).count("PZEM_FAULT") == 1
+
+    lock_start = node.lock_start_time
+    _core0_steps(node, PZEM_FAIL_TRIP_COUNT * 5)
+    assert node.shared_pzem_fault is False, (
+        "re-tripped on an already-open relay — the lockout timer would restart "
+        "on every sample and never expire"
+    )
+    await node.core1_telemetry_tick()
+    assert _statuses(published, node).count("PZEM_FAULT") == 1
+    assert node.lock_start_time == lock_start, "the lockout timer was restarted"
+
+
+@pytest.mark.asyncio
+async def test_pzem_watchdog_retrips_within_one_sample_after_lockout_expiry():
+    """After the lockout expires, an `ON` onto a still-blind node must re-trip
+    on the FIRST sample (100 ms), not after another 3 s.
+
+    The saturated counter is deliberately NOT rewound by closing the relay:
+    rewinding it would hand back a full 3 s blind window on a socket already
+    known to be unmeasurable.
+    """
+    node, published = _watchdog_node()
+    node.core0_safety_step(sim_dt=0.1)          # arm
+    node.set_relay(True)
+    _kill_pzem(node)
+    _core0_steps(node, PZEM_FAIL_TRIP_COUNT)
+    await node.core1_telemetry_tick()
+    assert node.relay_locked is True
+
+    node.lock_start_time = time.time() - (node.safety_lockout_seconds + 1.0)
+    await node.core1_telemetry_tick()
+    assert node.relay_locked is False, "lockout did not expire"
+
+    await node.handle_mqtt_command("ON")
+    assert node.gpio18_relay_state is True
+    assert node._pzem_fail_count == PZEM_FAIL_TRIP_COUNT, (
+        "closing the relay rewound the blind-read counter — the node gets a "
+        "fresh 3 s blind window on a sensor already known to be dead"
+    )
+
+    node.core0_safety_step(sim_dt=0.1)          # ONE sample = 100 ms
+    assert node.gpio18_relay_state is False, "did not re-trip within one sample"
+    assert node.shared_pzem_fault is True
+    await node.core1_telemetry_tick()
+    assert node.relay_locked is True
+    assert _statuses(published, node).count("PZEM_FAULT") == 2
+
+
+def test_one_good_read_rewinds_the_blind_read_counter():
+    """The watchdog counts CONSECUTIVE blind reads. One good read rewinds it,
+    and a full PZEM_FAIL_TRIP_COUNT is needed again.
+
+    A lifetime counter would accumulate scattered transient CRC errors on a
+    healthy node until it tripped for no reason.
+    """
+    node, _ = _watchdog_node()
+    node.core0_safety_step(sim_dt=0.1)          # arm
+    node.set_relay(True)
+    _kill_pzem(node)
+    _core0_steps(node, PZEM_FAIL_TRIP_COUNT - 1)
+    assert node._pzem_fail_count == PZEM_FAIL_TRIP_COUNT - 1
+
+    _revive_pzem(node)
+    node.core0_safety_step(sim_dt=0.1)
+    assert node._pzem_fail_count == 0, "a good read must rewind the counter to 0"
+
+    _kill_pzem(node)
+    _core0_steps(node, PZEM_FAIL_TRIP_COUNT - 1)
+    assert node.gpio18_relay_state is True, (
+        "the counter did not rewind: the node tripped after fewer than "
+        f"{PZEM_FAIL_TRIP_COUNT} CONSECUTIVE blind reads"
+    )
+    node.core0_safety_step(sim_dt=0.1)
+    assert node.gpio18_relay_state is False
+
+
+@pytest.mark.asyncio
+async def test_bringup_gate5_no_mains_relay_open_takes_no_lockout():
+    """BRINGUP_RUNBOOK.md GATE 5: USB power only, NO MAINS, relay never closed.
+
+    The PZEM is mains-powered and upstream of the relay, so it returns NaN for
+    the whole gate. The node must sit there publishing finite zeros for 60 s
+    with no PZEM_FAULT and no lockout — a self-lockout here blocks the gate
+    and every gate after it.
+    """
+    node, published = _watchdog_node(device_id="node_bench_agg")
+    _kill_pzem(node)
+    for i in range(600):                        # 60 s at the 100 ms cadence
+        node.core0_safety_step(sim_dt=0.1)
+        if i % 10 == 0:
+            await node.core1_telemetry_tick()
+
+    assert node._pzem_ever_valid is False
+    assert node.relay_locked is False, "GATE 5 self-lockout: the gate is blocked"
+    assert node.gpio18_relay_state is False
+    assert "PZEM_FAULT" not in _statuses(published, node)
+    power = [p for t, p in published if t == node.topic_power]
+    assert power, "GATE 5 expects the node to be publishing power readings"
+    assert all(math.isfinite(float(p)) for p in power), (
+        f"a non-finite power payload reached MQTT during GATE 5: {power}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bringup_gate7_dry_relay_close_stays_closed():
+    """BRINGUP_RUNBOOK.md GATE 7: dry relay close, NO MAINS, meter COM-NO.
+
+    The PZEM has never been valid, so the watchdog is disarmed and the contacts
+    must STAY CLOSED for the whole gate. If the saturated counter tripped here
+    the relay would re-open ~100 ms after the close and lock out for 5 minutes,
+    making the continuity measurement impossible to take.
+    """
+    node, published = _watchdog_node(device_id="node_bench_agg")
+    _kill_pzem(node)
+    _core0_steps(node, 300)                     # 30 s of boot before the operator acts
+
+    await node.handle_mqtt_command("ON")
+    acks = [p for t, p in published if t == node.topic_ack]
+    assert "ON_CONFIRMED" in acks
+
+    for i in range(600):                        # 60 s metering COM-NO continuity
+        node.core0_safety_step(sim_dt=0.1)
+        if i % 10 == 0:
+            await node.core1_telemetry_tick()
+
+    assert node.gpio18_relay_state is True, (
+        "GATE 7 relay re-opened — the dry-close continuity check is "
+        "unperformable and bring-up cannot proceed"
+    )
+    assert node.gpio18_level is True, "active-HIGH net: a closed relay drives HIGH"
+    assert node.relay_locked is False
+    assert "PZEM_FAULT" not in _statuses(published, node)
+
+    await node.handle_mqtt_command("OFF")
+    assert node.gpio18_relay_state is False
+    assert "OFF_CONFIRMED" in [p for t, p in published if t == node.topic_ack]
+
+
+def test_overcurrent_still_trips_on_first_sample_under_watchdog():
+    """The watchdog must not gate the unconditional overcurrent path.
+
+    Overcurrent runs on a VALID read, so it is reached before any blind-read
+    counting — but a refactor that moved the cutoff behind the watchdog's arming
+    or counting logic would delay the one cutoff that has to be immediate.
+    """
+    node, _ = _watchdog_node()
+    node.set_relay(True)
+    node.pzem.set_load(node.rated_watts * 1.25 + 50.0)
+    node.core0_safety_step(sim_dt=0.1)
+    assert node.gpio18_relay_state is False, (
+        "overcurrent must open the relay on the FIRST offending sample"
+    )
+    assert node.shared_overcurrent_latch is True
+    assert node._pzem_fail_count == 0, "a valid read must leave the counter at 0"
+
+
+@pytest.mark.asyncio
+async def test_brief_overcurrent_spike_still_takes_lockout_and_nacks_on():
+    """A spike that core 0 cuts off and that CLEARS before core 1's next tick
+    must still take the 5-minute lockout, and the next `ON` must be NACKed.
+
+    This is the hole the core-0 -> core-1 overcurrent latch closes. Core 1 used
+    to LEVEL-test `powerWatts > criticalWatts`, but core 0 opens the relay on
+    the offending sample, which collapses the reading to 0 W. By the time core 1
+    looked, the overload was gone, the lockout was never taken, and the very
+    next `ON` re-closed the contacts straight into the fault — repeatedly, with
+    nothing to stop it. Assert the outcome (lockout, NACK, relay still open),
+    not just the flag.
+    """
+    node, published = _watchdog_node()
+    critical = node.rated_watts * 1.25
+
+    # Warm baseline at 100 W (>= the 50 W inrush ceiling, so suppression is
+    # off), then RAMP into the overload in sub-134 W steps so the arc-fault
+    # channel stays silent: this test must prove the OVERCURRENT latch took the
+    # lockout, not the arc-fault one.
+    node.set_relay(True)
+    node.pzem.set_load(100.0)
+    _core0_steps(node, 5)
+    node.pzem.set_load(critical - 30.0)
+    node.core0_safety_step(sim_dt=0.1)
+    assert node.gpio18_relay_state is True and node.shared_arc_fault is False
+
+    node.pzem.set_load(critical + 50.0)         # the spike
+    node.core0_safety_step(sim_dt=0.1)
+    assert node.gpio18_relay_state is False, "core 0 must cut off on the spike"
+    assert node.shared_arc_fault is False, (
+        "arc-fault co-fired; this test can no longer attribute the lockout to "
+        "the overcurrent latch"
+    )
+    assert node.shared_overcurrent_latch is True
+
+    # The spike clears before core 1's next pass. The relay is already open, so
+    # shared power collapses to 0 W — this is exactly the state in which the old
+    # level check read a SAFE value and took no lockout at all.
+    node.pzem.set_load(0.0)
+    node.core0_safety_step(sim_dt=0.1)
+    assert node.shared_power_watts <= critical, (
+        "precondition: the overload must be gone from shared state before the "
+        "core-1 tick, or this test is not exercising the regression"
+    )
+
+    await node.core1_telemetry_tick()
+    assert node.relay_locked is True, (
+        "the 5-minute lockout was NOT taken for a spike that core 0 already cut "
+        "off — the level-triggered core-1 overcurrent check is back, and the "
+        "next ON re-closes the relay into the fault"
+    )
+    assert node.shared_overcurrent_latch is False, "latch not acknowledged"
+
+    await node.handle_mqtt_command("ON")
+    acks = [p for t, p in published if t == node.topic_ack]
+    assert "LOCKOUT_NACK" in acks, "the ON after a cut-off spike was not NACKed"
+    assert "ON_CONFIRMED" not in acks, "the relay re-closed into a faulted circuit"
+    assert node.gpio18_relay_state is False
+    assert node.gpio18_level is False, "pin must stay at the de-energising level"
+
