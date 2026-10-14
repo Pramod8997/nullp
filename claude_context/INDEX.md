@@ -17,8 +17,7 @@ All documents in this folder (`claude_context/`) are structured to provide zero-
 | **3. Product Requirements** | [`PRD.md`](file:///home/pramodsb/Downloads/mjr/claude_context/PRD.md) | Complete Product Requirements Document (Functional & Non-Functional specifications). |
 | **4. Technical Review** | [`TECHNICAL_REVIEW.md`](file:///home/pramodsb/Downloads/mjr/claude_context/TECHNICAL_REVIEW.md) | Deep system architecture, FreeRTOS state machines, pipeline stages, math formulas. |
 | **5. API Cheatsheet** | [`ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_context/ARCHITECTURE_AND_APIS.md) | Exhaustive class/method signatures to prevent token-wasting API hallucinations. |
-| **6. Hardware Audit** | [`HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_context/HARDWARE_DEPLOYMENT_GUIDE.md) | 6 real-world electrical hazards, level shifters, snubbers, PSU sizing, and BOM. |
-| **7. Real-World Physical Testing** | [`REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_context/REAL_WORLD_TESTING_PLAN.md) | 8 physical bench tests (Variac brownouts, inductive arcing, thermal rise, THD noise). |
+| **6. Current Hardware Bundle** | [`../docs/ems_hardware/README.md`](../docs/ems_hardware/README.md) | Current 38-pin wiring, safety gates, procurement and physical-validation status. |
 
 ---
 

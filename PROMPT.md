@@ -46,6 +46,7 @@ Never invent APIs. Refer to `claude_debug/ARCHITECTURE_AND_APIS.md`:
 Context References (Read only when needed in `claude_debug/`):
 - Architecture/APIs: `claude_debug/ARCHITECTURE_AND_APIS.md`
 - PRD: `claude_debug/PRD.md` | Tech Review: `claude_debug/TECHNICAL_REVIEW.md`
-- Hardware Guide: `claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md` | Physical Plan: `claude_debug/REAL_WORLD_TESTING_PLAN.md`
+- Hardware bundle: `docs/ems_hardware/README.md` | Wiring: `claude_debug/WIRING_STEP_BY_STEP.md`
+- Safety: `claude_debug/HARDWARE_FINAL_SPEC.md` | Physical status: `docs/omnirush/PHYSICAL_VALIDATION.md`
 - Master Index: `claude_debug/INDEX.md`
 ```

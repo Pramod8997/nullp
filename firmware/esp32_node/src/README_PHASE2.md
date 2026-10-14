@@ -5,6 +5,12 @@ The ESP32 firmware at `main.cpp` is a reference implementation for the physical 
 
 ## Phase 2: Hardware Deployment
 
+> **Current bench build:** 38-pin ESP32-WROOM-32 DevKit. The older 30-pin,
+> MOSFET-relay and 600 W instructions that remain in historical documents do
+> not apply to this build. Use `claude_debug/WIRING_STEP_BY_STEP.md` for the
+> current low-voltage pinout and `config/config.hardware.yaml` for the 250 W
+> hardware profile.
+
 ### Architecture
 - **Tier-0 Safety Relay**: Runs independently on ESP32 Core 0 (`SafetySamplingTask`, 100 ms). NO ML inference on device — the ESP32 publishes power readings via MQTT and trips the relay locally.
 - **Relay Trigger**: At **125% of `RATED_WATTS`** (`CRITICAL_PCT = 1.25`, matching `critical_pct` in config). The relay disconnects on-device, independent of the MQTT broker or the ML pipeline.
@@ -23,12 +29,15 @@ The ESP32 firmware at `main.cpp` is a reference implementation for the physical 
 - WiFi reconnection with exponential backoff
 
 ### Replacing the Simulator
-1. Flash `main.cpp` to the ESP32 DevKit V1 — **WROOM-32D, not WROVER** (WROVER uses GPIO 16/17 for PSRAM, which are the PZEM UART pins)
+1. Flash `main.cpp` to the 38-pin ESP32 DevKit — **WROOM-32, not WROVER** (WROVER uses GPIO 16/17 for PSRAM, which are the PZEM UART pins)
 2. Wire the PZEM UART: GPIO 16 (RX2) ← PZEM TX, GPIO 17 (TX2) → PZEM RX. **Measure PZEM TX idle voltage first** — 5 V push-pull variants exceed the ESP32's 3.6 V absolute maximum (issue B-4)
-3. Wire the relay: GPIO 18 → 1 kΩ → BSS138 gate, **100 kΩ gate→GND pull-down**, drain → relay IN, source → GND. Net polarity at the GPIO is **active-HIGH**, so `RELAY_ACTIVE_LOW = false`
+3. Set the relay module jumper to **H/high-trigger**. Wire GPIO 18 **directly** to relay IN1, with a **100 kΩ IN1→GND pull-down**. Do not insert the superseded BSS138/MOSFET path. Net polarity at the GPIO is **active-HIGH**, so `RELAY_ACTIVE_LOW = false`
 4. Set `DEVICE_ID`, `RATED_WATTS`, WiFi credentials and MQTT broker IP in firmware
 5. Remove `simulate_esp32.py` from the `Makefile` run target
-6. Run the pipeline with `--config config/config.demo.yaml` (600 W ceiling). The rest of `run_pipeline.py` works unchanged — it subscribes to the `home/sensor/+/power` wildcard
+6. Run the pipeline with `--config config/config.hardware.yaml` (250 W ceiling). Do not use `config.demo.yaml` for the physical rig; the 600 W ceiling would make the hardware cutoff unreachable.
 
 ### Hardware BOM
-Single source of truth: [`claude_debug/HARDWARE_FINAL_SPEC.md`](../../../claude_debug/HARDWARE_FINAL_SPEC.md) §2. Do not order parts from this file.
+Use the current procurement report and verify every module against the wiring
+gates before ordering. The older 30-pin BOM text in
+[`claude_debug/HARDWARE_FINAL_SPEC.md`](../../../claude_debug/HARDWARE_FINAL_SPEC.md)
+is not a compatible mechanical specification for the current 38-pin board.

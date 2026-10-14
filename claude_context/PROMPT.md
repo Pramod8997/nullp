@@ -38,5 +38,5 @@ Never invent APIs. Refer to `claude_context/ARCHITECTURE_AND_APIS.md`:
 Context References (Read only when needed):
 - Architecture/APIs: `claude_context/ARCHITECTURE_AND_APIS.md`
 - PRD: `claude_context/PRD.md` | Tech Review: `claude_context/TECHNICAL_REVIEW.md`
-- Hardware Guide: `claude_context/HARDWARE_DEPLOYMENT_GUIDE.md` | Physical Plan: `claude_context/REAL_WORLD_TESTING_PLAN.md`
+- Hardware bundle: `docs/ems_hardware/README.md` | Wiring: `claude_debug/WIRING_STEP_BY_STEP.md`
 ```

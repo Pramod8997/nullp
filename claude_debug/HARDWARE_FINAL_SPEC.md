@@ -1,9 +1,16 @@
 # Physical Hardware — FINAL LOCKED SPECIFICATION
 
-> **Status:** ✅ **DECIDED — this document is authoritative.**
-> Supersedes the BOM and schematic in [`HARDWARE_DEPLOYMENT_GUIDE.md`](./HARDWARE_DEPLOYMENT_GUIDE.md)
-> and the order list in [`HARDWARE_READINESS_CHECKLIST.md`](./HARDWARE_READINESS_CHECKLIST.md)
-> wherever they disagree.
+> **Status:** ✅ **DECIDED — this document is authoritative for the mains
+> safety chain.** The superseded BOM, schematic and high-current test-plan
+> documents have been retired; use [`../docs/ems_hardware/README.md`](../docs/ems_hardware/README.md)
+> for the current documentation bundle.
+>
+> **Current-build correction (2026-10-14):** The existing development board for
+> this workspace is a **38-pin ESP32-WROOM-32 DevKit**. Any 30-pin board or
+> expansion-shield references in this historical specification are not
+> mechanically applicable. Use [`WIRING_STEP_BY_STEP.md`](./WIRING_STEP_BY_STEP.md)
+> for the current 38-pin low-voltage pinout; this document remains the source
+> for the mains protection chain and safety gates.
 >
 > **Scope:** Single-node, **single-socket** consumer-electronics prototype. **Laptop + phone charger only, ≤250 W**, India 230 V 50 Hz.
 > **Explicitly NOT rated for:** kettle, oven, HVAC, washing machine, EV charger, projector, desktop PC.
@@ -414,9 +421,9 @@ Never skip a stage. Each has an abort condition.
 
 | Topic | Document |
 | :--- | :--- |
-| Hazard root-cause analysis (6 hazards) | [`HARDWARE_DEPLOYMENT_GUIDE.md`](./HARDWARE_DEPLOYMENT_GUIDE.md) §2 |
-| Procurement checkboxes & bring-up gates | [`HARDWARE_READINESS_CHECKLIST.md`](./HARDWARE_READINESS_CHECKLIST.md) |
-| 8 physical bench test protocols | [`REAL_WORLD_TESTING_PLAN.md`](./REAL_WORLD_TESTING_PLAN.md) |
+| Current hardware documentation bundle | [`../docs/ems_hardware/README.md`](../docs/ems_hardware/README.md) |
+| Procurement list and order gates | [`../reports/ems_procurement_bom_under_2500.txt`](../reports/ems_procurement_bom_under_2500.txt) |
+| Physical validation status | [`../docs/omnirush/PHYSICAL_VALIDATION.md`](../docs/omnirush/PHYSICAL_VALIDATION.md) |
 | Pinout quick reference | [`../Hardware.md`](../Hardware.md) |
 | Physical-rig runtime config | [`../config/config.hardware.yaml`](../config/config.hardware.yaml) |
 | Class/method signatures | [`ARCHITECTURE_AND_APIS.md`](./ARCHITECTURE_AND_APIS.md) |

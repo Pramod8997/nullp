@@ -477,7 +477,7 @@ are expensive and their results are recorded above.
 4. **Test hygiene** (§5.4 there) — 27 bare `assert True`, 39 hallucinated `.process()`
    no-ops, and the `ImportError → MagicMock` masking that would let a real import break
    pass as green.
-5. **Bench validation.** Everything here is simulation. `REAL_WORLD_TESTING_PLAN.md`.
+5. **Bench validation.** Everything here is simulation. See `docs/ems_hardware/VALIDATION_STATUS.md`.
 
 ## Two things NOT to do
 
@@ -489,4 +489,3 @@ are expensive and their results are recorded above.
 - **Do not "repair" OpenMax** by populating `_weibull_by_name` from the trainer's existing
   distances. §5.1 measures why that mis-calibrates (squared L2 fitted, plain L2 queried)
   and why the channel cannot work here regardless.
-

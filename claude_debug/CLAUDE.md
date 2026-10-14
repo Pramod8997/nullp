@@ -128,8 +128,6 @@ graph TD
 * 📄 [`claude_debug/PRD.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/PRD.md) — Product Requirements Document
 * 📄 [`claude_debug/TECHNICAL_REVIEW.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/TECHNICAL_REVIEW.md) — Technical Review & FreeRTOS Diagrams
 * 📄 [`claude_debug/ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/ARCHITECTURE_AND_APIS.md) — Complete API Cheatsheet
-* 📄 [`claude_debug/HARDWARE_FINAL_SPEC.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_FINAL_SPEC.md) — 🔒 **AUTHORITATIVE Physical Hardware Spec** (locked BOM, single aggregate node, ~600 W, India 230 V)
-* 📄 [`claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_DEPLOYMENT_GUIDE.md) — Real-World Hardware Hazards (BOM superseded by the spec)
-* 📄 [`claude_debug/HARDWARE_READINESS_CHECKLIST.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_READINESS_CHECKLIST.md) — Pre-Procurement Review & Bring-Up Gate (order tables superseded by the spec)
-* 📄 [`claude_debug/REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/REAL_WORLD_TESTING_PLAN.md) — 8 Physical Bench Tests & Protocols
+* 📄 [`docs/ems_hardware/README.md`](../docs/ems_hardware/README.md) — Current 38-pin wiring, safety gates, procurement and physical-validation bundle
+* 📄 [`claude_debug/HARDWARE_FINAL_SPEC.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/HARDWARE_FINAL_SPEC.md) — 🔒 **AUTHORITATIVE mains safety chain** for the 250 W single-socket prototype
 * 📄 [`claude_debug/debug_status.md`](file:///home/pramodsb/Downloads/mjr/claude_debug/debug_status.md) — Regression & Verification Status Report

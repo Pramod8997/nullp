@@ -1,8 +1,8 @@
 # Hardware Pinout & Wiring Specification
 
 > **Rig:** Single-node, **single-socket** prototype — laptop + phone charger, ≤250 W, India 230 V 50 Hz.
-> **Authoritative spec (BOM, rationale, bring-up):** [`claude_debug/HARDWARE_FINAL_SPEC.md`](./claude_debug/HARDWARE_FINAL_SPEC.md)
-> This file is the pinout quick reference only. Where it disagrees with the spec, the spec wins.
+> **Current board:** 38-pin ESP32-WROOM-32 DevKit. The 38-pin low-voltage guide is [`claude_debug/WIRING_STEP_BY_STEP.md`](./claude_debug/WIRING_STEP_BY_STEP.md); older 30-pin references are not mechanically compatible.
+> **Authoritative safety contract:** [`claude_debug/HARDWARE_FINAL_SPEC.md`](./claude_debug/HARDWARE_FINAL_SPEC.md) for the mains protection chain. This file is the current pinout quick reference for the 38-pin build.
 >
 > **Build class:** zero soldering, integrated modules only, ≤₹3,000. **No firmware change is required** — the `RELAY_PIN`/`PZEM_RX_PIN`/`PZEM_TX_PIN` constants in `main.cpp` are already correct for this wiring.
 
@@ -10,19 +10,23 @@
   * ESP32 GPIO 16 (RX2)  <──  PZEM-004T TX  ⚠️ **measure TX idle voltage before connecting** — 5 V push-pull variants exceed the ESP32's 3.6 V absolute maximum. ≈3.3 V or floating → direct (10 kΩ pull-up to 3.3 V if floating); ≈5 V → 1 kΩ/2 kΩ divider
   * ESP32 GPIO 17 (TX2)  ──>  PZEM-004T RX
   * Load current passes **through** the module's screw terminals. There is no CT clamp and no ADC input.
-  * MCU must be **ESP32-WROOM-32D**, **30-pin**. **Not WROVER** — WROVER uses GPIO 16/17 for PSRAM.
+   * MCU must be **ESP32-WROOM-32**, **38-pin DevKit**. **Not WROVER** — WROVER uses GPIO 16/17 for PSRAM.
 * **Relay actuation — direct drive, NO level shifter** (SRD-05VDC-SL-C, opto-isolated, 5 V coil, **2-channel with H/L jumper**):
   * Module jumper set to **H (high-trigger)**
   * ESP32 GPIO 18 ──────────> Relay Module **IN**   ← direct, no MOSFET, no series resistor
   * Relay **IN** ──[ 100kΩ ]──> GND  ← **mandatory pull-down**: GPIO 18 is Hi-Z during reset/boot, and without this the relay state is undefined. Resistor legs go straight into the screw terminals — no soldering
   * Relay VCC ──> +5 V · Relay GND ──> shared common ground with the ESP32
   * **Net polarity at GPIO 18 is ACTIVE-HIGH** (`RELAY_ACTIVE_LOW = false` in `main.cpp`). With a high-trigger input there are **zero inversions** in the chain: HIGH = closed, LOW = open, Hi-Z = open (fail-safe). GPIO 18 sources ~2.1 mA into the opto LED.
-  * ⚠️ **Why not a low-trigger module:** at IN = 3.3 V a 5 V-referenced opto still passes ~0.5 mA — not a guaranteed OFF; the relay may fail to release or chatter. If you can only get a low-trigger board, set module VCC = 3.3 V with JD-VCC on 5 V, flip the `RELAY_ACTIVE_LOW` constant in `main.cpp` to `true`, and move the 100 kΩ to a pull-**up**. Re-verify at Stage 2.
+   * ⚠️ **Why not a low-trigger module:** at IN = 3.3 V a 5 V-referenced opto still passes ~0.5 mA — not a guaranteed OFF; the relay may fail to release or chatter. If you can only get a low-trigger board, set module VCC = 3.3 V with JD-VCC on 5 V, flip the `RELAY_ACTIVE_LOW` constant in `main.cpp` to `true`, and move the 100 kΩ to a pull-**up**. Re-verify at Stage 2.
+   * **Module identity gate:** the generic 30 A purchase candidate is not
+     approved by its contact-current label alone. Before wiring, verify the
+     actual board's H/L jumper, VCC/JD-VCC arrangement, 5 V input current and
+     COM/NO contact labeling against its datasheet.
   * RC snubber (100 Ω 2 W flameproof + 0.1 µF 275 VAC Class-X2 across COM–NO): **optional** for this load set — no inductive load remains in scope. Reinstate for any motor/fan/pump/transformer load.
 * **Wiring interface:**
-  * ESP32 plugs into a **30-pin screw-terminal expansion shield** — match pin count *and* board width. Pins are only broken out; no remapping.
+   * ESP32 plugs into a **38-pin screw-terminal expansion shield** — match pin count *and* board width. Pins are only broken out; no remapping. A 30-pin shield must not be forced onto this board.
 * **Power Supply (5 V Rail):**
-  * **BIS-marked 5 V 2 A USB charger** ──> USB-A-female-to-screw-terminal breakout ──> shield VIN / GND
+   * **BIS-marked 5 V 2 A USB charger** ──> USB-A-female-to-screw-terminal breakout ──> shield VIN / GND. The adapter/cable alone is not this breakout.
   * Charger lives **outside** the enclosure on its own wall socket. This deletes the HLK-5M05, the MOV, the 0.5 A PSU fuse, the 1000 µF bulk cap, the 100 nF cap and the entire second mains tap.
   * ESP32 VIN (5 V), Relay VCC (+5 V), PZEM VCC (+5 V) from adjacent terminals
   * ⚠️ **Laptop USB and mains are mutually exclusive.** Flash on laptop USB with mains disconnected; run on the 5 V charger with the laptop cable removed. The 2-pin charger has no earth reference and is the intended run-time supply.
@@ -36,7 +40,7 @@
 * **The two loads share one socket, simultaneously** — laptop brick + phone charger through the same PZEM shunt. That overlap is what NILM disaggregates; one device at a time is single-appliance classification and never exercises `OverlapAwareNILMDetector`.
 
 **Coordination ladder** — must stay monotonic, see spec §D8:
-`185 W nominal (0.80 A) → WARNING 275 W → relay trips 312 W (1.36 A) → 5 A fuse → 10 A relay/PZEM rating → 13 A wire`
+`185 W nominal (0.80 A) → WARNING 275 W → relay trips 312 W (1.36 A) → 5 A fuse → 10 A relay/PZEM rating → 1.0 mm² mains wiring`
 
 **Run the pipeline with the hardware config, not the demo config:**
 ```bash

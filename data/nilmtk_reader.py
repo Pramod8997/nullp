@@ -17,7 +17,7 @@ Temporal contract (matters for real-world accuracy)
 ---------------------------------------------------
 UK-DALE submeters sample at 6 s, REDD at 3-4 s, but the deployed PZEM-004T
 publishes at ~1 Hz with a 500-1000 ms register refresh, which makes its output
-a *staircase* (see HARDWARE_DEPLOYMENT_GUIDE.md, Hazard 4).
+ a *staircase* (see docs/ems_hardware/WIRING.md and the PZEM refresh notes).
 
 So a window here is defined by **wall-clock duration**, not sample count:
 `WINDOW_SECONDS` of real time, resampled onto a 1 Hz grid of `SEQ_LEN` points

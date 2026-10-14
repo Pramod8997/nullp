@@ -67,7 +67,7 @@ protonet:
   # To make the rig recognise its own loads, capture real PZEM windows and enrol:
   #   1. run each load alone on the bench, save 128-sample power windows (watts)
   #      per class into an .npz keyed by class name — see
-  #      claude_debug/REAL_WORLD_TESTING_PLAN.md;
+   #      docs/ems_hardware/VALIDATION_STATUS.md and the current wiring guide;
   #   2. python scripts/enroll_demo_devices.py --capture bench.npz \
   #        --out backend/models/weights_demo/prototype_registry_bench.pt
   #   3. set registry_path to that file.

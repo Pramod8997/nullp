@@ -330,6 +330,5 @@ mechanical fix, so none were changed unilaterally.
 
 10. **Never physically validated.** Every result above is simulation. The twin now matches
    `main.cpp` on the paths audited, but no claim here substitutes for bench validation per
-   `REAL_WORLD_TESTING_PLAN.md`.
-
+    `docs/ems_hardware/VALIDATION_STATUS.md`.
 

@@ -100,5 +100,4 @@ graph TD
 * 📄 [`claude_context/PRD.md`](file:///home/pramodsb/Downloads/mjr/claude_context/PRD.md) — Product Requirements Document
 * 📄 [`claude_context/TECHNICAL_REVIEW.md`](file:///home/pramodsb/Downloads/mjr/claude_context/TECHNICAL_REVIEW.md) — Technical Review & FreeRTOS Diagrams
 * 📄 [`claude_context/ARCHITECTURE_AND_APIS.md`](file:///home/pramodsb/Downloads/mjr/claude_context/ARCHITECTURE_AND_APIS.md) — Complete API Cheatsheet
-* 📄 [`claude_context/HARDWARE_DEPLOYMENT_GUIDE.md`](file:///home/pramodsb/Downloads/mjr/claude_context/HARDWARE_DEPLOYMENT_GUIDE.md) — Real-World Hardware Hazards, Schematics & BOM
-* 📄 [`claude_context/REAL_WORLD_TESTING_PLAN.md`](file:///home/pramodsb/Downloads/mjr/claude_context/REAL_WORLD_TESTING_PLAN.md) — 8 Physical Bench Tests & Protocols
+* 📄 [`docs/ems_hardware/README.md`](../docs/ems_hardware/README.md) — Current 38-pin wiring, safety gates, procurement and physical-validation bundle

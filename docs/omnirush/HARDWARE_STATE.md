@@ -13,7 +13,7 @@
 | `config/config.hardware.yaml` | One node `node_bench_agg`, 250 W, classes phone/laptop/projector, delta overlap enabled, no physical registry path | Contradicts the 250 W spec's explicit projector exclusion |
 | `claude_debug/GOD_TIER_PLAN_2026-09-10.md` | Projector included; proposes 400/500 W ceiling decision from nameplate | Plan, not physical evidence |
 | `config/config.demo.yaml` | Simulator/demo profile with nonphysical classes/loads | Simulation only |
-| `docs/PRODUCTION_TESTING_AND_HARDWARE_AUDIT.md` | Older active-low/30 A/HLK/CT design | Historical and superseded; unsafe as current build instruction |
+| `docs/ems_hardware/README.md` | Current 38-pin wiring, safety gates and validation bundle | Current documentation entry point; physical validation remains blocked |
 
 ## Required actual-hardware inventory (not supplied/verified)
 

@@ -2,8 +2,9 @@
 
 > **Audience:** first-time hardware builder with an ESP32-38P DevKit, PZEM-004T,
 > relay module, and dupont jumpers.
-> **Companion to:** [`HARDWARE_FINAL_SPEC.md`](./HARDWARE_FINAL_SPEC.md) (locked
-> BOM & safety spec — authoritative where the two disagree).
+> **Companion to:** [`HARDWARE_FINAL_SPEC.md`](./HARDWARE_FINAL_SPEC.md) for the
+> mains safety contract. This document is authoritative for the current
+> **38-pin** low-voltage pinout; older 30-pin references do not apply.
 > **Firmware source of truth:** `firmware/esp32_node/src/main.cpp:80-98`
 >
 > ⚠️ **This guide covers the LOW-VOLTAGE side only (≤5 V).** The mains 230 V side
@@ -104,7 +105,8 @@ The PZEM's TX pin may push 5 V; the ESP32 absolute max is 3.6 V.
 
 1. Wire only **5 V and GND** to the PZEM (map rows 5 and 7). Leave **TX unconnected**.
 2. Multimeter: black probe on GND, red probe on the PZEM **TX** pin, DC volts.
-3. **≈3.3 V or floating** → connect TX direct (map row 2). ✅
+3. **≈3.3 V or floating** → connect TX direct (map row 2); if it is floating,
+   add the documented 10 kΩ pull-up from TX/GPIO16 to 3.3 V first. ✅
 4. **≈5 V** → do NOT connect it directly. Build a divider first:
 
 ```

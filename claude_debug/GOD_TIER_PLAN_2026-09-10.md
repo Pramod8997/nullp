@@ -182,7 +182,7 @@ timeline pressure on the fallback decision — it is made on evidence.
    mDNS — hotspot DHCP churn breaks the ESP32 each session).
 5. Host C test: delete or rewrite against real firmware logic (it currently
    tests its own mocks with stale expectations).
-6. Repo truth-up: `REAL_WORLD_TESTING_PLAN.md` (30 A/CT era), runbook/capture
+6. Repo truth-up: retired 30 A/CT-era plan (replaced by `docs/ems_hardware/`), runbook/capture
    old 4-class lists, stale `frontend/dist` rebuild, merge or drop the
    `worktree-ml-hardware-spec-fix` commit, remove `new 1/`, dead config keys
    (`open_set_threshold` — **its removal must also update the test pinning `== 0.65` at

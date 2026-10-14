@@ -252,7 +252,7 @@ Also recorded in `claude_debug/debug_status.md` §5.
 
 6. **Nothing here is physical validation.** Every result is simulation. The twin now matches
    `main.cpp` on the paths audited; no claim above substitutes for bench work per
-   `REAL_WORLD_TESTING_PLAN.md`.
+    `docs/ems_hardware/VALIDATION_STATUS.md`.
 
 7. **Both `CLAUDE.md` playbooks are now stale in three places** (root and `claude_debug/`).
    Left unedited deliberately — these are the project's own governing playbooks, and two of the

@@ -1,0 +1,197 @@
+EMS BENCH PROCUREMENT LIST — EXISTING ESP32-WROOM-32, 38-PIN
+================================================================
+
+Prepared: 2026-10-14
+Purpose: Buy the missing low-voltage/prototyping parts for the EMS bench
+prototype. The user already owns the 38-pin ESP32-WROOM-32 development board.
+The user does NOT currently have the PZEM, relay, wires, power supply,
+breakout, breadboard or other parts.
+
+IMPORTANT STATUS
+----------------
+This is a bench-prototype procurement list, not authorization to connect
+230 V mains. The current PZEM candidate is the closest available match, but
+the retailer page does not explicitly prove both "PZEM-004T v3.0" and
+"10 A direct/shunt". Confirm those two points with the seller before paying.
+
+CURRENT PHYSICAL STATUS
+-----------------------
+No hardware is currently assembled, so physical wiring has not been verified.
+The corrections in this file are documentation/order gates only. Do not treat
+the low-voltage map, simulator or software tests as proof of a safe physical
+build.
+
+The prices below are the visible item prices reported by the retailer pages
+before GST. GST is calculated at 18%. Shipping is not included because it is
+checkout/location dependent.
+
+
+1. BUY NOW / LOW-VOLTAGE BENCH PARTS
+-------------------------------------
+
+No.  Qty  Item / exact required specification
+     Unit price before GST       Line total before GST       Availability
+     Direct purchase link
+
+01   1    PZEM-004T-D-P PCB-only AC energy meter candidate.
+     ₹430.80                   ₹430.80                    5 shown
+     https://www.electronicscomp.com/peacefair-pzem-004t-d-p-pcb-onlyhot-ac-meter
+     ORDER GATE: Seller must confirm PZEM-004T v3.0, 10 A rating and
+     direct/shunt connection. Do NOT substitute a 100 A CT version.
+
+02   1    5 V 2-channel relay module, 30 A contacts, high/low trigger,
+          optocoupler-isolated.
+     ₹519.00                   ₹519.00                    6 shown
+     https://www.electronicscomp.com/2-channel-5v-30a-relay-module-supports-high-and-low-trigger-optocoupler
+
+03   1    ESP32 38-pin expansion/breakout board.
+     ₹152.40                   ₹152.40                    4 shown
+     https://www.electronicscomp.com/esp32-38pin-expansion-board
+     ORDER GATE: Confirm the socket spacing and pin numbering match the
+     user's ESP32-WROOM-32 38-pin development board.
+
+04   1    65-piece flexible breadboard jumper-wire set.
+     ₹103.00                   ₹103.00                    129 shown
+     https://www.electronicscomp.com/flexible-breadboard-jumper-wires-65-pieces-pack
+
+05   1    GL12 840-point solderless breadboard.
+     ₹47.00                    ₹47.00                     1023 shown
+     https://www.electronicscomp.com/gl12-840-points-solderless-breadboard
+
+06   1    ERD 5 V 2 A adapter with 1 metre micro-USB cable.
+      ₹195.00                   ₹195.00                    Stock not shown
+      https://sharvielectronics.com/product/erd-5v-2a-adapter-with-1-meter-micro-usb-cable/
+     ORDER GATE: Confirm that the ESP32 board has a micro-USB connector.
+      If the board uses USB-C, replace this cable/adapter choice with a
+      compatible 5 V 2 A supply and USB-C cable.
+
+      RUNTIME POWER INTERFACE GATE: The adapter/cable above is not a
+      USB-A-female-to-screw-terminal breakout. That breakout is required to
+      feed the final shield VIN/GND rail and is not included in this price
+      total. Do not substitute loose USB wires or Dupont jumpers on mains.
+
+07   1    8-channel bidirectional logic-level converter.
+      ₹68.00                    ₹68.00                     108 shown
+      https://www.electronicscomp.com/8-channel-bi-directional-logic-level-converter-module
+      Use this for the PZEM UART only after confirming the module's HV/LV
+      rails and pinout: HV=5 V, LV=3.3 V, common GND; PZEM TX→HV1→LV1→GPIO16
+      and GPIO17→LV2→HV2→PZEM RX. Do not wire an unverified PZEM TX output
+      directly to GPIO16. This converter is not for the relay input.
+
+08   1    100 kΩ resistor, 5-piece pack, for relay boot-state pull-down.
+     ₹2.00                     ₹2.00                      2139 shown
+     https://www.electronicscomp.com/100k-ohm-resistance
+
+
+2. PRICE CALCULATION
+--------------------
+
+Goods subtotal before GST:                  ₹1,517.20
+GST at 18%:                                  ₹273.10
+Goods subtotal including GST:               ₹1,790.30
+
+Budget ceiling:                             ₹2,500.00
+Remaining allowance for shipping/checkout:   ₹709.70
+
+The list is under ₹2,500 only if total shipping and any checkout surcharge
+remain at or below ₹709.70. Verify the final cart total before ordering.
+
+
+3. OPTIONAL UART-DIVIDER ALTERNATIVE
+------------------------------------
+
+Do not buy the level converter in item 07 if the PZEM TX output is measured
+and confirmed to be approximately 5 V and a resistor divider is preferred.
+Use two 1 kΩ packs to build the specified 1 kΩ/2 kΩ divider: one 1 kΩ
+resistor in series from PZEM TX to GPIO16, and two 1 kΩ resistors in series
+from GPIO16 to GND. Do not use an equal 1 kΩ/1 kΩ divider:
+
+09   2    1 kΩ resistor, 5-piece pack.
+     ₹2.00 per pack           ₹4.00 total before GST       6606 shown each
+     https://www.electronicscomp.com/1k-ohm-resistance
+
+With item 07 removed and item 09 added:
+    Goods subtotal before GST:              ₹1,453.20
+    Goods subtotal including GST:           ₹1,714.78
+    Remaining budget for shipping:          ₹785.22
+
+The resistor-divider option still requires correct voltage measurement and
+must not be treated as a substitute for verifying the selected PZEM module.
+If the measured TX is approximately 3.3 V but floating, use a 10 kΩ pull-up
+to 3.3 V; that pull-up is not included in the subtotal.
+
+
+4. REQUIRED MAINS-SAFETY ITEMS NOT INCLUDED IN THE PRICE TOTAL
+---------------------------------------------------------------
+
+The following are required before any 230 V connection, but no exact
+price-verified listing has been approved here:
+
+- Proper flame-retardant electrical enclosure.
+- Mains-rated inlet and switched output socket.
+- 5 A ceramic fuse and correctly rated fuse holder.
+- 1.0 mm² mains conductors and strain relief.
+- Protective-earth conductor, PE terminal and continuity hardware.
+- Correctly rated terminal blocks/connectors.
+- Upstream 30 mA RCBO/RCCB.
+- BIS-marked isolated 5 V 2 A supply and a USB-A-female-to-screw-terminal
+  breakout for the final low-voltage rail (not price-verified here).
+
+These items are not optional. Do not energize the PZEM, relay or socket from
+230 V until the mains wiring, earthing, insulation, enclosure and protection
+have been physically checked by a competent person. The software simulator
+and automated tests do not validate those physical safety properties.
+
+
+5. ORDER CHECKLIST
+------------------
+
+[ ] Confirm PZEM listing is v3.0, 10 A, direct/shunt, not 100 A CT.
+[ ] Confirm relay is 5 V, 2-channel, optocoupler-isolated, high/low trigger,
+    and rated at least 10 A for the intended switching arrangement.
+[ ] Confirm the 38-pin breakout fits the exact ESP32 board.
+[ ] Confirm the ESP32 USB connector is micro-USB before buying item 06.
+[ ] Confirm item 07 HV/LV rails, PZEM UART pinout and the measured TX voltage.
+[ ] Confirm the final runtime supply has the required USB-A-to-screw-terminal
+    breakout; the micro-USB cable is not a substitute.
+[ ] Confirm the relay board's H/L jumper, VCC/JD-VCC arrangement and 5 V input
+    current against its actual datasheet; the generic 30 A listing is not
+    sufficient proof of the locked relay module specification.
+[ ] Check current price, stock, GST and shipping at checkout.
+[ ] Keep all mains wiring disconnected during bench bring-up.
+[ ] Do not claim physical validation until the actual assembled hardware has
+    been inspected and tested safely.
+
+
+6. REJECTED / NOT APPROVED SUBSTITUTES
+---------------------------------------
+
+- 100 A CT PZEM listings from Techtonics or Sharvi: wrong sensing variant for
+  the 10 A direct/shunt target.
+- Robu generic 2-channel relay: contact rating is shown, but trigger
+  polarity and optocoupler/isolation details were not verified.
+- Robu SmartElex 2-channel relay: only 3 A contact rating was shown, below
+  the target.
+- ElectronicsComp 1-channel relay listing: not enough channels for the
+  2-channel target.
+
+
+7. FINAL LINK / PRICE CHECK
+---------------------------
+
+The eight main-list links and the one optional-resistor link were fetched and
+resolved on 2026-10-14. The visible prices and availability values in this
+file match the retailer pages at that check time. This is a listing snapshot,
+not a locked quotation; stock, tax treatment and shipping can change.
+
+- The PZEM page resolves and shows ₹430.80 before 18% GST with availability 5,
+  but still does not explicitly state v3.0, 10 A and direct/shunt. The seller
+  confirmation gate therefore remains mandatory.
+- The relay page resolves and explicitly shows 5 V, 2 channels, high/low
+  trigger, optocoupler isolation and 30 A load rating at ₹519 before GST.
+  That listing does not replace the required physical mains-safety review.
+- The Sharvi adapter page resolves and shows 5 V, 2 A, micro-USB and ₹195
+  before taxes; its product specification should still be checked against the
+  actual ESP32 connector before ordering.
+
+END OF FILE
