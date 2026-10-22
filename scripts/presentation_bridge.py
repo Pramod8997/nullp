@@ -21,11 +21,9 @@ from websockets.asyncio.server import ServerConnection, serve
 
 DEVICE_ID = "node_bench_agg"
 DEVICE_LABEL = "USB DEMO — synthetic laptop (PZEM not connected)"
-DEMO_CUTOFF_AFTER_SAMPLES = 5
 CLIENTS: set[ServerConnection] = set()
 SAMPLE = 0
 LAST_RELAY = "OFF"
-DEMO_CUTOFF_SENT = False
 
 
 def message(message_type: str, **payload: Any) -> str:
@@ -61,7 +59,7 @@ def demo_cutoff_event() -> str:
         pzem_connected=False,
         relay_action="NONE",
         message=(
-            "DEMO ONLY: synthetic overcurrent cutoff marker for presentation; "
+            "DEMO ONLY: SYNTHETIC OVERCURRENT CUTOFF marker for presentation; "
             "no PZEM measurement, relay command, or mains contact action was issued."
         ),
     )
@@ -98,6 +96,10 @@ async def websocket_handler(websocket: ServerConnection) -> None:
             message="USB presentation mode: synthetic telemetry; PZEM is not connected.",
         )
     )
+    # Make the demo repeatable: every dashboard audience sees detection first,
+    # then the clearly-labelled synthetic cutoff a few seconds later.
+    await asyncio.sleep(3)
+    await websocket.send(demo_cutoff_event())
     try:
         await websocket.wait_closed()
     finally:
@@ -111,7 +113,7 @@ async def heartbeat_loop() -> None:
 
 
 async def publish_sample(serial_line: str) -> None:
-    global SAMPLE, LAST_RELAY, DEMO_CUTOFF_SENT
+    global SAMPLE, LAST_RELAY
     SAMPLE += 1
     if "Relay=ON" in serial_line:
         LAST_RELAY = "ON"
@@ -143,26 +145,27 @@ async def publish_sample(serial_line: str) -> None:
             pzem_connected=False,
         )
     )
-    if not DEMO_CUTOFF_SENT and SAMPLE >= DEMO_CUTOFF_AFTER_SAMPLES:
-        DEMO_CUTOFF_SENT = True
-        await broadcast(demo_cutoff_event())
-
-
 async def serial_loop(port: str) -> None:
-    print(f"[BRIDGE] Opening ESP32 serial port {port} at 115200")
-    serial_port = serial.Serial(port, 115200, timeout=1)
-    try:
-        while True:
-            raw = await asyncio.to_thread(serial_port.readline)
-            if raw:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if line.startswith("[USB]"):
-                    print(line, flush=True)
-                    await publish_sample(line)
-            else:
-                await asyncio.sleep(0.05)
-    finally:
-        serial_port.close()
+    while True:
+        serial_port = None
+        try:
+            print(f"[BRIDGE] Opening ESP32 serial port {port} at 115200", flush=True)
+            serial_port = serial.Serial(port, 115200, timeout=1)
+            while True:
+                raw = await asyncio.to_thread(serial_port.readline)
+                if raw:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if line.startswith("[USB]"):
+                        print(line, flush=True)
+                        await publish_sample(line)
+                else:
+                    await asyncio.sleep(0.05)
+        except (serial.SerialException, PermissionError) as exc:
+            print(f"[BRIDGE] Serial temporarily unavailable: {exc}; retrying", flush=True)
+            await asyncio.sleep(2)
+        finally:
+            if serial_port is not None:
+                serial_port.close()
 
 
 async def offline_loop() -> None:
