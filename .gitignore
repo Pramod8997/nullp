@@ -5,10 +5,13 @@
 # ── Python & Virtual Environments ───────────────────────────────────────────
 venv/
 .venv/
+venv*/
+.venv*/
 env/
 ENV/
 env.bak/
 venv.bak/
+.python-version
 __pycache__/
 **/__pycache__/
 *.py[cod]
@@ -222,6 +225,14 @@ ChatGPT_Image*.jpg
 ChatGPT*.png
 Pasted image *.png
 CleanShot*.png
+Comp*.jpeg
+Comp*.jpg
+Comp*.png
+IMG_*.jpg
+IMG_*.jpeg
+IMG_*.png
+PXL_*.jpg
+PXL_*.jpeg
 
 # ── Environment & Secrets ───────────────────────────────────────────────────
 .env
@@ -275,6 +286,8 @@ brain/
 .agent/
 _agent/
 _agents/
+__agent__/
+**/__agent__/
 
 # ── Ephemeral Checkpoints, Scripts & Prompts ────────────────────────────────
 fix_*.py

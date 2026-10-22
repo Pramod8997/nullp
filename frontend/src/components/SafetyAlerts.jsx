@@ -20,6 +20,7 @@ const SafetyAlerts = ({ alerts = [], maxAlerts = 50 }) => {
     <div className="flex flex-col gap-3 max-h-[500px] overflow-y-auto pr-1">
       {alertList.map((alert) => {
         const level = (alert.level || alert.severity || 'WARNING').toUpperCase();
+        const isPresentationOnly = alert.presentation_only === true || alert.demo === true;
         const isCritical = level === 'CRITICAL' || level === 'SAFETY_CUTOFF';
         const isArcFault = level === 'ARC_FAULT' || (alert.message && alert.message.includes('ARC'));
         
@@ -64,7 +65,13 @@ const SafetyAlerts = ({ alerts = [], maxAlerts = 50 }) => {
                       ? 'bg-red-200/70 text-red-900 dark:bg-red-900/80 dark:text-red-200'
                       : 'bg-amber-200/70 text-amber-900 dark:bg-amber-900/80 dark:text-amber-200'
                   }`}>
-                    {isArcFault ? 'ARC FAULT DETECTED' : isCritical ? 'CRITICAL SAFETY CUTOFF' : 'WARNING'}
+                    {isPresentationOnly
+                      ? 'DEMO ONLY • SYNTHETIC CUTOFF'
+                      : isArcFault
+                      ? 'ARC FAULT DETECTED'
+                      : isCritical
+                      ? 'CRITICAL SAFETY CUTOFF'
+                      : 'WARNING'}
                   </span>
 
                   {deviceName && (

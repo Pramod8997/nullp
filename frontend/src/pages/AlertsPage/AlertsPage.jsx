@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import SafetyAlerts from '../../components/SafetyAlerts';
 import { Bell, ShieldAlert, ShieldCheck, AlertTriangle, Zap, CheckCircle2 } from 'lucide-react';
 
+const isPresentationOnly = (alert) => alert?.presentation_only === true || alert?.demo === true;
+
 const AlertsPage = ({ alerts = [] }) => {
   const [filter, setFilter] = useState('all');
 
@@ -9,6 +11,7 @@ const AlertsPage = ({ alerts = [] }) => {
     (a) => (a.level || a.severity || '').toUpperCase() === 'CRITICAL' || (a.message && a.message.includes('ARC'))
   ).length;
   const warningCount = alerts.length - criticalCount;
+  const hasPresentationDemo = alerts.some(isPresentationOnly);
 
   // Breaker status is derived from the live alert feed, not hardcoded:
   // a cutoff / overcurrent / arc-fault alert WITHIN THE LOCKOUT WINDOW
@@ -17,7 +20,7 @@ const AlertsPage = ({ alerts = [] }) => {
   // the relay can be re-energized, so a stale alert must not claim TRIPPED
   // forever. The alert id is Date.now()-based at append time, so it doubles
   // as the machine timestamp; the interval re-render lets the window expire.
-  const [nowMs, setNowMs] = useState(Date.now());
+  const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 5000);
     return () => clearInterval(id);
@@ -25,6 +28,7 @@ const AlertsPage = ({ alerts = [] }) => {
   const LOCKOUT_MS = 5 * 60 * 1000;
   const isTripped = alerts.some(
     (a) =>
+      !isPresentationOnly(a) &&
       (a?.type === 'SAFETY_CUTOFF' ||
         /OVERCURRENT|ARC[_ ]?FAULT|RELAY.*FORCED OFF|RELAY FORCED OFF/i.test(a?.message || '')) &&
       nowMs - (a?.id || 0) < LOCKOUT_MS
@@ -102,6 +106,8 @@ const AlertsPage = ({ alerts = [] }) => {
           className={`bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-2xl p-4 border shadow-sm flex items-center justify-between ${
             isTripped
               ? 'border-rose-300 dark:border-rose-800'
+              : hasPresentationDemo
+              ? 'border-amber-300 dark:border-amber-800'
               : 'border-gray-200/80 dark:border-gray-700/80'
           }`}
         >
@@ -111,25 +117,43 @@ const AlertsPage = ({ alerts = [] }) => {
               className={`text-lg font-bold mt-0.5 flex items-center gap-1.5 ${
                 isTripped
                   ? 'text-rose-600 dark:text-rose-400'
+                  : hasPresentationDemo
+                  ? 'text-amber-600 dark:text-amber-400'
                   : 'text-emerald-600 dark:text-emerald-400'
               }`}
             >
-              {isTripped ? <ShieldAlert size={16} /> : <CheckCircle2 size={16} />}
-              <span>{isTripped ? 'TRIPPED — relay open' : 'Armed & Nominal'}</span>
+              {isTripped ? (
+                <ShieldAlert size={16} />
+              ) : hasPresentationDemo ? (
+                <AlertTriangle size={16} />
+              ) : (
+                <CheckCircle2 size={16} />
+              )}
+              <span>
+                {isTripped
+                  ? 'TRIPPED — relay open'
+                  : hasPresentationDemo
+                  ? 'Demo event — no relay action'
+                  : 'Armed & Nominal'}
+              </span>
             </div>
           </div>
           <div
             className={`p-2.5 rounded-xl ${
-              isTripped ? 'bg-rose-500/10 text-rose-500' : 'bg-emerald-500/10 text-emerald-500'
+              isTripped
+                ? 'bg-rose-500/10 text-rose-500'
+                : hasPresentationDemo
+                ? 'bg-amber-500/10 text-amber-500'
+                : 'bg-emerald-500/10 text-emerald-500'
             }`}
           >
-            {isTripped ? <ShieldAlert size={20} /> : <ShieldCheck size={20} />}
+            {isTripped ? <ShieldAlert size={20} /> : hasPresentationDemo ? <AlertTriangle size={20} /> : <ShieldCheck size={20} />}
           </div>
         </div>
 
         <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-2xl p-4 border border-gray-200/80 dark:border-gray-700/80 shadow-sm flex items-center justify-between">
           <div>
-            <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Arc Fault Cutoffs</span>
+             <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Safety Cutoff Events</span>
             <div className="text-lg font-bold text-gray-900 dark:text-white font-mono mt-0.5">
               {criticalCount} Triggered
             </div>

@@ -82,22 +82,20 @@ const float POWER_FACTOR   = 1.0;                 // Reference only; PZEM report
 //  HARDWARE PINS & CONSTANTS
 // ═══════════════════════════════════════════════════════
 const int   RELAY_PIN      = 18;
-// NET polarity at the GPIO. Under HARDWARE_FINAL_SPEC.md D3' there are now ZERO
-// inversions in the chain: the relay module jumper is set to H (high-trigger)
-// and GPIO 18 drives the opto LED directly (~2.1 mA), so active-HIGH is the
-// literal reading. A 100 kOhm IN->GND pull-down holds the input at 0 V while
-// GPIO 18 is high-impedance during reset/boot, so OPEN is the only boot state.
+// This bench board is the photographed JD-VCC 2-channel module, not the
+// approved H/L-trigger module in the final mains specification. Its standard
+// input arrangement is active-LOW, so the documented JD-VCC fallback is used
+// for this USB-only bench presentation: logic VCC at 3.3 V, JD-VCC at 5 V,
+// and a 100 kOhm IN1->3.3 V pull-up. A meter check is still required before
+// treating the relay contacts as validated hardware.
 //
 // (The superseded D3 got to the same constant the long way round: an inverting
 // BSS138 feeding an active-LOW module input, two inversions cancelling. The
 // BSS138 is SOT-23 SMD and was deleted as unsolderable by hand -- B-10.)
 //
-// Setting this true energised the load at boot and made every safety cutoff
-// CLOSE the relay. See HARDWARE_FINAL_SPEC.md D4/D5 (B-7). Do not reintroduce.
-// Set true ONLY if the D5 purchase-contingency fallback was taken (module has
-// no H/L jumper -> run module VCC at 3.3 V, JD-VCC at 5 V, and move the 100 kOhm
-// to a pull-UP). Re-run bring-up Stage 2 and confirm OPEN-at-boot if you do.
-const bool  RELAY_ACTIVE_LOW = false;
+// This is the D5 purchase-contingency fallback for the photographed module.
+// Re-verify OPEN-at-boot and COM-NO behavior with a multimeter before any mains.
+const bool  RELAY_ACTIVE_LOW = true;
 const int   PZEM_RX_PIN    = 16;
 const int   PZEM_TX_PIN    = 17;
 const float VOLTAGE        = 230.0;    // Mains voltage (India: 230V) for reference
@@ -699,9 +697,28 @@ void loop() {
     // ── Publish Fast Power at 1Hz (plain float for NILM transient detection) ──
     if (millis() - lastMsgMs > 1000) {
         lastMsgMs = millis();
+        float voltage, current, pf;
+        bool relayState;
+        bool measurementState;
+        taskENTER_CRITICAL(&sharedMux);
+        voltage = sharedVoltage;
+        current = sharedCurrent;
+        pf = sharedPf;
+        relayState = relayClosed;
+        measurementState = measurementFresh;
+        taskEXIT_CRITICAL(&sharedMux);
+
         char payload[16];
         dtostrf(powerWatts, 6, 2, payload);
         client.publish(topicPower, payload);
+        if (measurementState) {
+            Serial.printf("[USB] V=%.1f V I=%.2f A P=%.1f W PF=%.2f Relay=%s\n",
+                          voltage, current, powerWatts, pf,
+                          relayState ? "ON" : "OFF");
+        } else {
+            Serial.printf("[USB] PZEM=INVALID Relay=%s\n",
+                          relayState ? "ON" : "OFF");
+        }
     }
 
     // ── Publish Rich Electrical Diagnostics at 0.1Hz (every 10s JSON) ──

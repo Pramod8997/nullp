@@ -92,6 +92,22 @@ test("CRITICAL alert has critical styling", () => {
     expect(alert.className).toMatch(/critical/i);
 });
 
+test("presentation-only cutoff is labelled and does not claim relay action", () => {
+    const alerts = [{
+        id: 3,
+        type: "SAFETY_CUTOFF",
+        severity: "critical",
+        device_id: "node_bench_agg",
+        presentation_only: true,
+        message: "DEMO ONLY: synthetic overcurrent cutoff marker",
+    }];
+    const { unmount } = render(<SafetyAlerts alerts={alerts} />);
+    expect(screen.getByText(/demo only.*synthetic cutoff/i)).toBeInTheDocument();
+    unmount();
+    render(<AlertsPage alerts={alerts} />);
+    expect(screen.getByTestId("breaker-status").textContent).toMatch(/demo event.*no relay action/i);
+});
+
 // TEST 9B-2: ARC_FAULT event uses distinct icon / color
 test("ARC_FAULT event is visually distinct", () => {
     const alerts = [{ id: 2, level: "ARC_FAULT", message: "Arc fault", device: "node_kettle" }];

@@ -33,6 +33,7 @@ function Dashboard() {
   const [latencyStats, setLatencyStats] = useState({ avg_ms: 0, max_ms: 0, p95_ms: 0 });
   const [latencyHistory, setLatencyHistory] = useState([]);
   const [isArcFaultActive, setIsArcFaultActive] = useState(false);
+  const [isDemoSafetyEvent, setIsDemoSafetyEvent] = useState(false);
   const [telemetry, setTelemetry] = useState({});
 
   const wsRef = useRef(null);
@@ -41,10 +42,14 @@ function Dashboard() {
   const arcFaultTimer = useRef(null);
 
   // ── Arc-Fault trigger helper ──
-  const triggerArcFault = useCallback(() => {
+  const triggerArcFault = useCallback((presentationOnly = false) => {
     setIsArcFaultActive(true);
+    setIsDemoSafetyEvent(presentationOnly);
     if (arcFaultTimer.current) clearTimeout(arcFaultTimer.current);
-    arcFaultTimer.current = setTimeout(() => setIsArcFaultActive(false), 4000);
+    arcFaultTimer.current = setTimeout(() => {
+      setIsArcFaultActive(false);
+      setIsDemoSafetyEvent(false);
+    }, 4000);
   }, []);
 
   // ── Message Router ──
@@ -57,7 +62,15 @@ function Dashboard() {
           if (data.devices) setDevices(data.devices);
           if (data.pmv_score) setPmvScore(data.pmv_score);
           if (data.phantom_loads) setPhantomData((prev) => ({ ...prev, loads: data.phantom_loads }));
-          if (data.pipeline_status) setPipelineStatus(data.pipeline_status);
+          if (data.pipeline_status) {
+            setPipelineStatus(data.pipeline_status);
+            if (data.pipeline_status === 'USB_PRESENTATION_MODE') {
+              setPowerHistory([]);
+              setTelemetry({});
+              setAnalytics({});
+              setPhantomData({ loads: {}, total: 0 });
+            }
+          }
           break;
 
         case 'heartbeat':
@@ -110,12 +123,20 @@ function Dashboard() {
           setDevices((prev) => ({
             ...prev,
             [data.device_id]: {
+              ...prev[data.device_id],
               power: data.power,
               state: data.state,
               classification: data.classification,
               confidence: data.confidence,
               pmv: data.pmv,
               last_seen: data.timestamp,
+              ...(data.label !== undefined ? { label: data.label } : {}),
+              ...(data.rated !== undefined ? { rated: data.rated } : {}),
+              ...(data.source !== undefined ? { source: data.source } : {}),
+              ...(data.presentation_only !== undefined
+                ? { presentation_only: data.presentation_only }
+                : {}),
+              ...(data.pzem_connected !== undefined ? { pzem_connected: data.pzem_connected } : {}),
             },
           }));
           if (data.pmv !== undefined) setPmvScore(data.pmv);
@@ -132,7 +153,8 @@ function Dashboard() {
           break;
 
         case 'safety_alert':
-        case 'SAFETY_CUTOFF':
+        case 'SAFETY_CUTOFF': {
+          const presentationOnly = data.presentation_only === true || data.demo === true;
           setAlerts((prev) =>
             [
               {
@@ -142,6 +164,7 @@ function Dashboard() {
                 device_id: data.device_id || '',
                 message: data.message,
                 timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+                presentation_only: presentationOnly,
               },
               ...prev,
             ].slice(0, 50)
@@ -152,9 +175,10 @@ function Dashboard() {
               data.message.includes('RoC') ||
               data.message.includes('OVERCURRENT'))
           ) {
-            triggerArcFault();
+            triggerArcFault(presentationOnly);
           }
           break;
+        }
 
         case 'SOFT_ANOMALY':
           setAlerts((prev) =>
@@ -187,7 +211,8 @@ function Dashboard() {
           setTwinEvents((prev) => [data, ...prev].slice(0, 30));
           break;
 
-        case 'SAFETY_WARNING':
+        case 'SAFETY_WARNING': {
+          const presentationOnly = data.presentation_only === true || data.demo === true;
           setAlerts((prev) =>
             [
               {
@@ -197,14 +222,16 @@ function Dashboard() {
                 device_id: data.device_id || '',
                 message: data.message,
                 timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+                presentation_only: presentationOnly,
               },
               ...prev,
             ].slice(0, 50)
           );
           if (data.message && (data.message.includes('ARC') || data.message.includes('RoC'))) {
-            triggerArcFault();
+            triggerArcFault(presentationOnly);
           }
           break;
+        }
 
         case 'PHANTOM_LOAD':
           setPhantomData({
@@ -367,6 +394,8 @@ function Dashboard() {
     return tab.replace('-', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   };
 
+  const isPresentationMode = pipelineStatus === 'USB_PRESENTATION_MODE';
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100 transition-colors duration-300 flex overflow-hidden font-sans antialiased selection:bg-blue-500 selection:text-white">
       {/* ── Arc-Fault Emergency Fullscreen Overlay ── */}
@@ -381,14 +410,16 @@ function Dashboard() {
             </div>
             <div>
               <h2 className="text-xl font-black uppercase tracking-wider">
-                 EDGE SAFETY EVENT
+                 {isDemoSafetyEvent ? 'DEMO ONLY — SYNTHETIC SAFETY EVENT' : 'EDGE SAFETY EVENT'}
               </h2>
               <p className="text-sm font-semibold text-rose-100 mt-1">
-                 PROTOTYPE CUTOFF REPORTED
+                 {isDemoSafetyEvent ? 'PRESENTATION CUTOFF MARKER' : 'PROTOTYPE CUTOFF REPORTED'}
               </p>
             </div>
             <p className="text-xs text-rose-200 bg-rose-900/50 p-3 rounded-xl border border-rose-500/40">
-               Edge software reported a safety event. Relay contact state is unconfirmed; this prototype is not certified AFCI or overcurrent protection.
+               {isDemoSafetyEvent
+                 ? 'Synthetic presentation event only. No real PZEM measurement, relay command, or mains contact action was issued.'
+                 : 'Edge software reported a safety event. Relay contact state is unconfirmed; this prototype is not certified AFCI or overcurrent protection.'}
             </p>
           </div>
         </div>
@@ -420,7 +451,9 @@ function Dashboard() {
             {/* Connection Status Badge */}
             <div
               className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold border ${
-                connectionStatus === 'connected'
+                isPresentationMode
+                  ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400 border-blue-200 dark:border-blue-800'
+                  : connectionStatus === 'connected'
                   ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800'
                   : connectionStatus === 'reconnecting'
                   ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400 border-amber-200 dark:border-amber-800'
@@ -429,7 +462,9 @@ function Dashboard() {
             >
               <span
                 className={`h-2 w-2 rounded-full ${
-                  connectionStatus === 'connected'
+                  isPresentationMode
+                    ? 'bg-blue-500 animate-pulse'
+                    : connectionStatus === 'connected'
                     ? 'bg-emerald-500 animate-ping'
                     : connectionStatus === 'reconnecting'
                     ? 'bg-amber-500 animate-pulse'
@@ -437,7 +472,9 @@ function Dashboard() {
                 }`}
               />
               <span className="hidden sm:inline">
-                {connectionStatus === 'connected'
+                {isPresentationMode
+                  ? 'USB DEMO STREAM'
+                  : connectionStatus === 'connected'
                   ? 'LIVE 1Hz Stream'
                   : connectionStatus === 'reconnecting'
                   ? 'Reconnecting...'
