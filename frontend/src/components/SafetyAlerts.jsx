@@ -20,7 +20,9 @@ const SafetyAlerts = ({ alerts = [], maxAlerts = 50 }) => {
     <div className="flex flex-col gap-3 max-h-[500px] overflow-y-auto pr-1">
       {alertList.map((alert) => {
         const level = (alert.level || alert.severity || 'WARNING').toUpperCase();
-        const isPresentationOnly = alert.presentation_only === true || alert.demo === true;
+        const isGeneratedReplay = alert.generated === true || alert.source === 'generated_sample_replay' || alert.replay?.generated === true;
+        const isRecordedReplay = !isGeneratedReplay && (alert.recording_replay === true || alert.source === 'recorded_session_replay');
+        const isPresentationOnly = isGeneratedReplay || isRecordedReplay || alert.presentation_only === true || alert.demo === true;
         const isCritical = level === 'CRITICAL' || level === 'SAFETY_CUTOFF';
         const isArcFault = level === 'ARC_FAULT' || (alert.message && alert.message.includes('ARC'));
         
@@ -65,8 +67,12 @@ const SafetyAlerts = ({ alerts = [], maxAlerts = 50 }) => {
                       ? 'bg-red-200/70 text-red-900 dark:bg-red-900/80 dark:text-red-200'
                       : 'bg-amber-200/70 text-amber-900 dark:bg-amber-900/80 dark:text-amber-200'
                   }`}>
-                    {isPresentationOnly
-                      ? 'DEMO ONLY • SYNTHETIC CUTOFF'
+                    {isGeneratedReplay
+                      ? 'SAMPLE-DATA REPLAY • GENERATED EVENT'
+                      : isRecordedReplay
+                      ? isCritical ? 'RECORDED REPLAY • CUTOFF EVENT' : 'RECORDED REPLAY • EVENT'
+                      : isPresentationOnly
+                      ? 'COLLECTION NOTICE'
                       : isArcFault
                       ? 'ARC FAULT DETECTED'
                       : isCritical
@@ -93,6 +99,11 @@ const SafetyAlerts = ({ alerts = [], maxAlerts = 50 }) => {
               <p className="text-sm font-medium leading-relaxed break-words">
                 {alert.message}
               </p>
+              {isPresentationOnly && (
+                <p className="text-xs mt-1">
+                  {isGeneratedReplay ? 'Generated samples · No hardware recording · No relay action' : 'No relay action'}
+                </p>
+              )}
             </div>
           </div>
         );

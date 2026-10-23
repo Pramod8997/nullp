@@ -13,6 +13,7 @@ const AnalyticsPage = ({
   latencyStats,
   latencyHistory,
 }) => {
+  const isGeneratedReplay = analytics?.source === 'generated_sample_replay' || analytics?.generated === true;
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -25,7 +26,9 @@ const AnalyticsPage = ({
             Energy Analytics & Pipeline Telemetry
           </h1>
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            Deep-dive consumption patterns, load shapes, and system inference latency.
+            {isGeneratedReplay
+              ? 'Generated sample replay · scenario consumption, baseline, and pipeline telemetry.'
+              : 'Deep-dive consumption patterns, load shapes, and system inference latency.'}
           </p>
         </div>
       </div>
@@ -38,7 +41,7 @@ const AnalyticsPage = ({
             <div className="flex items-center gap-2">
               <Zap size={18} className="text-blue-500" />
               <h2 className="text-sm font-bold text-gray-900 dark:text-white uppercase tracking-wider">
-                Real-Time Power Monitor
+                {isGeneratedReplay ? 'Replay Scenario Power Monitor' : 'Real-Time Power Monitor'}
               </h2>
             </div>
             <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800">

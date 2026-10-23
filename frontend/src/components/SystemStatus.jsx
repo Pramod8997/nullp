@@ -24,12 +24,17 @@ import { useTheme } from '../contexts/ThemeContext';
 
 const API_BASE = `http://${window.location.hostname}:8000`;
 
+const finiteMetric = (value) => (
+  (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+  && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null
+);
+
 const LatencyTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
     <div className="bg-gray-950/95 dark:bg-gray-900/95 backdrop-blur-md p-2.5 rounded-xl border border-gray-800 shadow-xl text-xs z-50">
       <p className="text-gray-400 font-mono mb-1.5">{label}</p>
-      {payload.map((entry, i) => (
+      {payload.filter((entry) => finiteMetric(entry.value) !== null).map((entry, i) => (
         <p key={i} className="font-mono font-semibold" style={{ color: entry.color }}>
           {entry.dataKey}: {Number(entry.value).toFixed(1)} ms
         </p>
@@ -49,11 +54,15 @@ const SystemStatus = ({
   wsConnected,
 }) => {
   const { isDark } = useTheme();
+  const isGeneratedReplay = analytics?.source === 'generated_sample_replay' || analytics?.generated === true;
+  const totalKwh = finiteMetric(analytics?.total_kwh);
+  const estimatedCost = finiteMetric(analytics?.estimated_cost_inr);
+  const tariff = finiteMetric(analytics?.tariff_inr_per_kwh);
 
   const isWsConnected = wsConnected !== undefined ? wsConnected : connectionStatus === 'connected';
   const isWsReconnecting = connectionStatus === 'reconnecting';
 
-  const lat =
+  const reportedLatency =
     latency ||
     (latencyStats
       ? {
@@ -63,8 +72,20 @@ const SystemStatus = ({
         }
       : null);
 
-  const isDanger = lat && lat.p95 !== undefined && lat.p95 > 200;
-  const latencyClass = isDanger ? 'danger red over-sla' : 'ok green within-sla';
+  const normalizedLatency = {
+    avg: finiteMetric(reportedLatency?.avg),
+    p95: finiteMetric(reportedLatency?.p95),
+    max: finiteMetric(reportedLatency?.max),
+  };
+  // Generated samples exercise the UI, not the hardware inference path.
+  const lat = !isGeneratedReplay && Object.values(normalizedLatency).some((value) => value !== null) ? normalizedLatency : null;
+  const hasSla = lat?.p95 != null;
+  const isDanger = hasSla && lat.p95 > 200;
+  const latencyClass = hasSla ? (isDanger ? 'danger red over-sla' : 'ok green within-sla') : 'unavailable';
+  const validLatencyHistory = (!isGeneratedReplay && Array.isArray(latencyHistory) ? latencyHistory : [])
+    .filter((row) => row && row.time != null)
+    .map((row) => ({ ...row, avg: finiteMetric(row.avg), p95: finiteMetric(row.p95), max: finiteMetric(row.max) }))
+    .filter((row) => row.avg !== null || row.p95 !== null || row.max !== null);
 
   const handleExportCSV = () => {
     window.open(`${API_BASE}/api/export-csv`, '_blank');
@@ -82,7 +103,9 @@ const SystemStatus = ({
           </div>
           <div>
             <h2 className="text-base font-bold text-gray-900 dark:text-white">System Telemetry & Health</h2>
-            <p className="text-xs text-gray-500 dark:text-gray-400">Real-time pipeline metrics and latency SLAs</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {isGeneratedReplay ? 'Generated sample replay · pipeline status, not hardware validation' : 'Real-time pipeline metrics and latency SLAs'}
+            </p>
           </div>
         </div>
       </div>
@@ -117,14 +140,14 @@ const SystemStatus = ({
         <div className="flex items-center justify-between p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/50 border border-gray-200/60 dark:border-gray-700/60">
           <span className="flex items-center gap-2 text-xs font-medium text-gray-600 dark:text-gray-300">
             <Database size={16} className="text-blue-500" />
-            NILM Pipeline
+            {isGeneratedReplay ? 'Scenario Replay' : 'NILM Pipeline'}
           </span>
           <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold font-mono ${
             pipelineStatus === 'connected'
               ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
               : 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
           }`}>
-            {pipelineStatus?.toUpperCase() || 'ONLINE'}
+            {isGeneratedReplay ? 'REPLAY' : (pipelineStatus?.toUpperCase() || 'ONLINE')}
           </span>
         </div>
 
@@ -143,24 +166,35 @@ const SystemStatus = ({
       </div>
 
       {/* Analytics row if present */}
-      {analytics?.total_kwh !== undefined && (
+      {(isGeneratedReplay || analytics?.total_kwh !== undefined || analytics?.estimated_cost_inr !== undefined) && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/40 border border-gray-200/60 dark:border-gray-700/60">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">Accumulated Ingestion</span>
+            <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+              {isGeneratedReplay ? 'Scenario Consumption' : 'Accumulated Ingestion'}
+            </span>
             <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
-              {analytics.total_kwh.toFixed(3)} kWh
+              {totalKwh !== null ? `${totalKwh.toFixed(3)} kWh` : 'Unavailable'}
             </span>
           </div>
-          {analytics.estimated_cost_inr !== undefined && (
+          {(isGeneratedReplay || analytics?.estimated_cost_inr !== undefined) && (
             <div className="flex items-center justify-between">
               <span className="text-xs text-gray-500 dark:text-gray-400 font-medium flex items-center gap-1">
-                <DollarSign size={12} /> Projected Cost (INR tariff)
+                <DollarSign size={12} />
+                {isGeneratedReplay ? 'Scenario Cost' : 'Projected Cost (INR tariff)'}
+                {isGeneratedReplay && tariff !== null && <span>· Demo tariff ₹{tariff.toFixed(2)}/kWh</span>}
               </span>
               <span className="text-xs font-mono font-bold text-amber-600 dark:text-amber-400">
-                ₹{analytics.estimated_cost_inr.toFixed(2)}
+                {estimatedCost !== null ? `₹${estimatedCost.toFixed(2)}` : 'Unavailable'}
               </span>
             </div>
           )}
+        </div>
+      )}
+
+      {isGeneratedReplay && (
+        <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/40 border border-gray-200/60 dark:border-gray-700/60 text-xs">
+          <span className="text-gray-500 dark:text-gray-400">ML inference accuracy & latency</span>
+          <span className="font-medium text-gray-600 dark:text-gray-300">Not measured in replay</span>
         </div>
       )}
 
@@ -171,7 +205,9 @@ const SystemStatus = ({
           className={`latency-panel ${latencyClass} p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
             isDanger
               ? 'bg-rose-50 dark:bg-rose-950/30 border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200'
-              : 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+              : hasSla
+                ? 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+                : 'bg-gray-50 dark:bg-gray-800/40 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300'
           }`}
         >
           <div className="flex items-center gap-2.5">
@@ -180,7 +216,9 @@ const SystemStatus = ({
             </div>
             <div>
               <div className="text-xs font-bold uppercase tracking-wider">
-                Pipeline Ingestion SLA ({isDanger ? 'BREACHED > 200ms' : 'HEALTHY < 200ms'})
+                {hasSla
+                  ? `Pipeline Ingestion SLA (${isDanger ? 'BREACHED > 200ms' : 'HEALTHY ≤ 200ms'})`
+                  : 'Pipeline Latency · SLA unavailable'}
               </div>
               <p className="text-xs opacity-80">Round-trip ESP32 to WebSocket inference latency</p>
             </div>
@@ -189,14 +227,14 @@ const SystemStatus = ({
           <div className="flex items-baseline gap-2 font-mono">
             <span className="text-xs">Avg / P95:</span>
             <span className="text-lg font-black">
-              {lat.avg?.toFixed ? lat.avg.toFixed(1) : lat.avg}ms / {lat.p95?.toFixed ? lat.p95.toFixed(1) : lat.p95}ms
+              {lat.avg !== null ? `${lat.avg.toFixed(1)}ms` : 'Unavailable'} / {lat.p95 !== null ? `${lat.p95.toFixed(1)}ms` : 'Unavailable'}
             </span>
           </div>
         </div>
       )}
 
       {/* Latency Trend History Chart */}
-      {latencyHistory && latencyHistory.length > 1 && (
+      {validLatencyHistory.length > 1 && (
         <div className="p-4 rounded-xl bg-gray-50 dark:bg-gray-800/40 border border-gray-200/60 dark:border-gray-700/60 space-y-2">
           <div className="flex items-center justify-between text-xs font-bold text-gray-600 dark:text-gray-300">
             <span className="flex items-center gap-1.5">
@@ -207,7 +245,7 @@ const SystemStatus = ({
           </div>
           <div className="w-full h-36">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={latencyHistory} margin={{ top: 4, right: 10, bottom: 4, left: -10 }}>
+              <LineChart data={validLatencyHistory} margin={{ top: 4, right: 10, bottom: 4, left: -10 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={gridColor} vertical={false} />
                 <XAxis dataKey="time" stroke={axisColor} tick={{ fill: axisColor, fontSize: 9 }} tickMargin={4} minTickGap={35} />
                 <YAxis stroke={axisColor} tick={{ fill: axisColor, fontSize: 9 }} unit="ms" domain={[0, 'auto']} width={35} />

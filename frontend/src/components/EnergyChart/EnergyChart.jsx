@@ -11,12 +11,17 @@ import {
 import { useTheme } from '../../contexts/ThemeContext';
 import { BarChart3 } from 'lucide-react';
 
+const finiteEnergy = (value) => (
+  (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+  && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null
+);
+
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
     <div className="bg-gray-950/95 dark:bg-gray-900/95 backdrop-blur-md p-3 rounded-xl border border-gray-800 shadow-2xl text-xs z-50">
       <p className="text-gray-400 font-mono mb-2 pb-1 border-b border-gray-800">{label}</p>
-      {payload.map((entry, i) => (
+      {payload.filter((entry) => finiteEnergy(entry.value) !== null).map((entry, i) => (
         <p key={i} className="font-mono font-semibold flex items-center justify-between gap-3" style={{ color: entry.color }}>
           <span>{entry.name}:</span>
           <span>{Number(entry.value).toFixed(2)} kWh</span>
@@ -28,12 +33,19 @@ const CustomTooltip = ({ active, payload, label }) => {
 
 const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
   const { isDark } = useTheme();
+  const isGeneratedReplay = analytics?.source === 'generated_sample_replay' || analytics?.generated === true;
 
   const chartData = useMemo(
-    () => (Array.isArray(analytics?.energy_history) ? analytics.energy_history : []),
+    () => (Array.isArray(analytics?.energy_history) ? analytics.energy_history : [])
+      .filter((row) => row && (
+        (typeof row.time === 'string' && row.time.trim() !== '')
+        || (typeof row.time === 'number' && Number.isFinite(row.time))
+      ))
+      .map((row) => ({ time: row.time, yesterday: finiteEnergy(row.yesterday), today: finiteEnergy(row.today) }))
+      .filter((row) => row.yesterday !== null || row.today !== null),
     [analytics]
   );
-  const hasMeasuredHistory = chartData.length > 0;
+  const hasHistory = chartData.length > 0;
 
   const gridColor = isDark ? '#1f2937' : '#f3f4f6';
   const axisColor = isDark ? '#6b7280' : '#9ca3af';
@@ -48,25 +60,27 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
           </div>
           <div>
             <h3 className="text-sm font-bold text-gray-900 dark:text-white uppercase tracking-wider">
-              Energy Consumption (kWh)
+              {isGeneratedReplay ? 'Replay Scenario Energy (kWh)' : 'Energy Consumption (kWh)'}
             </h3>
-             <p className="text-xs text-gray-500 dark:text-gray-400">Measured backend history</p>
+             <p className="text-xs text-gray-500 dark:text-gray-400">
+               {isGeneratedReplay ? 'Generated sample replay · scenario energy and baseline' : 'Measured backend history'}
+             </p>
            </div>
          </div>
 
        </div>
 
-       {hasMeasuredHistory ? (
+       {hasHistory ? (
          <>
            {/* Legend */}
            <div className="flex items-center justify-end gap-4 text-xs font-medium py-2">
              <span className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
                <span className="h-2.5 w-2.5 rounded-sm bg-indigo-500 opacity-60" />
-               Previous
+                {isGeneratedReplay ? 'Scenario baseline' : 'Previous'}
              </span>
              <span className="flex items-center gap-1.5 text-gray-900 dark:text-gray-200">
                <span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />
-               Current
+                {isGeneratedReplay ? 'Scenario' : 'Current'}
              </span>
            </div>
 
@@ -94,13 +108,13 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
               fill="#6366f1"
               radius={[3, 3, 0, 0]}
               opacity={0.4}
-              name="Previous"
+              name={isGeneratedReplay ? 'Scenario baseline' : 'Previous'}
             />
             <Bar
               dataKey="today"
               fill="#10b981"
               radius={[3, 3, 0, 0]}
-              name="Current"
+              name={isGeneratedReplay ? 'Scenario' : 'Current'}
             />
                </BarChart>
              </ResponsiveContainer>
@@ -108,7 +122,7 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
          </>
        ) : (
          <div className="flex min-h-[240px] items-center justify-center text-center text-sm text-gray-500 dark:text-gray-400">
-           No measured energy history available.
+           {isGeneratedReplay ? 'No replay scenario energy history available.' : 'No measured energy history available.'}
          </div>
        )}
     </div>

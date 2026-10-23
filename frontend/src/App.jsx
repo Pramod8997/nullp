@@ -8,10 +8,25 @@ import DigitalTwinPage from './pages/DigitalTwinPage/DigitalTwinPage';
 import SchedulePage from './pages/SchedulePage/SchedulePage';
 import AlertsPage from './pages/AlertsPage/AlertsPage';
 import SettingsPage from './pages/SettingsPage/SettingsPage';
-import { Sun, Moon, Zap } from 'lucide-react';
+import { Sun, Moon } from 'lucide-react';
 
 const WS_URL = `ws://${window.location.hostname}:8000/ws`;
 const MAX_RECONNECT_DELAY = 10000;
+
+function replayMetadata(data) {
+  const metadata = Object.fromEntries(
+    ['source', 'generated', 'presentation_only', 'recording_replay', 'pzem_connected', 'replay', 'demo']
+      .filter((key) => data[key] !== undefined)
+      .map((key) => [key, data[key]])
+  );
+  if (data.pipeline_status === 'SAMPLE_DATA_REPLAY' || data.status === 'SAMPLE_DATA_REPLAY' ||
+      metadata.source === 'generated_sample_replay' || metadata.generated === true || metadata.replay?.generated === true) {
+    Object.assign(metadata, { generated: true, presentation_only: true, recording_replay: false, pzem_connected: false });
+  } else if (data.pipeline_status === 'RECORDED_DATA_REPLAY' || data.status === 'RECORDED_DATA_REPLAY') {
+    Object.assign(metadata, { recording_replay: true, presentation_only: true });
+  }
+  return metadata;
+}
 
 function Dashboard() {
   const { toggleTheme, isDark } = useTheme();
@@ -32,49 +47,48 @@ function Dashboard() {
   const [pipelineStatus, setPipelineStatus] = useState('initializing');
   const [latencyStats, setLatencyStats] = useState({ avg_ms: 0, max_ms: 0, p95_ms: 0 });
   const [latencyHistory, setLatencyHistory] = useState([]);
-  const [isArcFaultActive, setIsArcFaultActive] = useState(false);
-  const [isDemoSafetyEvent, setIsDemoSafetyEvent] = useState(false);
   const [telemetry, setTelemetry] = useState({});
+  const [sessionMetadata, setSessionMetadata] = useState({});
 
+  const sessionMetadataRef = useRef({});
   const wsRef = useRef(null);
   const reconnectDelay = useRef(1000);
   const reconnectTimer = useRef(null);
-  const arcFaultTimer = useRef(null);
-
-  // ── Arc-Fault trigger helper ──
-  const triggerArcFault = useCallback((presentationOnly = false) => {
-    setIsArcFaultActive(true);
-    setIsDemoSafetyEvent(presentationOnly);
-    if (arcFaultTimer.current) clearTimeout(arcFaultTimer.current);
-    arcFaultTimer.current = setTimeout(() => {
-      setIsArcFaultActive(false);
-      setIsDemoSafetyEvent(false);
-    }, 4000);
-  }, []);
-
   // ── Message Router ──
   const handleMessage = useCallback(
     (data) => {
       const { type } = data;
+      const metadata = replayMetadata({ ...sessionMetadataRef.current, ...replayMetadata(data) });
 
       switch (type) {
-        case 'init_state':
-          if (data.devices) setDevices(data.devices);
-          if (data.pmv_score) setPmvScore(data.pmv_score);
-          if (data.phantom_loads) setPhantomData((prev) => ({ ...prev, loads: data.phantom_loads }));
-          if (data.pipeline_status) {
-            setPipelineStatus(data.pipeline_status);
-            if (data.pipeline_status === 'USB_PRESENTATION_MODE') {
-              setPowerHistory([]);
-              setTelemetry({});
-              setAnalytics({});
-              setPhantomData({ loads: {}, total: 0 });
-            }
+        case 'init_state': {
+          const summary = data.analytics?.summary || data.analytics;
+          const initialMetadata = replayMetadata({ ...summary, ...data });
+          sessionMetadataRef.current = initialMetadata;
+          setSessionMetadata(initialMetadata);
+          if (data.devices) {
+            setDevices(Object.fromEntries(Object.entries(data.devices).map(([id, device]) => [
+              id, { ...initialMetadata, ...device, ...replayMetadata({ ...initialMetadata, ...device }) },
+            ])));
           }
+          if (data.pmv_score !== undefined) setPmvScore(data.pmv_score);
+          const presentationMode = initialMetadata.presentation_only || ['USB_PRESENTATION_MODE', 'RECORDED_DATA_REPLAY', 'SAMPLE_DATA_REPLAY'].includes(data.pipeline_status);
+          if (Array.isArray(data.power_history)) setPowerHistory(data.power_history.slice(-120));
+          else if (presentationMode) setPowerHistory([]);
+          if (summary) setAnalytics({ ...summary, ...initialMetadata });
+          else if (presentationMode) setAnalytics({ ...initialMetadata });
+          if (data.telemetry) setTelemetry(data.telemetry);
+          else if (presentationMode) setTelemetry({});
+          if (data.phantom_loads) setPhantomData((prev) => ({ ...prev, loads: data.phantom_loads }));
+          else if (presentationMode) setPhantomData({ loads: {}, total: 0 });
+          if (data.pipeline_status) setPipelineStatus(data.pipeline_status);
           break;
+        }
 
         case 'heartbeat':
           setPipelineStatus(data.status || 'connected');
+          sessionMetadataRef.current = metadata;
+          setSessionMetadata(metadata);
           break;
 
         case 'power_reading':
@@ -93,6 +107,7 @@ function Dashboard() {
             ...prev,
             [data.device_id]: {
               ...prev[data.device_id],
+              ...metadata,
               power: data.power,
             },
           }));
@@ -112,7 +127,7 @@ function Dashboard() {
           setDevices((prev) => {
             const updated = { ...prev };
             Object.entries(readings).forEach(([devId, watts]) => {
-              updated[devId] = { ...updated[devId], power: watts };
+              updated[devId] = { ...updated[devId], ...metadata, power: watts };
             });
             return updated;
           });
@@ -124,6 +139,7 @@ function Dashboard() {
             ...prev,
             [data.device_id]: {
               ...prev[data.device_id],
+              ...metadata,
               power: data.power,
               state: data.state,
               classification: data.classification,
@@ -132,11 +148,6 @@ function Dashboard() {
               last_seen: data.timestamp,
               ...(data.label !== undefined ? { label: data.label } : {}),
               ...(data.rated !== undefined ? { rated: data.rated } : {}),
-              ...(data.source !== undefined ? { source: data.source } : {}),
-              ...(data.presentation_only !== undefined
-                ? { presentation_only: data.presentation_only }
-                : {}),
-              ...(data.pzem_connected !== undefined ? { pzem_connected: data.pzem_connected } : {}),
             },
           }));
           if (data.pmv !== undefined) setPmvScore(data.pmv);
@@ -154,29 +165,21 @@ function Dashboard() {
 
         case 'safety_alert':
         case 'SAFETY_CUTOFF': {
-          const presentationOnly = data.presentation_only === true || data.demo === true;
           setAlerts((prev) =>
             [
               {
+                ...data,
+                ...metadata,
                 id: Date.now() + Math.random(),
                 type: data.type,
                 severity: data.severity || 'critical',
                 device_id: data.device_id || '',
                 message: data.message,
                 timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
-                presentation_only: presentationOnly,
               },
               ...prev,
             ].slice(0, 50)
           );
-          if (
-            data.message &&
-            (data.message.includes('ARC') ||
-              data.message.includes('RoC') ||
-              data.message.includes('OVERCURRENT'))
-          ) {
-            triggerArcFault(presentationOnly);
-          }
           break;
         }
 
@@ -184,6 +187,8 @@ function Dashboard() {
           setAlerts((prev) =>
             [
               {
+                ...data,
+                ...metadata,
                 id: Date.now() + Math.random(),
                 type: data.type,
                 severity: 'warning',
@@ -212,24 +217,21 @@ function Dashboard() {
           break;
 
         case 'SAFETY_WARNING': {
-          const presentationOnly = data.presentation_only === true || data.demo === true;
           setAlerts((prev) =>
             [
               {
+                ...data,
+                ...metadata,
                 id: Date.now() + Math.random(),
                 type: data.type,
                 severity: 'warning',
                 device_id: data.device_id || '',
                 message: data.message,
                 timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
-                presentation_only: presentationOnly,
               },
               ...prev,
             ].slice(0, 50)
           );
-          if (data.message && (data.message.includes('ARC') || data.message.includes('RoC'))) {
-            triggerArcFault(presentationOnly);
-          }
           break;
         }
 
@@ -241,9 +243,13 @@ function Dashboard() {
           });
           break;
 
-        case 'ANALYTICS_UPDATE':
-          setAnalytics(data.summary || {});
+        case 'ANALYTICS_UPDATE': {
+          const updatedMetadata = replayMetadata({ ...metadata, ...replayMetadata(data.summary || {}) });
+          sessionMetadataRef.current = updatedMetadata;
+          setSessionMetadata(updatedMetadata);
+          setAnalytics((prev) => ({ ...prev, ...data.summary, ...updatedMetadata }));
           break;
+        }
 
         case 'PMV_UPDATE':
           setPmvScore(data.pmv || 0);
@@ -278,7 +284,7 @@ function Dashboard() {
           break;
       }
     },
-    [triggerArcFault]
+    []
   );
 
   // ── Connection forward declaration reference ──
@@ -334,7 +340,6 @@ function Dashboard() {
     connect();
     return () => {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      if (arcFaultTimer.current) clearTimeout(arcFaultTimer.current);
       if (wsRef.current) wsRef.current.close();
     };
   }, [connect]);
@@ -378,7 +383,7 @@ function Dashboard() {
         return <SchedulePage />;
 
       case 'alerts':
-        return <AlertsPage alerts={alerts} />;
+        return <AlertsPage alerts={alerts} replayContext={sessionMetadata} />;
 
       case 'settings':
         return <SettingsPage />;
@@ -394,37 +399,14 @@ function Dashboard() {
     return tab.replace('-', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   };
 
-  const isPresentationMode = pipelineStatus === 'USB_PRESENTATION_MODE';
+  const isSampleReplay = pipelineStatus === 'SAMPLE_DATA_REPLAY' || sessionMetadata.generated === true;
+  const isReplayMode = !isSampleReplay && (pipelineStatus === 'RECORDED_DATA_REPLAY' || sessionMetadata.recording_replay === true);
+  const isUsbCollectionMode = pipelineStatus === 'USB_COLLECTION_MODE';
+  const isPresentationMode = pipelineStatus === 'USB_PRESENTATION_MODE' || isReplayMode || isSampleReplay || isUsbCollectionMode;
+  const replay = sessionMetadata.replay;
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100 transition-colors duration-300 flex overflow-hidden font-sans antialiased selection:bg-blue-500 selection:text-white">
-      {/* ── Arc-Fault Emergency Fullscreen Overlay ── */}
-      {isArcFaultActive && (
-        <div
-          id="arc-fault-overlay"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-rose-950/80 backdrop-blur-md animate-pulse p-4"
-        >
-          <div className="bg-gradient-to-br from-rose-600 to-red-700 text-white rounded-3xl p-8 max-w-lg w-full shadow-2xl border-2 border-rose-400 flex flex-col items-center text-center gap-4">
-            <div className="p-4 rounded-full bg-white/20 text-white animate-bounce">
-              <Zap size={48} className="fill-current" />
-            </div>
-            <div>
-              <h2 className="text-xl font-black uppercase tracking-wider">
-                 {isDemoSafetyEvent ? 'DEMO ONLY — SYNTHETIC SAFETY EVENT' : 'EDGE SAFETY EVENT'}
-              </h2>
-              <p className="text-sm font-semibold text-rose-100 mt-1">
-                 {isDemoSafetyEvent ? 'PRESENTATION CUTOFF MARKER' : 'PROTOTYPE CUTOFF REPORTED'}
-              </p>
-            </div>
-            <p className="text-xs text-rose-200 bg-rose-900/50 p-3 rounded-xl border border-rose-500/40">
-               {isDemoSafetyEvent
-                 ? 'Synthetic presentation event only. No real PZEM measurement, relay command, or mains contact action was issued.'
-                 : 'Edge software reported a safety event. Relay contact state is unconfirmed; this prototype is not certified AFCI or overcurrent protection.'}
-            </p>
-          </div>
-        </div>
-      )}
-
       {/* ── Sidebar Navigation ── */}
       <Sidebar
         activeTab={activeTab}
@@ -451,7 +433,7 @@ function Dashboard() {
             {/* Connection Status Badge */}
             <div
               className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold border ${
-                isPresentationMode
+                connectionStatus === 'connected' && isPresentationMode
                   ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400 border-blue-200 dark:border-blue-800'
                   : connectionStatus === 'connected'
                   ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800'
@@ -462,7 +444,7 @@ function Dashboard() {
             >
               <span
                 className={`h-2 w-2 rounded-full ${
-                  isPresentationMode
+                  connectionStatus === 'connected' && isPresentationMode
                     ? 'bg-blue-500 animate-pulse'
                     : connectionStatus === 'connected'
                     ? 'bg-emerald-500 animate-ping'
@@ -471,14 +453,20 @@ function Dashboard() {
                     : 'bg-rose-500'
                 }`}
               />
-              <span className="hidden sm:inline">
-                {isPresentationMode
-                  ? 'USB DEMO STREAM'
-                  : connectionStatus === 'connected'
-                  ? 'LIVE 1Hz Stream'
-                  : connectionStatus === 'reconnecting'
+              <span>
+                {connectionStatus === 'reconnecting'
                   ? 'Reconnecting...'
-                  : 'Disconnected'}
+                  : connectionStatus !== 'connected'
+                  ? 'Disconnected'
+                  : isSampleReplay
+                  ? 'Sample-data replay'
+                  : isReplayMode
+                  ? 'RECORDED DATA REPLAY'
+                  : isUsbCollectionMode
+                  ? 'USB COLLECTION MODE'
+                  : isPresentationMode
+                  ? 'USB PRESENTATION MODE'
+                  : 'LIVE 1Hz Stream'}
               </span>
             </div>
 
@@ -492,6 +480,35 @@ function Dashboard() {
             </button>
           </div>
         </header>
+
+        {(isSampleReplay || isReplayMode) && (
+          <section aria-label="Replay source" className="shrink-0 border-b border-blue-200 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/40 px-4 sm:px-6 py-2 text-blue-900 dark:text-blue-200">
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-sm">
+              <strong>{isSampleReplay ? 'Sample-data replay' : 'Recorded data replay'}</strong>
+              {replay?.cycle != null && replay?.total_cycles != null && (
+                <span className="font-mono text-xs">Replay {replay.cycle} / {replay.total_cycles}</span>
+              )}
+              {replay?.sample_index != null && replay?.total_samples != null && (
+                <span className="font-mono text-xs">Sample {replay.sample_index} / {replay.total_samples}</span>
+              )}
+              {connectionStatus !== 'connected' && (
+                <span className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                  {connectionStatus === 'reconnecting' ? 'Reconnecting — showing last received data' : 'Disconnected — showing last received data'}
+                </span>
+              )}
+            </div>
+            <p className="text-xs mt-0.5">
+              {isSampleReplay
+                ? 'Source: generated samples · No hardware recording · No relay action'
+                : 'Source: hardware recording · Recorded data replay · No relay action'}
+            </p>
+            {isSampleReplay && Number.isFinite(analytics.playback_speed) && (
+              <p className="text-xs mt-0.5">
+                {analytics.playback_speed}× scenario time · Energy and cost cover this three-cycle group and reset for the next group.
+              </p>
+            )}
+          </section>
+        )}
 
         {/* Scrollable Viewport */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-gray-50/50 dark:bg-gray-950/50">

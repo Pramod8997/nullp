@@ -92,6 +92,53 @@ test("CRITICAL alert has critical styling", () => {
     expect(alert.className).toMatch(/critical/i);
 });
 
+test.each([
+    ['missing', undefined],
+    ['null summary', null],
+    ['null metrics', { total_kwh: null, estimated_cost_inr: null, energy_saved_kwh: null, tariff_inr_per_kwh: null }],
+])("normal-mode summary keeps %s analytics unavailable", (_name, analytics) => {
+    render(<SummaryCards devices={{ node_a: { power: 100 } }} analytics={analytics} />);
+
+    expect(screen.getAllByText('Unavailable').length).toBeGreaterThanOrEqual(3);
+    expect(screen.queryByText('0.000')).not.toBeInTheDocument();
+    expect(screen.queryByText(/₹/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Scenario Consumption/i)).not.toBeInTheDocument();
+});
+
+test("generated summary displays scenario energy, savings, cost and the supplied tariff", () => {
+    render(<SummaryCards analytics={{
+        source: 'generated_sample_replay',
+        generated: true,
+        tariff_inr_per_kwh: 8,
+        total_kwh: 1.25,
+        estimated_cost_inr: 10,
+        baseline_kwh: 1.5,
+        energy_saved_kwh: 0.25,
+    }} />);
+
+    expect(screen.getByText('Scenario Consumption')).toBeVisible();
+    expect(screen.getByText('1.250')).toBeVisible();
+    expect(screen.getByText('0.250')).toBeVisible();
+    expect(screen.getByText(/₹\s*10\.00/)).toBeVisible();
+    expect(screen.getByText(/₹\s*8(?:\.00)?\s*\/\s*kWh/i)).toBeVisible();
+    expect(screen.queryByText(/Today's Consumption|Live 1Hz/i)).not.toBeInTheDocument();
+});
+
+test("summary displays the supplied tariff instead of a hardcoded demo rate", () => {
+    render(<SummaryCards analytics={{
+        source: 'generated_sample_replay',
+        generated: true,
+        tariff_inr_per_kwh: 6.5,
+        total_kwh: 2,
+        estimated_cost_inr: 13,
+        energy_saved_kwh: 0,
+    }} />);
+
+    expect(screen.getByText(/₹\s*6\.50\s*\/\s*kWh/i)).toBeVisible();
+    expect(screen.getByText(/₹\s*13\.00/)).toBeVisible();
+    expect(screen.getByText('0.000')).toBeVisible();
+});
+
 test("presentation-only cutoff is labelled and does not claim relay action", () => {
     const alerts = [{
         id: 3,
@@ -99,13 +146,14 @@ test("presentation-only cutoff is labelled and does not claim relay action", () 
         severity: "critical",
         device_id: "node_bench_agg",
         presentation_only: true,
-        message: "DEMO ONLY: synthetic overcurrent cutoff marker",
+        recording_replay: true,
+        message: "Recorded-session replay: overcurrent cutoff marker; no relay command or mains contact action was issued.",
     }];
     const { unmount } = render(<SafetyAlerts alerts={alerts} />);
-    expect(screen.getByText(/demo only.*synthetic cutoff/i)).toBeInTheDocument();
+    expect(screen.getByText(/recorded-session replay.*cutoff marker/i)).toBeInTheDocument();
     unmount();
     render(<AlertsPage alerts={alerts} />);
-    expect(screen.getByTestId("breaker-status").textContent).toMatch(/demo event.*no relay action/i);
+    expect(screen.getByTestId("breaker-status").textContent).toMatch(/replay event.*no relay action/i);
 });
 
 // TEST 9B-2: ARC_FAULT event uses distinct icon / color

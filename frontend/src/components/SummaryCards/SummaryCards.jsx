@@ -1,19 +1,27 @@
 import React from 'react';
 import { Zap, Battery, IndianRupee, Leaf, Activity } from 'lucide-react';
 
+const finiteMetric = (value) => (
+  (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+  && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null
+);
+
 const SummaryCards = ({ devices = {}, analytics = {} }) => {
+  const isGeneratedReplay = analytics?.source === 'generated_sample_replay' || analytics?.generated === true;
   // Calculate total current power
   const totalPower = Object.values(devices).reduce(
     (sum, dev) => sum + (dev?.power || 0),
     0
   );
 
-  const totalKwh = Number(analytics?.total_kwh);
-  const estimatedCost = Number(analytics?.estimated_cost_inr);
-  const energySaved = Number(analytics?.energy_saved_kwh);
-  const hasTotalKwh = Number.isFinite(totalKwh);
-  const hasEstimatedCost = Number.isFinite(estimatedCost);
-  const hasEnergySaved = Number.isFinite(energySaved);
+  const totalKwh = finiteMetric(analytics?.total_kwh);
+  const estimatedCost = finiteMetric(analytics?.estimated_cost_inr);
+  const energySaved = finiteMetric(analytics?.energy_saved_kwh);
+  const baselineKwh = finiteMetric(analytics?.baseline_kwh);
+  const tariff = finiteMetric(analytics?.tariff_inr_per_kwh);
+  const hasTotalKwh = totalKwh !== null;
+  const hasEstimatedCost = estimatedCost !== null;
+  const hasEnergySaved = energySaved !== null;
 
   const cards = [
     {
@@ -24,18 +32,18 @@ const SummaryCards = ({ devices = {}, analytics = {} }) => {
       icon: Zap,
       accentColor: 'text-blue-600 dark:text-blue-400',
       iconBg: 'bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 border border-blue-500/20',
-      badge: 'Live 1Hz',
+      badge: isGeneratedReplay ? 'Replay 1Hz' : 'Live 1Hz',
       badgeType: 'live',
     },
     {
       id: 'today-energy',
-      label: "Today's Consumption",
+      label: isGeneratedReplay ? 'Scenario Consumption' : "Today's Consumption",
       value: hasTotalKwh ? totalKwh.toFixed(3) : 'Unavailable',
       unit: hasTotalKwh ? 'kWh' : '',
       icon: Battery,
       accentColor: 'text-emerald-600 dark:text-emerald-400',
       iconBg: 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400 border border-emerald-500/20',
-      badge: hasTotalKwh ? 'Backend analytics' : 'Unavailable',
+      badge: hasTotalKwh ? (isGeneratedReplay ? 'Generated sample replay' : 'Backend analytics') : 'Unavailable',
       badgeType: hasTotalKwh ? 'analytics' : 'unavailable',
     },
     {
@@ -46,19 +54,24 @@ const SummaryCards = ({ devices = {}, analytics = {} }) => {
       icon: IndianRupee,
       accentColor: 'text-amber-600 dark:text-amber-400',
       iconBg: 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400 border border-amber-500/20',
-      badge: hasEstimatedCost ? 'Backend analytics' : 'Unavailable',
-      badgeType: hasEstimatedCost ? 'analytics' : 'unavailable',
+      badge: isGeneratedReplay && tariff !== null
+        ? `Demo tariff ₹${tariff.toFixed(2)}/kWh`
+        : (hasEstimatedCost && !isGeneratedReplay ? 'Backend analytics' : 'Unavailable'),
+      badgeType: (isGeneratedReplay ? tariff !== null : hasEstimatedCost) ? 'analytics' : 'unavailable',
     },
     {
       id: 'energy-saved',
-      label: 'Eco Efficiency & Saved',
+      label: isGeneratedReplay ? 'Scenario Savings' : 'Eco Efficiency & Saved',
       value: hasEnergySaved ? energySaved.toFixed(3) : 'Unavailable',
       unit: hasEnergySaved ? 'kWh' : '',
       icon: Leaf,
       accentColor: 'text-cyan-600 dark:text-cyan-400',
       iconBg: 'bg-cyan-500/10 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400 border border-cyan-500/20',
-      badge: hasEnergySaved ? 'Backend baseline' : 'Unavailable',
+      badge: hasEnergySaved ? (isGeneratedReplay ? 'Scenario baseline' : 'Backend baseline') : 'Unavailable',
       badgeType: hasEnergySaved ? 'eco' : 'unavailable',
+      detail: isGeneratedReplay
+        ? `Baseline: ${baselineKwh !== null ? `${baselineKwh.toFixed(3)} kWh` : 'Unavailable'}`
+        : null,
     },
   ];
 
@@ -92,6 +105,7 @@ const SummaryCards = ({ devices = {}, analytics = {} }) => {
                   </span>
                 )}
               </div>
+              {card.detail && <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{card.detail}</p>}
             </div>
 
             {/* Footer / Badge / Trend */}

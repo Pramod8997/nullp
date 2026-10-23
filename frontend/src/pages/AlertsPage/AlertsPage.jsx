@@ -2,16 +2,20 @@ import React, { useState, useEffect } from 'react';
 import SafetyAlerts from '../../components/SafetyAlerts';
 import { Bell, ShieldAlert, ShieldCheck, AlertTriangle, Zap, CheckCircle2 } from 'lucide-react';
 
-const isPresentationOnly = (alert) => alert?.presentation_only === true || alert?.demo === true;
+const isGeneratedReplay = (alert) => alert?.generated === true || alert?.source === 'generated_sample_replay' || alert?.replay?.generated === true;
+const isRecordedReplay = (alert) => !isGeneratedReplay(alert) && (alert?.recording_replay === true || alert?.source === 'recorded_session_replay');
+const isPresentationOnly = (alert) => isGeneratedReplay(alert) || isRecordedReplay(alert) || alert?.presentation_only === true || alert?.demo === true;
 
-const AlertsPage = ({ alerts = [] }) => {
+const AlertsPage = ({ alerts = [], replayContext = {} }) => {
   const [filter, setFilter] = useState('all');
 
   const criticalCount = alerts.filter(
     (a) => (a.level || a.severity || '').toUpperCase() === 'CRITICAL' || (a.message && a.message.includes('ARC'))
   ).length;
   const warningCount = alerts.length - criticalCount;
-  const hasPresentationDemo = alerts.some(isPresentationOnly);
+  const hasPresentationDemo = isPresentationOnly(replayContext) || alerts.some(isPresentationOnly);
+  const hasGeneratedReplay = isGeneratedReplay(replayContext) || alerts.some(isGeneratedReplay);
+  const hasRecordedReplay = isRecordedReplay(replayContext) || alerts.some(isRecordedReplay);
 
   // Breaker status is derived from the live alert feed, not hardcoded:
   // a cutoff / overcurrent / arc-fault alert WITHIN THE LOCKOUT WINDOW
@@ -58,7 +62,7 @@ const AlertsPage = ({ alerts = [] }) => {
                 Safety Alerts & Incident Log
               </h1>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Real-time safety cutoffs, arc-fault detection, and anomaly notifications.
+                 Safety cutoffs, arc-fault detection, and anomaly notifications. Replay events are non-physical.
               </p>
             </div>
           </div>
@@ -132,8 +136,12 @@ const AlertsPage = ({ alerts = [] }) => {
               <span>
                 {isTripped
                   ? 'TRIPPED — relay open'
+                  : hasGeneratedReplay
+                  ? 'Sample-data replay — no relay action'
+                  : hasRecordedReplay
+                  ? 'Replay event — no relay action'
                   : hasPresentationDemo
-                  ? 'Demo event — no relay action'
+                  ? 'Collection notice — no relay action'
                   : 'Armed & Nominal'}
               </span>
             </div>
@@ -153,9 +161,9 @@ const AlertsPage = ({ alerts = [] }) => {
 
         <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-2xl p-4 border border-gray-200/80 dark:border-gray-700/80 shadow-sm flex items-center justify-between">
           <div>
-             <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Safety Cutoff Events</span>
+             <span className="text-xs font-medium text-gray-500 dark:text-gray-400">{hasPresentationDemo ? 'Critical Events' : 'Safety Cutoff Events'}</span>
             <div className="text-lg font-bold text-gray-900 dark:text-white font-mono mt-0.5">
-              {criticalCount} Triggered
+              {criticalCount} {hasPresentationDemo ? 'Logged' : 'Triggered'}
             </div>
           </div>
           <div className="p-2.5 rounded-xl bg-rose-500/10 text-rose-500">
