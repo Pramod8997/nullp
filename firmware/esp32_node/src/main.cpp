@@ -82,20 +82,10 @@ const float POWER_FACTOR   = 1.0;                 // Reference only; PZEM report
 //  HARDWARE PINS & CONSTANTS
 // ═══════════════════════════════════════════════════════
 const int   RELAY_PIN      = 18;
-// This bench board is the photographed JD-VCC 2-channel module, not the
-// approved H/L-trigger module in the final mains specification. Its standard
-// input arrangement is active-LOW, so the documented JD-VCC fallback is used
-// for this USB-only bench presentation: logic VCC at 3.3 V, JD-VCC at 5 V,
-// and a 100 kOhm IN1->3.3 V pull-up. A meter check is still required before
-// treating the relay contacts as validated hardware.
-//
-// (The superseded D3 got to the same constant the long way round: an inverting
-// BSS138 feeding an active-LOW module input, two inversions cancelling. The
-// BSS138 is SOT-23 SMD and was deleted as unsolderable by hand -- B-10.)
-//
-// This is the D5 purchase-contingency fallback for the photographed module.
+// Approved build: H-trigger relay module, driven directly from GPIO 18.
+// The mandatory 100 kOhm IN1->GND pull-down makes reset/Hi-Z fail open.
 // Re-verify OPEN-at-boot and COM-NO behavior with a multimeter before any mains.
-const bool  RELAY_ACTIVE_LOW = true;
+const bool  RELAY_ACTIVE_LOW = false;
 const int   PZEM_RX_PIN    = 16;
 const int   PZEM_TX_PIN    = 17;
 const float VOLTAGE        = 230.0;    // Mains voltage (India: 230V) for reference

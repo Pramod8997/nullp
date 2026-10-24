@@ -54,10 +54,8 @@ const SystemStatus = ({
   wsConnected,
 }) => {
   const { isDark } = useTheme();
-  const isGeneratedReplay = analytics?.source === 'generated_sample_replay' || analytics?.generated === true;
   const totalKwh = finiteMetric(analytics?.total_kwh);
   const estimatedCost = finiteMetric(analytics?.estimated_cost_inr);
-  const tariff = finiteMetric(analytics?.tariff_inr_per_kwh);
 
   const isWsConnected = wsConnected !== undefined ? wsConnected : connectionStatus === 'connected';
   const isWsReconnecting = connectionStatus === 'reconnecting';
@@ -77,12 +75,11 @@ const SystemStatus = ({
     p95: finiteMetric(reportedLatency?.p95),
     max: finiteMetric(reportedLatency?.max),
   };
-  // Generated samples exercise the UI, not the hardware inference path.
-  const lat = !isGeneratedReplay && Object.values(normalizedLatency).some((value) => value !== null) ? normalizedLatency : null;
+  const lat = Object.values(normalizedLatency).some((value) => value !== null) ? normalizedLatency : null;
   const hasSla = lat?.p95 != null;
   const isDanger = hasSla && lat.p95 > 200;
   const latencyClass = hasSla ? (isDanger ? 'danger red over-sla' : 'ok green within-sla') : 'unavailable';
-  const validLatencyHistory = (!isGeneratedReplay && Array.isArray(latencyHistory) ? latencyHistory : [])
+  const validLatencyHistory = (Array.isArray(latencyHistory) ? latencyHistory : [])
     .filter((row) => row && row.time != null)
     .map((row) => ({ ...row, avg: finiteMetric(row.avg), p95: finiteMetric(row.p95), max: finiteMetric(row.max) }))
     .filter((row) => row.avg !== null || row.p95 !== null || row.max !== null);
@@ -104,7 +101,7 @@ const SystemStatus = ({
           <div>
             <h2 className="text-base font-bold text-gray-900 dark:text-white">System Telemetry & Health</h2>
             <p className="text-xs text-gray-500 dark:text-gray-400">
-              {isGeneratedReplay ? 'Generated sample replay · pipeline status, not hardware validation' : 'Real-time pipeline metrics and latency SLAs'}
+              Real-time pipeline metrics and latency SLAs
             </p>
           </div>
         </div>
@@ -140,14 +137,14 @@ const SystemStatus = ({
         <div className="flex items-center justify-between p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/50 border border-gray-200/60 dark:border-gray-700/60">
           <span className="flex items-center gap-2 text-xs font-medium text-gray-600 dark:text-gray-300">
             <Database size={16} className="text-blue-500" />
-            {isGeneratedReplay ? 'Scenario Replay' : 'NILM Pipeline'}
+            NILM Pipeline
           </span>
           <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold font-mono ${
             pipelineStatus === 'connected'
               ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
               : 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
           }`}>
-            {isGeneratedReplay ? 'REPLAY' : (pipelineStatus?.toUpperCase() || 'ONLINE')}
+            {pipelineStatus?.toUpperCase() || 'ONLINE'}
           </span>
         </div>
 
@@ -166,35 +163,27 @@ const SystemStatus = ({
       </div>
 
       {/* Analytics row if present */}
-      {(isGeneratedReplay || analytics?.total_kwh !== undefined || analytics?.estimated_cost_inr !== undefined) && (
+      {(analytics?.total_kwh !== undefined || analytics?.estimated_cost_inr !== undefined) && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/40 border border-gray-200/60 dark:border-gray-700/60">
           <div className="flex items-center justify-between">
             <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">
-              {isGeneratedReplay ? 'Scenario Consumption' : 'Accumulated Ingestion'}
+              Accumulated Ingestion
             </span>
             <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
               {totalKwh !== null ? `${totalKwh.toFixed(3)} kWh` : 'Unavailable'}
             </span>
           </div>
-          {(isGeneratedReplay || analytics?.estimated_cost_inr !== undefined) && (
+          {analytics?.estimated_cost_inr !== undefined && (
             <div className="flex items-center justify-between">
               <span className="text-xs text-gray-500 dark:text-gray-400 font-medium flex items-center gap-1">
                 <DollarSign size={12} />
-                {isGeneratedReplay ? 'Scenario Cost' : 'Projected Cost (INR tariff)'}
-                {isGeneratedReplay && tariff !== null && <span>· Demo tariff ₹{tariff.toFixed(2)}/kWh</span>}
+                Projected Cost (INR tariff)
               </span>
               <span className="text-xs font-mono font-bold text-amber-600 dark:text-amber-400">
                 {estimatedCost !== null ? `₹${estimatedCost.toFixed(2)}` : 'Unavailable'}
               </span>
             </div>
           )}
-        </div>
-      )}
-
-      {isGeneratedReplay && (
-        <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/40 border border-gray-200/60 dark:border-gray-700/60 text-xs">
-          <span className="text-gray-500 dark:text-gray-400">ML inference accuracy & latency</span>
-          <span className="font-medium text-gray-600 dark:text-gray-300">Not measured in replay</span>
         </div>
       )}
 

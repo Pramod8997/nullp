@@ -32,6 +32,10 @@ from collections import deque
 from datetime import datetime
 from typing import Union, Dict, Optional, Callable, Any, List
 
+# Keep the documented `python scripts/run_pipeline.py` entry point importable
+# without requiring callers to pre-set PYTHONPATH.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import yaml
 import torch
 import numpy as np

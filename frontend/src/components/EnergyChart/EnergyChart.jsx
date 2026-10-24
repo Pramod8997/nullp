@@ -33,7 +33,6 @@ const CustomTooltip = ({ active, payload, label }) => {
 
 const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
   const { isDark } = useTheme();
-  const isGeneratedReplay = analytics?.source === 'generated_sample_replay' || analytics?.generated === true;
 
   const chartData = useMemo(
     () => (Array.isArray(analytics?.energy_history) ? analytics.energy_history : [])
@@ -60,10 +59,10 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
           </div>
           <div>
             <h3 className="text-sm font-bold text-gray-900 dark:text-white uppercase tracking-wider">
-              {isGeneratedReplay ? 'Replay Scenario Energy (kWh)' : 'Energy Consumption (kWh)'}
+              Energy Consumption (kWh)
             </h3>
              <p className="text-xs text-gray-500 dark:text-gray-400">
-               {isGeneratedReplay ? 'Generated sample replay · scenario energy and baseline' : 'Measured backend history'}
+               Measured backend history
              </p>
            </div>
          </div>
@@ -76,11 +75,11 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
            <div className="flex items-center justify-end gap-4 text-xs font-medium py-2">
              <span className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
                <span className="h-2.5 w-2.5 rounded-sm bg-indigo-500 opacity-60" />
-                {isGeneratedReplay ? 'Scenario baseline' : 'Previous'}
+                Previous
              </span>
              <span className="flex items-center gap-1.5 text-gray-900 dark:text-gray-200">
                <span className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />
-                {isGeneratedReplay ? 'Scenario' : 'Current'}
+                Current
              </span>
            </div>
 
@@ -102,19 +101,21 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
               domain={[0, 'auto']}
               width={35}
             />
-            <Tooltip content={<CustomTooltip />} cursor={{ fill: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)' }} />
+            <Tooltip content={<CustomTooltip />} isAnimationActive={false} cursor={{ fill: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)' }} />
             <Bar
               dataKey="yesterday"
               fill="#6366f1"
               radius={[3, 3, 0, 0]}
               opacity={0.4}
-              name={isGeneratedReplay ? 'Scenario baseline' : 'Previous'}
+              name="Previous"
+              isAnimationActive={false}
             />
             <Bar
               dataKey="today"
               fill="#10b981"
               radius={[3, 3, 0, 0]}
-              name={isGeneratedReplay ? 'Scenario' : 'Current'}
+              name="Current"
+              isAnimationActive={false}
             />
                </BarChart>
              </ResponsiveContainer>
@@ -122,7 +123,7 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
          </>
        ) : (
          <div className="flex min-h-[240px] items-center justify-center text-center text-sm text-gray-500 dark:text-gray-400">
-           {isGeneratedReplay ? 'No replay scenario energy history available.' : 'No measured energy history available.'}
+           No measured energy history available.
          </div>
        )}
     </div>

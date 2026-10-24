@@ -101,7 +101,7 @@ def test_active_low_logic_correctness(node):
 def test_default_polarity_matches_locked_firmware_constant():
     """The twin's default must track the RELAY_ACTIVE_LOW constant in main.cpp."""
     import re, pathlib
-    src = pathlib.Path("firmware/esp32_node/src/main.cpp").read_text()
+    src = pathlib.Path("firmware/esp32_node/src/main.cpp").read_text(encoding="utf-8")
     m = re.search(r'const\s+bool\s+RELAY_ACTIVE_LOW\s*=\s*(true|false)\s*;', src)
     assert m, "RELAY_ACTIVE_LOW not found in firmware"
     firmware_active_low = (m.group(1) == "true")
@@ -118,7 +118,7 @@ def test_default_rated_watts_matches_locked_firmware_constant():
     firmware's 312.5 W (125% of 250).
     """
     import re, pathlib
-    src = pathlib.Path("firmware/esp32_node/src/main.cpp").read_text()
+    src = pathlib.Path("firmware/esp32_node/src/main.cpp").read_text(encoding="utf-8")
     m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', src)
     assert m, "RATED_WATTS not found in firmware"
     assert ESP32FirmwareNode(device_id="rated_probe").rated_watts == float(m.group(1)), (

@@ -30,6 +30,10 @@ from typing import Dict, List, Any
 
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+for stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
 
 from src.hardware.mqtt import AsyncMQTTClient, MockMQTTBroker
 from src.pipeline.aggregate_nilm import NILMTransientDetector
@@ -169,7 +173,7 @@ async def run_hil_tests():
     # tests/test_relay_safety_boot_brownout.py:100-109) so the bench numbers
     # can never silently diverge from RATED_WATTS in main.cpp.
     firmware_src = (pathlib.Path(__file__).resolve().parents[1]
-                    / "firmware" / "esp32_node" / "src" / "main.cpp").read_text()
+                    / "firmware" / "esp32_node" / "src" / "main.cpp").read_text(encoding="utf-8")
     m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', firmware_src)
     assert m, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
     rated_watts = float(m.group(1))

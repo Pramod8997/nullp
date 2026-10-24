@@ -1,22 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import SafetyAlerts from '../../components/SafetyAlerts';
-import { Bell, ShieldAlert, ShieldCheck, AlertTriangle, Zap, CheckCircle2 } from 'lucide-react';
+import { Bell, ShieldAlert, ShieldCheck, AlertTriangle, Zap } from 'lucide-react';
 
-const isGeneratedReplay = (alert) => alert?.generated === true || alert?.source === 'generated_sample_replay' || alert?.replay?.generated === true;
-const isRecordedReplay = (alert) => !isGeneratedReplay(alert) && (alert?.recording_replay === true || alert?.source === 'recorded_session_replay');
-const isPresentationOnly = (alert) => isGeneratedReplay(alert) || isRecordedReplay(alert) || alert?.presentation_only === true || alert?.demo === true;
-
-const AlertsPage = ({ alerts = [], replayContext = {} }) => {
+const AlertsPage = ({ alerts = [] }) => {
   const [filter, setFilter] = useState('all');
 
   const criticalCount = alerts.filter(
     (a) => (a.level || a.severity || '').toUpperCase() === 'CRITICAL' || (a.message && a.message.includes('ARC'))
   ).length;
   const warningCount = alerts.length - criticalCount;
-  const hasPresentationDemo = isPresentationOnly(replayContext) || alerts.some(isPresentationOnly);
-  const hasGeneratedReplay = isGeneratedReplay(replayContext) || alerts.some(isGeneratedReplay);
-  const hasRecordedReplay = isRecordedReplay(replayContext) || alerts.some(isRecordedReplay);
-
   // Breaker status is derived from the live alert feed, not hardcoded:
   // a cutoff / overcurrent / arc-fault alert WITHIN THE LOCKOUT WINDOW
   // (5 min, the firmware's SAFETY_LOCKOUT_MS) means the relay is open.
@@ -32,7 +24,6 @@ const AlertsPage = ({ alerts = [], replayContext = {} }) => {
   const LOCKOUT_MS = 5 * 60 * 1000;
   const isTripped = alerts.some(
     (a) =>
-      !isPresentationOnly(a) &&
       (a?.type === 'SAFETY_CUTOFF' ||
         /OVERCURRENT|ARC[_ ]?FAULT|RELAY.*FORCED OFF|RELAY FORCED OFF/i.test(a?.message || '')) &&
       nowMs - (a?.id || 0) < LOCKOUT_MS
@@ -62,7 +53,7 @@ const AlertsPage = ({ alerts = [], replayContext = {} }) => {
                 Safety Alerts & Incident Log
               </h1>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                 Safety cutoffs, arc-fault detection, and anomaly notifications. Replay events are non-physical.
+                 Safety cutoffs, arc-fault detection, and anomaly notifications.
               </p>
             </div>
           </div>
@@ -110,8 +101,6 @@ const AlertsPage = ({ alerts = [], replayContext = {} }) => {
           className={`bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-2xl p-4 border shadow-sm flex items-center justify-between ${
             isTripped
               ? 'border-rose-300 dark:border-rose-800'
-              : hasPresentationDemo
-              ? 'border-amber-300 dark:border-amber-800'
               : 'border-gray-200/80 dark:border-gray-700/80'
           }`}
         >
@@ -121,27 +110,13 @@ const AlertsPage = ({ alerts = [], replayContext = {} }) => {
               className={`text-lg font-bold mt-0.5 flex items-center gap-1.5 ${
                 isTripped
                   ? 'text-rose-600 dark:text-rose-400'
-                  : hasPresentationDemo
-                  ? 'text-amber-600 dark:text-amber-400'
                   : 'text-emerald-600 dark:text-emerald-400'
               }`}
             >
-              {isTripped ? (
-                <ShieldAlert size={16} />
-              ) : hasPresentationDemo ? (
-                <AlertTriangle size={16} />
-              ) : (
-                <CheckCircle2 size={16} />
-              )}
+              {isTripped ? <ShieldAlert size={16} /> : <ShieldCheck size={16} />}
               <span>
                 {isTripped
                   ? 'TRIPPED — relay open'
-                  : hasGeneratedReplay
-                  ? 'Sample-data replay — no relay action'
-                  : hasRecordedReplay
-                  ? 'Replay event — no relay action'
-                  : hasPresentationDemo
-                  ? 'Collection notice — no relay action'
                   : 'Armed & Nominal'}
               </span>
             </div>
@@ -150,20 +125,18 @@ const AlertsPage = ({ alerts = [], replayContext = {} }) => {
             className={`p-2.5 rounded-xl ${
               isTripped
                 ? 'bg-rose-500/10 text-rose-500'
-                : hasPresentationDemo
-                ? 'bg-amber-500/10 text-amber-500'
                 : 'bg-emerald-500/10 text-emerald-500'
             }`}
           >
-            {isTripped ? <ShieldAlert size={20} /> : hasPresentationDemo ? <AlertTriangle size={20} /> : <ShieldCheck size={20} />}
+            {isTripped ? <ShieldAlert size={20} /> : <ShieldCheck size={20} />}
           </div>
         </div>
 
         <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-2xl p-4 border border-gray-200/80 dark:border-gray-700/80 shadow-sm flex items-center justify-between">
           <div>
-             <span className="text-xs font-medium text-gray-500 dark:text-gray-400">{hasPresentationDemo ? 'Critical Events' : 'Safety Cutoff Events'}</span>
+             <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Safety Cutoff Events</span>
             <div className="text-lg font-bold text-gray-900 dark:text-white font-mono mt-0.5">
-              {criticalCount} {hasPresentationDemo ? 'Logged' : 'Triggered'}
+              {criticalCount} Triggered
             </div>
           </div>
           <div className="p-2.5 rounded-xl bg-rose-500/10 text-rose-500">

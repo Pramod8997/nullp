@@ -43,10 +43,10 @@ if not MAIN_CPP.exists():
         allow_module_level=True,
     )
 
-_MAIN_CPP = MAIN_CPP.read_text()
-_TWIN_PY = TWIN_PY.read_text()
-_PIPELINE_PY = PIPELINE_PY.read_text()
-_HW_CONFIG = yaml.safe_load(CONFIG_HW.read_text())
+_MAIN_CPP = MAIN_CPP.read_text(encoding="utf-8")
+_TWIN_PY = TWIN_PY.read_text(encoding="utf-8")
+_PIPELINE_PY = PIPELINE_PY.read_text(encoding="utf-8")
+_HW_CONFIG = yaml.safe_load(CONFIG_HW.read_text(encoding="utf-8"))
 
 
 # ── Firmware constants (the source of truth) ─────────────────────────────
@@ -167,7 +167,7 @@ def test_firmware_pins_match_wiring_docs_and_twin():
     A pin change is a re-wiring event, never a code-only tweak."""
     # Whitespace-flattened and stripped of markdown blockquote/bold markers so
     # doc line-wrapping cannot mask a match.
-    raw = WIRING_DOC.read_text()
+    raw = WIRING_DOC.read_text(encoding="utf-8")
     wiring = " ".join(raw.replace(">", " ").replace("*", " ").split())
     for pin in (FW_RELAY_PIN, FW_PZEM_RX_PIN, FW_PZEM_TX_PIN):
         assert f"GPIO {pin}" in wiring, (

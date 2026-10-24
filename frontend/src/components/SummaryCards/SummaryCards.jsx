@@ -7,7 +7,6 @@ const finiteMetric = (value) => (
 );
 
 const SummaryCards = ({ devices = {}, analytics = {} }) => {
-  const isGeneratedReplay = analytics?.source === 'generated_sample_replay' || analytics?.generated === true;
   // Calculate total current power
   const totalPower = Object.values(devices).reduce(
     (sum, dev) => sum + (dev?.power || 0),
@@ -18,7 +17,6 @@ const SummaryCards = ({ devices = {}, analytics = {} }) => {
   const estimatedCost = finiteMetric(analytics?.estimated_cost_inr);
   const energySaved = finiteMetric(analytics?.energy_saved_kwh);
   const baselineKwh = finiteMetric(analytics?.baseline_kwh);
-  const tariff = finiteMetric(analytics?.tariff_inr_per_kwh);
   const hasTotalKwh = totalKwh !== null;
   const hasEstimatedCost = estimatedCost !== null;
   const hasEnergySaved = energySaved !== null;
@@ -32,18 +30,18 @@ const SummaryCards = ({ devices = {}, analytics = {} }) => {
       icon: Zap,
       accentColor: 'text-blue-600 dark:text-blue-400',
       iconBg: 'bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 border border-blue-500/20',
-      badge: isGeneratedReplay ? 'Replay 1Hz' : 'Live 1Hz',
+      badge: 'Live 1Hz',
       badgeType: 'live',
     },
     {
       id: 'today-energy',
-      label: isGeneratedReplay ? 'Scenario Consumption' : "Today's Consumption",
+      label: "Today's Consumption",
       value: hasTotalKwh ? totalKwh.toFixed(3) : 'Unavailable',
       unit: hasTotalKwh ? 'kWh' : '',
       icon: Battery,
       accentColor: 'text-emerald-600 dark:text-emerald-400',
       iconBg: 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400 border border-emerald-500/20',
-      badge: hasTotalKwh ? (isGeneratedReplay ? 'Generated sample replay' : 'Backend analytics') : 'Unavailable',
+      badge: hasTotalKwh ? 'Backend analytics' : 'Unavailable',
       badgeType: hasTotalKwh ? 'analytics' : 'unavailable',
     },
     {
@@ -54,24 +52,20 @@ const SummaryCards = ({ devices = {}, analytics = {} }) => {
       icon: IndianRupee,
       accentColor: 'text-amber-600 dark:text-amber-400',
       iconBg: 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400 border border-amber-500/20',
-      badge: isGeneratedReplay && tariff !== null
-        ? `Demo tariff ₹${tariff.toFixed(2)}/kWh`
-        : (hasEstimatedCost && !isGeneratedReplay ? 'Backend analytics' : 'Unavailable'),
-      badgeType: (isGeneratedReplay ? tariff !== null : hasEstimatedCost) ? 'analytics' : 'unavailable',
+      badge: hasEstimatedCost ? 'Backend analytics' : 'Unavailable',
+      badgeType: hasEstimatedCost ? 'analytics' : 'unavailable',
     },
     {
       id: 'energy-saved',
-      label: isGeneratedReplay ? 'Scenario Savings' : 'Eco Efficiency & Saved',
+      label: 'Eco Efficiency & Saved',
       value: hasEnergySaved ? energySaved.toFixed(3) : 'Unavailable',
       unit: hasEnergySaved ? 'kWh' : '',
       icon: Leaf,
       accentColor: 'text-cyan-600 dark:text-cyan-400',
       iconBg: 'bg-cyan-500/10 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400 border border-cyan-500/20',
-      badge: hasEnergySaved ? (isGeneratedReplay ? 'Scenario baseline' : 'Backend baseline') : 'Unavailable',
+      badge: hasEnergySaved ? 'Backend baseline' : 'Unavailable',
       badgeType: hasEnergySaved ? 'eco' : 'unavailable',
-      detail: isGeneratedReplay
-        ? `Baseline: ${baselineKwh !== null ? `${baselineKwh.toFixed(3)} kWh` : 'Unavailable'}`
-        : null,
+      detail: baselineKwh !== null ? `Baseline: ${baselineKwh.toFixed(3)} kWh` : null,
     },
   ];
 

@@ -7,7 +7,6 @@ import DigitalTwinVisualization from '../../components/DigitalTwinVisualization/
 import { Zap } from 'lucide-react';
 
 const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analytics = {} }) => {
-  const isGeneratedReplay = analytics?.source === 'generated_sample_replay' || analytics?.generated === true;
   return (
     <div className="space-y-6">
       {/* ── Top Row: Summary KPI Widgets ── */}
@@ -26,10 +25,10 @@ const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analyti
               </div>
               <div>
                 <h2 className="text-base font-bold text-gray-900 dark:text-white">
-                  {isGeneratedReplay ? 'Replay Scenario Power Monitor' : 'Real-Time Power Monitor'}
+                  Real-Time Power Monitor
                 </h2>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                  {isGeneratedReplay ? 'Replay 1Hz · generated scenario wattage stream' : 'Live 1Hz disaggregated wattage stream'}
+                  Live 1Hz disaggregated wattage stream
                 </p>
               </div>
             </div>

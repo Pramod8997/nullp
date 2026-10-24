@@ -17,6 +17,7 @@ async def test_sqlite_wal_mode():
     await session.initialize()
     journal_mode = await session.query_scalar("PRAGMA journal_mode;")
     assert journal_mode == "wal"
+    await session.close()
 
 # TEST 6-2: CSV fallback activates on simulated DB lock
 @pytest.mark.asyncio
@@ -33,6 +34,7 @@ async def test_csv_fallback_on_db_lock():
     with open(csv_path) as f:
         lines = f.readlines()
     assert len(lines) >= 1
+    await session.close()
     os.unlink(csv_path)
 
 # TEST 6-3: CSV replay on restart — records re-inserted without duplicates
@@ -58,7 +60,8 @@ async def test_csv_replay_no_duplicates():
     await session.replay_csv_fallback()
     count2 = await session.query_scalar("SELECT COUNT(*) FROM power_log;")
     assert count2 == 3
-    
+
+    await session.close()
     os.unlink(csv_path)
     os.unlink(db_path)
 
@@ -78,6 +81,7 @@ async def test_30day_retention_deletes_old_records():
         "SELECT COUNT(*) FROM power_log WHERE device='x';"
     )
     assert count == 0
+    await session.close()
 
 # TEST 6-5: Record from exactly 30 days ago is NOT deleted
 @pytest.mark.asyncio
@@ -91,6 +95,7 @@ async def test_30day_retention_keeps_recent_record():
         "SELECT COUNT(*) FROM power_log WHERE device='x';"
     )
     assert count == 1
+    await session.close()
 
 # TEST 6-6: Batch write groups records into one transaction
 @pytest.mark.asyncio
@@ -107,5 +112,6 @@ async def test_batch_write_uses_single_transaction():
         for _ in range(10):
             await session.queue_write({"device": "x", "power": 100.0})
         await session.flush()
+        await session.close()
     
     assert commit_count[0] == 1  # all 10 records in one transaction

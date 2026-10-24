@@ -31,6 +31,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+for stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
 
 from src.hardware.esp32_firmware_sim import ESP32FirmwareNode, VirtualPZEM004T
 from src.pipeline.safety import FleetDiagnosticsMonitor
@@ -41,7 +45,7 @@ from src.pipeline.watchdog import SoftAnomalyWatchdog
 # tests/test_relay_safety_boot_brownout.py:100-109): the overcurrent bench
 # numbers below must track RATED_WATTS in main.cpp, never a local constant.
 _FIRMWARE_SRC = (Path(__file__).resolve().parents[1]
-                 / "firmware" / "esp32_node" / "src" / "main.cpp").read_text()
+                 / "firmware" / "esp32_node" / "src" / "main.cpp").read_text(encoding="utf-8")
 _FIRMWARE_RATED = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', _FIRMWARE_SRC)
 assert _FIRMWARE_RATED, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
 FIRMWARE_RATED_WATTS = float(_FIRMWARE_RATED.group(1))

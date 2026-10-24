@@ -21,6 +21,10 @@ import numpy as np
 # Ensure workspace root is importable
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, WORKSPACE_ROOT)
+for stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
 
 from src.hardware.esp32_firmware_sim import ESP32FirmwareNode
 from src.pipeline.aggregate_nilm import NILMTransientDetector
@@ -43,7 +47,7 @@ def _fw_rated_watts() -> float:
     import re
     import pathlib
     firmware_src = (pathlib.Path(__file__).resolve().parents[1]
-                    / "firmware" / "esp32_node" / "src" / "main.cpp").read_text()
+                    / "firmware" / "esp32_node" / "src" / "main.cpp").read_text(encoding="utf-8")
     m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', firmware_src)
     assert m, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
     return float(m.group(1))

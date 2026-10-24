@@ -27,6 +27,10 @@ from typing import List, Dict, Any
 # Ensure project root is in sys.path
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, WORKSPACE_ROOT)
+for stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
 
 from src.hardware.mqtt import AsyncMQTTClient, MockMQTTBroker
 from src.pipeline.aggregate_nilm import NILMTransientDetector, OverlapAwareNILMDetector

@@ -274,6 +274,8 @@ claude/
 .openhands/
 .continue/
 .chatgpt/
+.opencode/
+**/.opencode/
 .web-artifacts/
 graphify-out/
 **/graphify-out/
@@ -336,6 +338,7 @@ claude_debug/GOD_TIER_PLAN*.md
 !.agents/**/*
 !parse_prompt.py
 !test_requirements.json
+!opencode.json
 !frontend/public/**/*
 !frontend/src/assets/**/*
 

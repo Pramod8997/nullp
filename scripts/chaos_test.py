@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import os
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -13,6 +14,7 @@ print("========================================")
 print("CHAOS TEST REPORT")
 print("========================================\n")
 
+@pytest.mark.asyncio
 async def test_rl_adversarial():
     print("--- Phase 2: RL Agent Adversarial Analysis ---")
     agent = TabularQLearningAgent()
@@ -44,6 +46,7 @@ async def test_rl_adversarial():
     except Exception as e:
         print(f"Empty state caused crash: {e} (FAIL)")
 
+@pytest.mark.asyncio
 async def test_safety_boundary():
     print("\n--- Phase 4: Safety Module Boundary Conditions ---")
     safety = FleetDiagnosticsMonitor(3500.0, {"esp32_hvac": 1000.0})
