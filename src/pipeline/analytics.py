@@ -161,7 +161,7 @@ class AnalyticsEngine:
             duration_hours: Duration the device was active in hours.
             date_str: Optional date ISO string.
         """
-        today = date_str or datetime.date.today().isoformat()
+        today = date_str or self._as_utc().date().isoformat()
         if today not in self.daily_usage:
             self.daily_usage[today] = {}
         if today not in self.daily_cost:
@@ -176,14 +176,14 @@ class AnalyticsEngine:
         """
         Get daily kWh accumulated for a device.
         """
-        today = date_str or datetime.date.today().isoformat()
+        today = date_str or self._as_utc().date().isoformat()
         return self.daily_usage.get(today, {}).get(device_id, 0.0)
 
     def get_cost(self, device_id: str, date_str: Optional[str] = None) -> float:
         """
         Get daily cost accumulated for a device.
         """
-        today = date_str or datetime.date.today().isoformat()
+        today = date_str or self._as_utc().date().isoformat()
         return self.daily_cost.get(today, {}).get(device_id, 0.0)
 
     def get_accumulated_cost(self, device_id: str, date_str: Optional[str] = None) -> float:
@@ -203,7 +203,7 @@ class AnalyticsEngine:
             dict: Summary of usage per device and total cost.
         """
         if date_str is None:
-            date_str = datetime.date.today().isoformat()
+            date_str = self._as_utc().date().isoformat()
 
         day_data = self.daily_usage.get(date_str, {})
         cost_data = self.daily_cost.get(date_str, {})

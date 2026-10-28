@@ -323,6 +323,9 @@ async def handle_relay_commands(client: aiomqtt.Client, device_ids: set[str]):
                 await client.publish(ack_topic, "OFF_CONFIRMED")
             elif payload_str == "WARNING":
                 logger.info(f"[SIM RELAY] Warning received for {dev_id}")
+            elif payload_str in ("RESET_SAFETY", "reset_safety"):
+                logger.info(f"[SIM RELAY] Reset safety trip for {dev_id}")
+                await client.publish(ack_topic, "SAFETY_RESET_CONFIRMED")
 
 
 async def main():

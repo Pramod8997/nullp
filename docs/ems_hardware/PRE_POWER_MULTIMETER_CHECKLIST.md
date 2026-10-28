@@ -28,7 +28,7 @@ PZEM-004T-100A(V4.0)-type external-CT meter digitally over UART. Therefore:
 | PZEM TTL | `GND, TX, RX, 5V`; crossed UART | TX level must be measured first |
 | PZEM AC side | `CT, CT, N, L`; CT around one live conductor only | Mains electrician gate |
 | Relay | Available 4-channel 5 V board, channel 1 only; 2-channel H/L equivalent is acceptable | H/L, VCC/JD-VCC and contacts unverified |
-| Relay logic | GPIO18 active-HIGH; LOW/Hi-Z = open | Requires verified H-trigger board and 100 kΩ pull-down |
+| Relay logic | 4-channel active-LOW (GPIO 26, 27, 14, 32); LOW = closed/ON, HIGH = open/OFF | Active-LOW optocoupled; HIGH preloaded at boot |
 | Level shifter | Four-channel board is unused | Do not insert an unverified converter into GPIO18 or UART |
 | Power | External isolated/BIS-marked 5 V 2 A supply for runtime | Laptop USB is bench/flashing only |
 | Load | One earthed 6 A socket; laptop + phone charger; 250 W profile | Projector is software-only |

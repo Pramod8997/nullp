@@ -11,3 +11,6 @@ FetchContent_MakeAvailable(unity)
 
 add_executable(run_host_tests test_main_host.c)
 target_link_libraries(run_host_tests unity m)
+
+enable_testing()
+add_test(NAME host_tests COMMAND run_host_tests)

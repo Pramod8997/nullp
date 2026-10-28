@@ -14,9 +14,9 @@ prototype. No hardware is assembled and mains authorization is **blocked**.
 
 ## Canonical project references
 
-- Full current low-voltage guide: [`../../claude_debug/WIRING_STEP_BY_STEP.md`](../../claude_debug/WIRING_STEP_BY_STEP.md)
-- Firmware/config parity: [`../../claude_debug/HARDWARE_ALIGNMENT_CONTRACT.md`](../../claude_debug/HARDWARE_ALIGNMENT_CONTRACT.md)
-- Staged bring-up: [`../../claude_debug/BRINGUP_RUNBOOK.md`](../../claude_debug/BRINGUP_RUNBOOK.md)
+- Full current low-voltage guide: [`../archive/claude_debug/WIRING_STEP_BY_STEP.md`](../archive/claude_debug/WIRING_STEP_BY_STEP.md)
+- Firmware/config parity: [`../archive/claude_debug/HARDWARE_ALIGNMENT_CONTRACT.md`](../archive/claude_debug/HARDWARE_ALIGNMENT_CONTRACT.md)
+- Staged bring-up: [`../archive/claude_debug/BRINGUP_RUNBOOK.md`](../archive/claude_debug/BRINGUP_RUNBOOK.md)
 - Physical validation ledger: [`../omnirush/PHYSICAL_VALIDATION.md`](../omnirush/PHYSICAL_VALIDATION.md)
 - Procurement artifact: [`../../reports/ems_procurement_bom_under_2500.txt`](../../reports/ems_procurement_bom_under_2500.txt)
 
@@ -24,7 +24,7 @@ prototype. No hardware is assembled and mains authorization is **blocked**.
 
 - Low-voltage bench bring-up only until the physical safety gates pass.
 - 38-pin ESP32-WROOM-32 DevKit; not a 30-pin shield or WROVER board.
-- GPIO16/17 are the PZEM UART; GPIO18 is the active-high relay input.
+- GPIO16/17 are the PZEM UART; GPIO 26, 27, 14, 32 are the 4-channel active-LOW relay inputs (CH4 remapped off strapping pin GPIO12 to GPIO32).
 - The physically available PZEM is the 100 A CT variant; use
   [`ACTUAL_100A_CT_WIRING.md`](./ACTUAL_100A_CT_WIRING.md), not the retired
   10 A shunt topology.

@@ -17,29 +17,36 @@ hardware:
   mains_voltage_v: 230.0
   mains_frequency_hz: 50.0
   pzem:
-    model: "PZEM-004T-100A-CT-V4-type"
+    model: "PZEM-004T v4.0 (100A)"
     topology: "external_ct"
     ttl_header: [GND, TX, RX, 5V]
     uart_baud: 9600
-    tx_to_gpio16: "measure_first; use_1k_2k_divider_if_5V"
-    ac_terminals: "CT, CT, N, L"
+    pzem_rx_pin: 16
+    pzem_tx_pin: 17
+    tx_to_gpio16: "1k_2k_voltage_divider_to_3.3V"
+    ac_terminals: "1:Live, 2:Neutral, 3:CT+, 4:CT-"
+    max_safe_current_a: 32.0
+    max_safe_voltage_v: 260.0
+    min_safe_voltage_v: 180.0
     physical_validation: "pending"
   relay:
     available_channels: 4
-    channel_used: 1
-    trigger_target: "H/high-trigger"
-    gpio: 18
-    active_low: false
-    input_pulldown_ohms: 100000
-    channels_2_to_4: "unused"
-    four_channel_level_shifter: "unused; not part of the approved path"
-    physical_validation: "pending"
+    channels: [26, 27, 14, 32]
+    channel_pins:
+      ch1: 26
+      ch2: 27
+      ch3: 14
+      ch4: 32
+    trigger_target: "active-low opto-isolated"
+    active_low: true
+    boot_state: "HIGH/OFF"
   low_voltage_supply: "isolated/BIS-marked 5V 2A external charger"
   mains_release: "blocked_until_physical_gates_pass"
 
 app:
   name: "Digital Twin EMS — Physical Prototype (1 node, 1 port)"
   debug: true
+  demo_mode: false
 
 # Physical deployments must use an explicitly enrolled registry and complete
 # model artifact. Missing/partial demo artifacts fail closed to UNKNOWN.

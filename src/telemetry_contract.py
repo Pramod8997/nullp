@@ -29,6 +29,14 @@ class TelemetryContractError(ValueError):
     """Raised when an ESP32 diagnostic frame violates the wire contract."""
 
 
+KEY_ALIASES = {
+    "v": ("v", "voltage_rms", "voltage", "v_rms"),
+    "i": ("i", "current_rms", "current", "i_rms"),
+    "w": ("w", "active_power_w", "power", "w_active"),
+    "pf": ("pf", "power_factor"),
+}
+
+
 def parse_telemetry_frame(payload: Any) -> dict[str, float]:
     """Decode and validate one ESP32 diagnostic frame.
 
@@ -52,7 +60,15 @@ def parse_telemetry_frame(payload: Any) -> dict[str, float]:
     if not isinstance(frame, Mapping):
         raise TelemetryContractError("payload must be a JSON object")
 
-    missing = [key for key in TELEMETRY_KEYS if key not in frame]
+    frame_map = dict(frame)
+    for primary, aliases in KEY_ALIASES.items():
+        if primary not in frame_map:
+            for alias in aliases:
+                if alias in frame_map:
+                    frame_map[primary] = frame_map[alias]
+                    break
+
+    missing = [key for key in TELEMETRY_KEYS if key not in frame_map]
     if missing:
         raise TelemetryContractError(
             f"missing required telemetry field(s): {', '.join(missing)}"
@@ -60,7 +76,7 @@ def parse_telemetry_frame(payload: Any) -> dict[str, float]:
 
     values: dict[str, float] = {}
     for key in TELEMETRY_KEYS:
-        raw = frame[key]
+        raw = frame_map[key]
         if isinstance(raw, bool) or not isinstance(raw, Real):
             raise TelemetryContractError(f"{key} must be a JSON number")
         value = float(raw)

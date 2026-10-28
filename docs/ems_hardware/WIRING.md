@@ -1,66 +1,66 @@
-# Current Low-Voltage Wiring — Actual 100A CT Build
+# Current Low-Voltage Wiring — Actual 100A CT Build (PZEM-004T v4.0)
 
-**Board:** 38-pin ESP32-WROOM-32 DevKit. **Mains disconnected.** Dupont wires
+**Board:** 38-pin ESP32-WROOM-32 DevKit (or 30-pin DevKit V1). **Mains disconnected.** Dupont wires
 are permitted only on this low-voltage side.
 
-The available meter is the **PZEM-004T-100A(V4.0)-type external-CT variant**.
-Its external CT measures one live conductor; its `L/N` terminals are voltage
-sense. Do not use the retired 10 A shunt series path.
+The meter is the **PZEM-004T v4.0 (100A) external-CT variant**.
+Its external CT measures one live conductor; its high-voltage screw terminals are voltage sense and CT secondary input.
 
-## Pin map
+---
 
-| ESP32 | Connect to | Required condition |
-|---|---|---|
-| GPIO17 / TX2 | PZEM RX | UART transmit |
-| GPIO16 / RX2 | PZEM TX | Measure TX idle voltage first |
-| GPIO18 / D18 | Relay IN1 | Direct connection; no MOSFET |
-| GND | Relay GND and PZEM GND | One common low-voltage ground |
-| VIN / 5 V | Relay VCC and PZEM 5 V | Use an isolated 5 V supply |
+## 1. Complete Pin Map
 
-Relay hardware contract: the available board may have four channels; use only
-channel 1. Channels 2–4 and the separate four-channel level shifter are unused.
-Direct GPIO18 drive is permitted only after the actual relay is verified as
-H/high-trigger with its VCC/JD-VCC arrangement and contact labels identified.
+| ESP32 Pin | Connect To | Target Component & Function | Required Condition / Logic |
+|---|---|---|---|
+| **GPIO 17 / TX2** | PZEM TTL **RX** | PZEM-004T v4.0 UART2 Receive | Direct 3.3V TX from ESP32 |
+| **GPIO 16 / RX2** | PZEM TTL **TX** | PZEM-004T v4.0 UART2 Transmit | **1kΩ / 2kΩ divider** (or 5V-to-3.3V level shifter) |
+| **GPIO 26** | Relay **IN1** | 4-Ch Relay Module Channel 1 | Active-LOW (`LOW` = ON, `HIGH` = OFF) |
+| **GPIO 27** | Relay **IN2** | 4-Ch Relay Module Channel 2 | Active-LOW (`LOW` = ON, `HIGH` = OFF) |
+| **GPIO 14** | Relay **IN3** | 4-Ch Relay Module Channel 3 | Active-LOW (`LOW` = ON, `HIGH` = OFF) |
+| **GPIO 32** | Relay **IN4** | 4-Ch Relay Module Channel 4 | Active-LOW (Remapped off strapping pin `GPIO 12`) |
+| **GND** | Relay GND & PZEM GND | Common Low-Voltage DC Ground | Single unified ground reference |
+| **VIN / 5V** | Relay VCC & PZEM 5V | Isolated 5V Rail (≥ 2A supply) | Dedicated BIS-marked 5V supply |
 
-## PZEM TX safety check
+---
 
-1. Connect only PZEM 5 V and GND; leave TX disconnected.
-2. Measure PZEM TX to GND with a DC multimeter.
-3. For approximately 3.3 V, connect directly; if the output floats, add the
-   documented 10 kΩ pull-up to 3.3 V.
-4. For approximately 5 V, use either a confirmed level converter (`HV=5 V`,
-   `LV=3.3 V`, common GND) or this divider:
+## 2. PZEM-004T v4.0 Wiring
+
+### Low-Voltage 4-Pin TTL Header
+- **5V**: Connects to external **5V Rail** (`ESP32 VIN`)
+- **RX**: Connects to **ESP32 GPIO 17 (UART2 TX)**
+- **TX**: Connects through **1kΩ / 2kΩ voltage divider** to **ESP32 GPIO 16 (UART2 RX)**
+- **GND**: Connects to **Common DC GND**
 
 ```text
-PZEM TX ── 1 kΩ ──┬── GPIO16
+PZEM TX ── 1 kΩ ──┬── ESP32 GPIO 16 (UART2 RX)
                   │
              2 kΩ to GND
 ```
 
-Two 1 kΩ resistors in series may form the 2 kΩ leg. Never connect an unverified
-PZEM TX directly to GPIO16.
+### High-Voltage 4-Pin Screw Terminals
+- **Terminal 1 (`L`)**: 230V AC Live (via 1A fast-blow inline ceramic fuse)
+- **Terminal 2 (`N`)**: 230V AC Neutral
+- **Terminal 3 (`CT+`)**: 100A Split-Core CT Red lead wire
+- **Terminal 4 (`CT-`)**: 100A Split-Core CT Black lead wire
 
-## Relay safety state
+> **CRITICAL SAFETY NOTE**: Tighten screw terminals 3 & 4 securely **BEFORE** clamping the split-core CT around the single insulated Live (`L`) conductor. Never leave CT secondary terminals open while energized. Note that the PZEM-004T AC side must be powered by 230V AC for the onboard metering ASIC to respond to UART polls.
 
-- Set the relay module jumper to **H/high-trigger**.
-- GPIO18 connects directly to IN1.
-- Add a 100 kΩ resistor from IN1 to GND.
-- `RELAY_ACTIVE_LOW = false`: LOW or reset/Hi-Z means relay open; HIGH means
-  relay closed.
-- Verify the actual module's VCC/JD-VCC arrangement, input current and COM/NO
-  labels before connecting it.
+---
 
-## Power and USB separation
+## 3. 4-Channel Opto-Isolated Relay Module
 
-- Runtime: BIS-marked isolated 5 V 2 A charger → USB-A-female-to-screw-terminal
-  breakout → 5 V/GND rail.
-- The micro-USB adapter/cable is not a substitute for that breakout.
-- Flash with laptop USB and mains disconnected. For runtime, remove laptop USB.
-- Never use Dupont wires, breadboard tracks or loose USB wires for 230 V.
+- **VCC**: Connects to external **5V Rail** (≥ 2A external supply recommended; or `JD-VCC` = 5V and `VCC` = 3.3V with jumper removed for full optical isolation).
+- **GND**: Connects to **Common DC GND**.
+- **IN1**: `GPIO 26`
+- **IN2**: `GPIO 27`
+- **IN3**: `GPIO 14`
+- **IN4**: `GPIO 32` (⚠️ **CRITICAL FIX**: Remapped from `GPIO 12` / `MTDI` strapping pin. `GPIO 12` pulled HIGH at boot switches `VDD_SDIO` to 1.8V and bricks flash boot).
+- **Relay Logic Polarity**: **ACTIVE-LOW** (`RELAY_ON = LOW`, `RELAY_OFF = HIGH`). Firmware pre-loads pins to `HIGH` before configuring output mode to eliminate boot chatter. Autonomous safety trips immediately drive all 4 channels `HIGH`.
 
-## Stop conditions
+---
 
-Stop before powering the assembly if the board is WROVER, a 30-pin shield is
-being used on the 38-pin board, the relay has no verified H/L behavior, the
-PZEM TX voltage has not been measured, or any PZEM AC/CT or relay contact wire
-is connected during the low-voltage bench stage.
+## 4. Power & USB Separation
+
+- **Runtime**: BIS-marked isolated 5V 2A USB charger → USB-A-female-to-screw-terminal breakout → 5V / GND rail.
+- **Flashing**: Flash using laptop USB with mains and high-voltage AC disconnected. For runtime operation, disconnect laptop USB.
+- **Mains Safety**: Never use Dupont jumpers, breadboards, or thin wires for 230V AC mains conductors. Use 1.0 mm² insulated mains cable.

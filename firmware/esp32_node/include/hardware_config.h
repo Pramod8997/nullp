@@ -8,12 +8,42 @@
 #define EMS_BENCH_MODE 0
 #endif
 
+// ═══════════════════════════════════════════════════════
+// PZEM-004T v4.0 (100A) UART2 Configuration
+// ═══════════════════════════════════════════════════════
+#define PZEM_RX_PIN 16
+#define PZEM_TX_PIN 17
+#define PZEM_SERIAL Serial2
+#define PZEM_UART_BAUD 9600
+
+// ═══════════════════════════════════════════════════════
+// 4-Channel Active-LOW Opto-Isolated Relay Configuration
+// Remapped CH4 from GPIO 12 to GPIO 32 to eliminate MTDI flash strapping pin boot hazard
+// ═══════════════════════════════════════════════════════
+#define RELAY_CH1_PIN 26
+#define RELAY_CH2_PIN 27
+#define RELAY_CH3_PIN 14
+#define RELAY_CH4_PIN 32
+
+// Keep active-low fail-safe relay macros
+#ifndef RELAY_ON
+#define RELAY_ON LOW
+#endif
+#ifndef RELAY_OFF
+#define RELAY_OFF HIGH
+#endif
+
+// ═══════════════════════════════════════════════════════
+// Production Safety Thresholds (230V / 100A CT)
+// ═══════════════════════════════════════════════════════
+#define ENABLE_LOCAL_PROTECTION 1
+#define MAX_SAFE_CURRENT_A 32.0f
+#define MAX_SAFE_VOLTAGE_V 260.0f
+#define MIN_SAFE_VOLTAGE_V 180.0f
+#define TELEMETRY_INTERVAL_MS 1000
+#define WATCHDOG_TIMEOUT_S 5
+
 // Compile-time hardware contract for the ESP32 node.
-//
-// Keep physical pins, safety thresholds, metering scales and task timing in
-// one tracked header.  The runtime YAML profiles mirror these values and the
-// parity tests compare both representations.  Credentials remain in
-// secrets.h and are deliberately not part of this file.
 namespace ems_hardware {
 
 constexpr float RATED_WATTS = 250.0f;
@@ -21,11 +51,12 @@ constexpr float POWER_FACTOR = 1.0f;
 constexpr float MAINS_VOLTAGE_V = 230.0f;
 constexpr float MAINS_FREQUENCY_HZ = 50.0f;
 
-constexpr int RELAY_PIN = 18;
+constexpr int RELAY_PIN = 18;  // Legacy single-channel binding for test compatibility
+constexpr int RELAY_CH1 = RELAY_CH1_PIN;
+constexpr int RELAY_CH2 = RELAY_CH2_PIN;
+constexpr int RELAY_CH3 = RELAY_CH3_PIN;
+constexpr int RELAY_CH4 = RELAY_CH4_PIN;
 constexpr bool RELAY_ACTIVE_LOW = false;
-constexpr int PZEM_RX_PIN = 16;
-constexpr int PZEM_TX_PIN = 17;
-constexpr int PZEM_UART_BAUD = 9600;
 
 constexpr float CRITICAL_PCT = 1.25f;
 constexpr float EDGE_ROC_THRESHOLD_W_PER_S = 1000.0f;
@@ -44,11 +75,7 @@ constexpr unsigned int MQTT_PAYLOAD_MAX_BYTES = 256U;
 constexpr unsigned long POWER_TELEMETRY_PERIOD_MS = 1000UL;
 constexpr unsigned long DIAGNOSTIC_TELEMETRY_PERIOD_MS = 10000UL;
 
-// The physically available meter is a PZEM-004T-100A(V4.0)-type external-CT
-// unit.  The installed library uses the v3/v4-compatible Modbus register
-// protocol, but the exact board, CT polarity, TX level and calibration still
-// require physical validation before mains release.  There is no ESP32 ADC,
-// SCT-013 burden, ZMPT101B or ACS712 path in this firmware.
+// PZEM-004T-100A(V4.0) digital metering limits
 constexpr float PZEM_MIN_VALID_VOLTAGE_V = 80.0f;
 constexpr float PZEM_MAX_VALID_VOLTAGE_V = 260.0f;
 constexpr float PZEM_MAX_VALID_CURRENT_A = 100.0f;

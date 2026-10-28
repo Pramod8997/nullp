@@ -327,13 +327,13 @@ Project_Overview.pdf
 !docs/**/*.md
 !docs/**/*.pdf
 !docs/screenshots/*
-!claude_debug/
-!claude_debug/**/*
+!docs/archive/**/*
+claude_debug/
+claude_context/
 claude_debug/claude/
 claude_debug/GOD_TIER_PLAN*.md
 !claude_debug/GOD_TIER_PLAN_2026-09-10.md
-!claude_context/
-!claude_context/**/*
+
 !.github/**/*
 !.agents/**/*
 !parse_prompt.py
@@ -351,3 +351,8 @@ firmware/esp32_node/include/secrets.h
 mosquitto/config/passwd
 **/mosquitto/config/passwd
 !**/mosquitto/config/passwd.example
+
+# ── Root Temporary / Scratch Artifacts ──────────────────────────────────────
+Untitled*
+ChatGPT*
+*.tmp

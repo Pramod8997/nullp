@@ -268,7 +268,7 @@ async def test_nan_never_published_to_mqtt(mqtt_client):
         if topic.endswith("/telemetry"):
             # json.loads accepts bare NaN by default; reject it explicitly.
             parsed = json.loads(payload, parse_constant=_reject_json_constant)
-            assert all(math.isfinite(v) for v in parsed.values())
+            assert all((all(math.isfinite(x) for x in v) if isinstance(v, (list, tuple)) else math.isfinite(v)) for v in parsed.values())
 
 
 def _reject_json_constant(name):

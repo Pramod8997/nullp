@@ -1,33 +1,36 @@
 # Hardware Pinout & Wiring Specification
 
 > **Rig:** Single-node, **single-socket** prototype — laptop + phone charger, ≤250 W, India 230 V 50 Hz.
-> **Current board:** 38-pin ESP32-WROOM-32 DevKit. The 38-pin low-voltage guide is [`claude_debug/WIRING_STEP_BY_STEP.md`](./claude_debug/WIRING_STEP_BY_STEP.md); older 30-pin references are not mechanically compatible.
+> **Current board:** 38-pin ESP32-WROOM-32 DevKit. The 38-pin low-voltage guide is [`docs/archive/claude_debug/WIRING_STEP_BY_STEP.md`](./docs/archive/docs/archive/claude_debug/WIRING_STEP_BY_STEP.md); older 30-pin references are not mechanically compatible.
 > **Authoritative current build:** [`docs/ems_hardware/ACTUAL_100A_CT_WIRING.md`](./docs/ems_hardware/ACTUAL_100A_CT_WIRING.md). The older 10 A shunt specification is historical and must not be mixed with the available CT meter.
 >
 > **Build class:** zero soldering, integrated modules only, ≤₹3,000. Production
 > pins are already assigned; the repository also provides a separate compiled
 > `bench` firmware for mains-disconnected relay continuity testing.
 
-* **PZEM-004T-100A(V4.0)-type external-CT meter:**
-  * ESP32 GPIO 16 (RX2)  <──  PZEM TTL TX; **measure TX idle voltage before connecting**. A measured 5 V output requires the documented 1 kΩ/2 kΩ divider or a verified level converter.
-  * ESP32 GPIO 17 (TX2)  ──>  PZEM TTL RX
-  * PZEM TTL header: `GND, TX, RX, 5V`; AC/CT header: `CT, CT, N, L` per the exact manual.
-  * The external CT surrounds one live conductor only; load current does not pass through a PZEM shunt.
-  * There is no ESP32 ADC, ZMPT101B, ACS712, SCT-013 or external burden-resistor path.
-  * MCU must be **ESP32-WROOM-32**, **38-pin DevKit**. **Not WROVER** — WROVER uses GPIO 16/17 for PSRAM.
-* **Relay actuation — direct drive, NO generic level shifter** (verified 5 V opto-isolated board; the available board may have four channels):
-  * Use channel 1 only; channels 2–4 remain unused.
-  * Module jumper set to **H (high-trigger)**
-  * ESP32 GPIO 18 ──────────> Relay Module **IN**   ← direct, no MOSFET, no series resistor
-  * Relay **IN** ──[ 100kΩ ]──> GND  ← **mandatory pull-down**: GPIO 18 is Hi-Z during reset/boot, and without this the relay state is undefined. Resistor legs go straight into the screw terminals — no soldering
-  * Relay VCC ──> +5 V · Relay GND ──> shared common ground with the ESP32
-  * **Net polarity at GPIO 18 is ACTIVE-HIGH** (`RELAY_ACTIVE_LOW = false` in `main.cpp`). With a high-trigger input there are **zero inversions** in the chain: HIGH = closed, LOW = open, Hi-Z = open (fail-safe). GPIO 18 sources ~2.1 mA into the opto LED.
-   * ⚠️ **Why not a low-trigger module:** at IN = 3.3 V a 5 V-referenced opto still passes ~0.5 mA — not a guaranteed OFF; the relay may fail to release or chatter. If you can only get a low-trigger board, set module VCC = 3.3 V with JD-VCC on 5 V, flip the `RELAY_ACTIVE_LOW` constant in `main.cpp` to `true`, and move the 100 kΩ to a pull-**up**. Re-verify at Stage 2.
-    * **Module identity gate:** the actual board's H/L behavior is not
-     approved by its contact-current label alone. Before wiring, verify the
-     actual board's H/L jumper, VCC/JD-VCC arrangement, 5 V input current and
-     COM/NO contact labeling against its datasheet.
+* **PZEM-004T v4.0 (100A) External-CT Digital Meter:**
+  * **TTL Header (Low Voltage)**:
+    * 5V -> External 5V Rail (ESP32 VIN)
+    * GND -> Common DC GND
+    * TX -> 1kΩ / 2kΩ voltage divider (or 5V-to-3.3V level shifter) -> ESP32 GPIO 16 (UART2 RX)
+    * RX -> ESP32 GPIO 17 (UART2 TX)
+  * **High-Voltage Screw Terminals (PZEM-004T v4.0)**:
+    * Terminal 1 (L): 230V AC Live (via 1A fast-blow inline fuse)
+    * Terminal 2 (N): 230V AC Neutral
+    * Terminal 3 (CT+): 100A Split-Core CT Red wire
+    * Terminal 4 (CT-): 100A Split-Core CT Black wire
+    * *Safety Note*: Screw terminals 3 & 4 tightly BEFORE clamping the CT around the single insulated Live (L) wire. Note that the PZEM-004T AC side must be powered by 230V AC for the onboard metering ASIC to respond to UART polls.
+  * MCU must be **ESP32-WROOM-32**, **38-pin DevKit** (or 30-pin DevKit V1). **Not WROVER** — WROVER uses GPIO 16/17 for PSRAM.
+* **4-Channel Active-LOW Opto-Isolated Relay Module**:
+  * VCC -> 5V Rail (>= 2A external supply recommended; or JD-VCC = 5V and VCC = 3.3V with jumper removed for full optical isolation)
+  * GND -> Common DC GND
+  * IN1 -> GPIO 26
+  * IN2 -> GPIO 27
+  * IN3 -> GPIO 14
+  * IN4 -> GPIO 32 (CRITICAL FIX: Moved off strapping pin GPIO 12 / MTDI, which would pull flash voltage to 1.8V at boot and brick the ESP32)
+  * **Logic Polarity**: **ACTIVE-LOW** (RELAY_ON = LOW, RELAY_OFF = HIGH). Pins are pre-initialized to HIGH (RELAY_OFF) in firmware setup before pin direction configuration to prevent boot-up relay chatter. Fail-safe autonomous trip instantly trips all channels HIGH.
   * RC snubber (100 Ω 2 W flameproof + 0.1 µF 275 VAC Class-X2 across COM–NO): **optional** for this load set — no inductive load remains in scope. Reinstate for any motor/fan/pump/transformer load.
+
 * **Wiring interface:**
    * ESP32 plugs into a **38-pin screw-terminal expansion shield** — match pin count *and* board width. Pins are only broken out; no remapping. A 30-pin shield must not be forced onto this board.
 * **Power Supply (5 V Rail):**

@@ -35,7 +35,11 @@ TWIN_PY = REPO_ROOT / "src" / "hardware" / "esp32_firmware_sim.py"
 CONFIG_HW = REPO_ROOT / "config" / "config.hardware.yaml"
 PIPELINE_PY = REPO_ROOT / "scripts" / "run_pipeline.py"
 SECRETS_H = REPO_ROOT / "firmware" / "esp32_node" / "include" / "secrets.h"
-WIRING_DOC = REPO_ROOT / "claude_debug" / "WIRING_STEP_BY_STEP.md"
+WIRING_DOC = (
+    REPO_ROOT / 'docs' / 'archive' / 'claude_debug' / 'WIRING_STEP_BY_STEP.md'
+    if (REPO_ROOT / 'docs' / 'archive' / 'claude_debug' / 'WIRING_STEP_BY_STEP.md').exists()
+    else REPO_ROOT / 'claude_debug' / 'WIRING_STEP_BY_STEP.md'
+)
 
 if not MAIN_CPP.exists():
     pytest.skip(
