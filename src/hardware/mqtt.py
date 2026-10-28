@@ -2,13 +2,14 @@ import re
 import aiomqtt
 import asyncio
 import logging
-from typing import Callable, Awaitable, Optional, Union, Any, List, Set
+from typing import Callable, Awaitable, Optional, Union, Any, List, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
 class MQTTClientManager:
     def __init__(self, broker: str, port: int = 1883,
-                 username: Optional[str] = None, password: Optional[str] = None):
+                 username: Optional[str] = None, password: Optional[str] = None,
+                 ingress_queue_size: int = 256):
         self.broker = broker
         self.port = port
         self.username = username
@@ -16,18 +17,78 @@ class MQTTClientManager:
         self.client: Optional[aiomqtt.Client] = None
         self._read_callback: Optional[Callable[[str, Union[str, bytes, bytearray, int, float, None]], Awaitable[None]]] = None
         self._connected: bool = True
+        self._run_started = False
+        self._ingress_queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue(
+            maxsize=max(1, ingress_queue_size)
+        )
+        self._dropped_messages = 0
 
     def set_read_callback(self, callback: Callable[[str, Union[str, bytes, bytearray, int, float, None]], Awaitable[None]]) -> None:
         self._read_callback = callback
 
     def is_connected(self) -> bool:
-        if self.client is not None:
-            return True
+        if self._run_started:
+            return self.client is not None and self._connected
+        # Preserve the historical pre-run contract used by local pipeline
+        # construction/tests; once run() starts, only a live broker session is
+        # reported as connected.
         return self._connected
+
+    @property
+    def ingress_queue_size(self) -> int:
+        return self._ingress_queue.qsize()
+
+    @property
+    def dropped_messages(self) -> int:
+        return self._dropped_messages
+
+    def _enqueue_message(self, topic: str, payload: Any) -> None:
+        """Bound broker ingress and prefer fresh telemetry under overload."""
+        item = (topic, payload)
+        if self._ingress_queue.full():
+            # Telemetry is periodic and replaceable; retain control/status and
+            # label frames whenever possible by evicting the oldest telemetry
+            # already buffered.  The queue is intentionally bounded even when
+            # every item is a control frame.
+            try:
+                self._ingress_queue.get_nowait()
+                self._ingress_queue.task_done()
+                self._dropped_messages += 1
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            self._ingress_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            self._dropped_messages += 1
+
+    async def _dispatch_ingress(self) -> None:
+        while True:
+            topic, payload = await self._ingress_queue.get()
+            try:
+                if self._read_callback:
+                    await self._read_callback(topic, payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # One bad frame must not terminate the consumer/connection.
+                logger.exception("Error processing MQTT message on %s: %s", topic, exc)
+            finally:
+                self._ingress_queue.task_done()
+
+    def _clear_ingress_queue(self) -> None:
+        while True:
+            try:
+                self._ingress_queue.get_nowait()
+                self._ingress_queue.task_done()
+            except asyncio.QueueEmpty:
+                return
 
     async def run(self, read_topic: Union[str, list]) -> None:
         # Reconnect loop
+        self._run_started = True
+        self._connected = False
         while True:
+            dispatcher: Optional[asyncio.Task] = None
             try:
                 async with aiomqtt.Client(
                     self.broker, port=self.port,
@@ -40,12 +101,12 @@ class MQTTClientManager:
                     for t in topics:
                         await client.subscribe(t, qos=1)
                         logger.info(f"Subscribed to reads on {t}")
+                    dispatcher = asyncio.create_task(
+                        self._dispatch_ingress(), name="mqtt-ingress-dispatcher"
+                    )
                     async for message in client.messages:
                         if self._read_callback and message.topic:
-                            try:
-                                await self._read_callback(str(message.topic), message.payload)
-                            except Exception as e:
-                                logger.error(f"Error processing MQTT message: {e}")
+                            self._enqueue_message(str(message.topic), message.payload)
             except aiomqtt.MqttError as e:
                 self.client = None
                 self._connected = False
@@ -54,8 +115,22 @@ class MQTTClientManager:
             except asyncio.CancelledError:
                 self.client = None
                 self._connected = False
+                self._clear_ingress_queue()
                 logger.info("MQTT client task cancelled.")
                 break
+            except Exception as e:
+                self.client = None
+                self._connected = False
+                logger.exception("MQTT consumer stopped unexpectedly: %s", e)
+                await asyncio.sleep(5)
+            finally:
+                if dispatcher is not None:
+                    dispatcher.cancel()
+                    try:
+                        await dispatcher
+                    except asyncio.CancelledError:
+                        pass
+                self._clear_ingress_queue()
 
     async def publish_command(self, write_topic: str, payload: str,
                               retries: int = 3, retry_delay: float = 1.0) -> None:

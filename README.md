@@ -24,7 +24,7 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 │             ESP32 Edge Nodes             │     │     │           React Dashboard              │
 ├──────────────────────────────────────────┤     │     │           (Vite Port :5173)            │
 │  Core 0 (High Priority Safety):          │     │     └──────────────────▲─────────────────────┘
-│    - True RMS Sampling (~500µs)          │     │                        │
+│    - PZEM digital UART telemetry         │     │                        │
 │    - Edge Arc-Fault Proxy (dP/dt)        │     │                        │ WebSockets
 │    - Immediate Relay Cutoff (0-network)  │     │                        │
 │                                          │     │     ┌──────────────────┴─────────────────────┐
@@ -86,7 +86,7 @@ A production-grade Smart Home Energy Management System integrating **CNN/ProtoNe
 |---------|------------|
 | Server crash / MQTT disconnect | ESP32 node operates safely and independently; Core 0 handles all threshold/arc-fault cutoffs locally without network/broker dependencies. Heartbeat watchdog checks server status. |
 | Database lock | CSV fallback captures writes; replayed on restart |
-| CT clamp drift | Calibration script (`calibrate_ct.py`) corrects CT_RATIO in-situ |
+| PZEM calibration drift | Calibration script (`calibrate_ct.py`) records a power scaling artifact; it does not edit firmware CT constants |
 
 ---
 
@@ -221,7 +221,7 @@ We also have a full CI/CD GitHub Action (`.github/workflows/test.yml`) that enfo
 | **Frontend UI** | 13 | `vitest`, `RTL` | React components (DeviceCards, DigitalTwin, Status). |
 | **Chaos/Adversarial** | 19 | `verify_chaos_agent.py` | RL NaN/Inf guard, Watchdog sanitization, 100-input barrage. |
 | **ML Verification** | 4 | `verify_ml_agent.py` | Sigmoid gating energy bounds, EVT metric alignment, Augmentation variance. |
-| **ESP32 Firmware** | 10 | `Unity` (C) | True RMS, Arc-fault (dP/dt), Watchdog, Non-blocking relays. |
+| **ESP32 Firmware** | 10 | `Unity` (C) | PZEM UART telemetry, Arc-fault (dP/dt), Watchdog, Non-blocking relays. |
 
 ---
 
@@ -276,7 +276,7 @@ python3 scripts/calibrate_ct.py node_fridge
 The script:
 1. Publishes a `CALIBRATE_REQUEST` to the device.
 2. Waits for a power reading while a 100 W reference load is attached.
-3. Computes a correction factor and updates `CT_RATIO` in `firmware/esp32_node/src/main.cpp`.
+3. Computes a correction factor and writes a calibration artifact; it does not update firmware `CT_RATIO` (there is no active ADC CT_RATIO path).
 
 ### Safety Stress Test
 
@@ -339,7 +339,7 @@ mjr/
 ├── firmware/
 │   └── esp32_node/
 │       └── src/
-│           └── main.cpp            # ESP32 firmware (true RMS, relay ACK, heartbeat watchdog)
+│           └── main.cpp            # ESP32 firmware (PZEM UART, relay ACK, heartbeat watchdog)
 ├── src/
 │   ├── api/
 │   │   └── main.py                 # FastAPI + WebSocket bridge (CORS, REST, heartbeat)
@@ -468,7 +468,7 @@ The firmware in `firmware/esp32_node/src/main.cpp` implements:
 
 | Feature | Details |
 |---------|---------|
-| **True RMS Measurement** | 200 samples over 100ms window using `analogRead()` |
+| **PZEM Measurement** | Digital V/I/P/PF register reads over UART; no ESP32 ADC waveform path |
 | **Non-blocking Relay Control** | `millis()`-based cooldown instead of `delay()` |
 | **MQTT Topics** | Publishes `home/sensor/{ID}/power`, subscribes `home/plug/{ID}/command` |
 | **Hardware ACK** | Sends `OFF_CONFIRMED` after relay state change |
@@ -501,7 +501,7 @@ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
 | Stale database | Run `make clean` to reset |
 | Latency panel shows > 200ms (red) | Check system load; reduce logging verbosity in `config.yaml` |
 | ESP32 enters safe mode | Server heartbeat lost — verify pipeline and Mosquitto connectivity |
-| PZEM readings off by > 5% | Re-run `python scripts/calibrate_ct.py <DEVICE_ID> --ref-power 100 --username ems_pipeline --password <pw>` with a known 100W load (the rig meters via a PZEM shunt, not a CT clamp) |
+| PZEM readings off by > 5% | Re-run `python scripts/calibrate_ct.py <DEVICE_ID> --ref-power 100 --username ems_pipeline --password <pw>` with a known 100W load after the actual external-CT PZEM wiring is validated |
 | `OSError: Bad file descriptor` on shutdown | Harmless asyncio cleanup noise on Ctrl+C — does not affect data integrity |
 
 ---

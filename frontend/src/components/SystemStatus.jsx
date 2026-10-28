@@ -21,8 +21,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { useTheme } from '../contexts/ThemeContext';
-
-const API_BASE = `http://${window.location.hostname}:8000`;
+import { getApiUrl } from '../api/client';
 
 const finiteMetric = (value) => (
   (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
@@ -85,7 +84,7 @@ const SystemStatus = ({
     .filter((row) => row.avg !== null || row.p95 !== null || row.max !== null);
 
   const handleExportCSV = () => {
-    window.open(`${API_BASE}/api/export-csv`, '_blank');
+    window.open(getApiUrl('/api/export-csv'), '_blank');
   };
 
   const gridColor = isDark ? '#1f2937' : '#f3f4f6';

@@ -5,10 +5,12 @@ prototype. No hardware is assembled and mains authorization is **blocked**.
 
 ## Use these documents
 
-1. [`WIRING.md`](./WIRING.md) — current low-voltage pin map and bring-up order.
-2. [`SAFETY_GATES.md`](./SAFETY_GATES.md) — fixed mains boundary and release gates.
-3. [`PROCUREMENT.md`](./PROCUREMENT.md) — current BOM, order gates and missing interface.
-4. [`VALIDATION_STATUS.md`](./VALIDATION_STATUS.md) — physical evidence status.
+1. [`ACTUAL_100A_CT_WIRING.md`](./ACTUAL_100A_CT_WIRING.md) — actual-board pin map and CT-meter correction, with visual diagrams [`actual_100a_ct_wiring.svg`](./actual_100a_ct_wiring.svg) and [`actual_low_voltage_pin_photo.svg`](./actual_low_voltage_pin_photo.svg).
+2. [`WIRING.md`](./WIRING.md) — compact current low-voltage reference for the available CT meter.
+3. [`PRE_POWER_MULTIMETER_CHECKLIST.md`](./PRE_POWER_MULTIMETER_CHECKLIST.md) — zero-trust audit, master pin table and physical test protocol.
+4. [`SAFETY_GATES.md`](./SAFETY_GATES.md) — fixed mains boundary and release gates.
+5. [`PROCUREMENT.md`](./PROCUREMENT.md) — current BOM, order gates and missing interface.
+6. [`VALIDATION_STATUS.md`](./VALIDATION_STATUS.md) — physical evidence status.
 
 ## Canonical project references
 
@@ -23,6 +25,9 @@ prototype. No hardware is assembled and mains authorization is **blocked**.
 - Low-voltage bench bring-up only until the physical safety gates pass.
 - 38-pin ESP32-WROOM-32 DevKit; not a 30-pin shield or WROVER board.
 - GPIO16/17 are the PZEM UART; GPIO18 is the active-high relay input.
+- The physically available PZEM is the 100 A CT variant; use
+  [`ACTUAL_100A_CT_WIRING.md`](./ACTUAL_100A_CT_WIRING.md), not the retired
+  10 A shunt topology.
 - The physical socket envelope is the documented laptop + phone-charger,
   single-socket, 250 W prototype. Projector recognition remains a software
   scope item and is not physical authorization for this socket.

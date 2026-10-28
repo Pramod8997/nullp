@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { memo, useMemo } from 'react';
 import {
   LineChart,
   Line,
@@ -9,6 +9,10 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { useTheme } from '../contexts/ThemeContext';
+import {
+  buildRealTimeChartData,
+  finiteNonNegative,
+} from './chartDataUtils';
 
 const DEVICE_COLORS = {
   node_fridge: '#10b981',
@@ -29,16 +33,18 @@ const DEVICE_COLORS = {
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
+  const validEntries = payload.filter((entry) => finiteNonNegative(entry?.value) !== null);
+  if (validEntries.length === 0) return null;
   return (
     <div className="bg-gray-950/95 dark:bg-gray-900/95 backdrop-blur-md p-3 rounded-xl border border-gray-800 shadow-2xl text-xs z-50">
       <p className="text-gray-400 font-mono mb-2 pb-1 border-b border-gray-800">{label}</p>
       <div className="space-y-1">
-        {payload.map((entry, i) => (
+        {validEntries.map((entry, i) => (
           <div key={i} className="flex items-center justify-between gap-3 font-mono">
             <span className="font-semibold" style={{ color: entry.color }}>
               {entry.dataKey}:
             </span>
-            <span className="text-white font-bold">{Number(entry.value).toFixed(1)} W</span>
+            <span className="text-white font-bold">{finiteNonNegative(entry.value).toFixed(1)} W</span>
           </div>
         ))}
       </div>
@@ -46,28 +52,33 @@ const CustomTooltip = ({ active, payload, label }) => {
   );
 };
 
-const RealTimeChart = ({ data = [], devices = {} }) => {
+const getDeviceIds = (devices) => {
+  if (!devices || typeof devices !== 'object' || Array.isArray(devices)) return [];
+  return Object.keys(devices).filter((deviceId) => deviceId.trim() !== '');
+};
+
+const RealTimeChart = ({ data = [], devices = {}, loading = false, error = null }) => {
   const { isDark } = useTheme();
 
-  // Merge power readings into unified time-series rows
-  const chartData = useMemo(() => {
-    const timeMap = {};
-    data.forEach((point) => {
-      const key = point.time;
-      if (!timeMap[key]) timeMap[key] = { time: key };
-      Object.keys(point).forEach((k) => {
-        if (k !== 'time' && k !== 'device_id') {
-          timeMap[key][k] = point[k];
-        }
-      });
-    });
-    return Object.values(timeMap).slice(-60);
-  }, [data]);
+  const chartData = useMemo(() => buildRealTimeChartData(data), [data]);
 
-  const deviceIds = Object.keys(devices || {});
+  const deviceIds = useMemo(
+    () => getDeviceIds(devices).filter((deviceId) => (
+      chartData.some((point) => Object.prototype.hasOwnProperty.call(point, deviceId))
+    )),
+    [chartData, devices]
+  );
 
   const gridColor = isDark ? '#1f2937' : '#f3f4f6';
   const axisColor = isDark ? '#6b7280' : '#9ca3af';
+
+  if (loading || error || chartData.length === 0 || deviceIds.length === 0) {
+    return (
+      <div className="w-full h-[280px] pt-2 flex items-center justify-center text-center text-sm text-gray-500 dark:text-gray-400" role="status" aria-live="polite">
+        {loading ? 'Loading power history…' : error ? 'Unable to display power history.' : 'No valid power readings available.'}
+      </div>
+    );
+  }
 
   return (
     <div className="w-full h-[280px] pt-2">
@@ -118,4 +129,4 @@ const RealTimeChart = ({ data = [], devices = {} }) => {
   );
 };
 
-export default RealTimeChart;
+export default memo(RealTimeChart);

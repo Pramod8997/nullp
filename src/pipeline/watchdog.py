@@ -19,7 +19,7 @@ class SoftAnomalyWatchdog:
             window_size: Number of recent samples to keep for baseline.
             z_score_threshold: The z-score beyond which an anomaly is flagged.
         """
-        self.window_size = window_size
+        self.window_size = max(1, int(window_size))
         self.z_score_threshold = z_score_threshold
         self.history = {}
         
@@ -44,7 +44,10 @@ class SoftAnomalyWatchdog:
         history = self.history[device_id]
         
         # Need a minimum number of samples to establish a baseline
-        if len(history) < 10:
+        # A fixed ten-sample warm-up made small configured rolling windows
+        # permanently inert. Warm up to the smaller of ten samples and the
+        # configured window, while retaining the historical default behavior.
+        if len(history) < min(10, self.window_size):
             history.append(reading)
             return False
             

@@ -12,8 +12,15 @@ import signal
 import math
 import yaml
 import os
+import sys
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 import aiomqtt
+
+from src.telemetry_contract import encode_telemetry_frame
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -278,9 +285,12 @@ async def simulate_device(client: aiomqtt.Client, cfg: dict):
             if tick % 10 == 0:
                 telemetry_topic = f"home/sensor/{device_id}/telemetry"
                 voltage = 230.0 + random.uniform(-4.0, 4.0)
-                current = (power / voltage) if voltage > 0 else 0.0
                 pf = min(0.99, max(0.70, random.gauss(0.95, 0.05)))
-                diag_payload = json.dumps({"v": round(voltage, 1), "i": round(current, 2), "w": round(power, 1), "pf": round(pf, 2)})
+                # PZEM current is apparent current: I = P / (V * PF), as in
+                # VirtualPZEM004T.set_load().  Using P/V here understated
+                # current whenever the simulated power factor was below one.
+                current = (power / (voltage * pf)) if voltage > 0 and pf > 0 else 0.0
+                diag_payload = encode_telemetry_frame(voltage, current, power, pf)
                 await client.publish(telemetry_topic, payload=diag_payload)
 
         except asyncio.CancelledError:
@@ -289,7 +299,7 @@ async def simulate_device(client: aiomqtt.Client, cfg: dict):
             logger.error(f"Error in {device_id} loop: {e}")
 
 
-async def handle_relay_commands(client: aiomqtt.Client):
+async def handle_relay_commands(client: aiomqtt.Client, device_ids: set[str]):
     """Listen for server relay commands and respond with hardware ACKs."""
     cmd_topic = "home/plug/+/command"
     await client.subscribe(cmd_topic)
@@ -298,7 +308,11 @@ async def handle_relay_commands(client: aiomqtt.Client):
         topic_str = str(message.topic)
         payload_str = message.payload.decode("utf-8", errors="replace").strip()
         parts = topic_str.split("/")
-        if len(parts) >= 3:
+        if len(payload_str.encode("utf-8")) > 256:
+            logger.warning("[SIM RELAY] Dropping oversized command payload")
+            continue
+        if len(parts) == 4 and parts[:2] == ["home", "plug"] \
+                and parts[3] == "command" and parts[2] in device_ids:
             dev_id = parts[2]
             ack_topic = f"home/plug/{dev_id}/ack"
             if payload_str == "ON":
@@ -307,13 +321,15 @@ async def handle_relay_commands(client: aiomqtt.Client):
             elif payload_str == "OFF":
                 logger.info(f"[SIM RELAY] Turned OFF {dev_id} via server command")
                 await client.publish(ack_topic, "OFF_CONFIRMED")
+            elif payload_str == "WARNING":
+                logger.info(f"[SIM RELAY] Warning received for {dev_id}")
 
 
 async def main():
     parser = argparse.ArgumentParser(description="Mock ESP32 1Hz Data Generator (10 devices)")
     parser.add_argument("--broker", type=str, default=os.getenv("MQTT_BROKER", "localhost"), help="MQTT Broker address")
     parser.add_argument("--port", type=int, default=int(os.getenv("MQTT_PORT", "1883")), help="MQTT Broker port")
-    parser.add_argument("--username", type=str, default=os.getenv("MQTT_USERNAME", "pipeline"), help="MQTT Username")
+    parser.add_argument("--username", type=str, default=os.getenv("MQTT_USERNAME"), help="MQTT Username")
     parser.add_argument("--password", type=str, default=os.getenv("MQTT_PASSWORD"), help="MQTT Password")
     parser.add_argument("--all", action="store_true", default=True, help="Simulate all devices regardless of simulated flag in config.yaml")
     parser.add_argument("--demo", action="store_true", help="Simulate demo bench electronics (laptop, monitor, projector, desktop, charger)")
@@ -369,7 +385,9 @@ async def main():
                     await client.publish(status_topic, "ONLINE")
 
                 tasks = [asyncio.create_task(simulate_device(client, cfg)) for cfg in active_devices]
-                relay_task = asyncio.create_task(handle_relay_commands(client))
+                relay_task = asyncio.create_task(
+                    handle_relay_commands(client, {d["id"] for d in active_devices})
+                )
                 tasks.append(relay_task)
                 shutdown_waiter = asyncio.create_task(shutdown_event.wait())
 

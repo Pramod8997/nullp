@@ -20,7 +20,7 @@ Your build has two separate worlds, and jumper cables are only legal in one of t
 | World | Voltage | Components | Wiring |
 | :-- | :-- | :-- | :-- |
 | **World 1 — DC/signal** | 3.3 V / 5 V | ESP32 ↔ PZEM ↔ relay module ↔ 5 V supply | ✅ Dupont jumpers fine |
-| **World 2 — mains** | 230 VAC | Plug → fuse → PZEM AC → relay contacts → socket | ❌ **Screw terminals + 1.0 mm² wire ONLY. A dupont wire on 230 V is a fire.** |
+| **World 2 — mains** | 230 VAC | Plug → fuse/voltage-sense branch → relay contacts → CT → socket | ❌ **Screw terminals + 1.0 mm² wire ONLY. A dupont wire on 230 V is a fire.** |
 
 Good news: with a 38-pin ESP32 and jumpers you can build and test **everything
 except the mains side** first (§8).
@@ -32,8 +32,8 @@ except the mains side** first (§8).
 | # | Item | Qty | Note |
 | :-: | :-- | :-: | :-- |
 | 1 | ESP32 DevKit, **WROOM-32D**, 38-pin | 1 | **Not WROVER** — WROVER uses GPIO 16/17 for PSRAM and silently kills metering (spec D10). Check the metal can label. |
-| 2 | PZEM-004T **v3.0, 10 A direct-connect** | 1 | Not the 100 A CT variant (spec D1) |
-| 3 | 2-channel 5 V relay module, **H/L trigger jumper** | 1 | Set jumper to **H** before wiring (§3) |
+| 2 | PZEM-004T-100A **V4-type external CT** | 1 | Actual available board; confirm exact manual before mains |
+| 3 | 5 V relay module, available board may be **4-channel** | 1 | Use channel 1 only; verify H/L before wiring (§3) |
 | 4 | Female–Female dupont jumpers, 20 cm | **7** min (buy a 40-pack) | |
 | 5 | Female–Male dupont jumpers, 20 cm | 4 (buy a 40-pack) | Runtime power feed + spares |
 | 6 | Breadboard, 400 points | 1 | Recommended, not mandatory |
@@ -90,8 +90,11 @@ and **OPEN is the only possible boot state**. It costs ₹3.
 
 ### Relay module setup BEFORE wiring
 
-- Set the module's **H/L trigger jumper to H (high-trigger)**.
-- Firmware is written for this: `RELAY_ACTIVE_LOW = false` (`main.cpp:96`).
+- Set the module's **H/L trigger selector to H (high-trigger)**, if that mode is
+  verified on the physical board. The available board may have four channels;
+  use channel 1 only and leave channels 2–4 unused.
+- Firmware is written for this: `RELAY_ACTIVE_LOW = false` in the hardware
+  configuration header used by `main.cpp`.
 - A low-trigger module driven at 3.3 V cannot reliably turn OFF (~0.5 mA keeps
   flowing in the opto LED — spec B-8). **If your board has no H/L jumper, STOP**
   and read the D5 purchase-contingency fallback in `HARDWARE_FINAL_SPEC.md`
@@ -147,16 +150,24 @@ PZEM TX ──[ 1 kΩ ]──┬──> GPIO 16
 
 ---
 
-## 7. The mains side (World 2) — orientation only, build per the spec
+## 7. The mains side (World 2) — orientation only, electrician review required
 
 **Screw terminals and 1.0 mm² wire only. No jumpers ever.** Fixed load-path
 order (spec D7/D8/D9):
 
 ```
-Moulded plug L → 5 A ceramic fuse → PZEM AC in-L → PZEM AC out-L → Relay COM → Relay NO → socket L
-Plug N          → PZEM AC in-N   → PZEM AC out-N → socket N
+Moulded plug L → 5 A ceramic fuse ┬→ PZEM L voltage sense
+                                  └→ Relay COM → Relay NO → CT around live → socket L
+Plug N          ───────────────────┬→ PZEM N voltage sense
+                                   └→ socket N
 Plug PE         → PE barrier block → enclosure bond → socket PE   (NEVER switched)
 ```
+
+The actual PZEM is the 100 A external-CT variant. Its L/N terminals are
+voltage-sense terminals; do not route load current through the PZEM as if it
+were the retired 10 A shunt version. Connect both CT secondary leads to the
+marked CT pair, clamp around one live conductor only, and never leave the CT
+secondary open while primary current is present.
 
 Full BOM, creepage/torque/inspection gates: `HARDWARE_FINAL_SPEC.md` §2 and §6.
 **Don't buy the mains parts until the bench build passes §8.**
@@ -176,9 +187,9 @@ With just: ESP32 + relay module + PZEM + breadboard + jumpers + one 100 kΩ.
    - **GPIO 18 measures LOW at idle and through a reset** (Stage 1 abort gate).
    - `set_relay(true)` → continuity COM–NO **closes**; `set_relay(false)` → opens,
      verified with a multimeter, **not by ear** (Stage 2).
-   - PZEM responds on UART; voltage reads ~230 V **only once the AC side is
-     later wired** — on the bench it reads ~0 V / no reply with AC absent, which
-     is expected.
+    - PZEM UART behavior is checked only after the actual CT-board protocol and
+      AC-side sense wiring are validated. A finite no-mains 0 V frame is invalid
+      and must not arm a relay ON request.
    - 1 Hz telemetry appears on `home/sensor/{DEVICE_ID}/power`.
 
 This covers bring-up Stages 1, 2 and most of 4 of `HARDWARE_FINAL_SPEC.md` §7

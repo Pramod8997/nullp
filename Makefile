@@ -1,27 +1,56 @@
 # ═════════════════════════════════════════════════════════════════════════════
 # Confidence-Aware Digital Twin EMS — Root Makefile
+#
+# The targets below follow the current repository entry points:
+#   - scripts/demo_full_system.py       software demo orchestration
+#   - config/config.*.yaml               runtime profiles
+#   - docker-compose.yml                 production service stack
+#   - firmware/tests and PlatformIO      host and ESP32 firmware checks
 # ═════════════════════════════════════════════════════════════════════════════
 
-PYTHON := $(shell which python3)
-ifneq ($(wildcard .venv/bin/python3),)
-	PYTHON := .venv/bin/python3
-	PIP := .venv/bin/pip
-else ifneq ($(wildcard venv/bin/python3),)
-	PYTHON := venv/bin/python3
-	PIP := venv/bin/pip
+.DEFAULT_GOAL := help
+
+# Allow callers to override tools, while selecting the checked-in virtualenv
+# when one exists on either Unix or Windows.
+ifeq ($(origin PYTHON),undefined)
+ifeq ($(OS),Windows_NT)
+PYTHON := python
+VENV_PYTHON := $(firstword $(wildcard .venv/Scripts/python.exe venv/Scripts/python.exe))
 else
-	PIP := pip3
+PYTHON := python3
+VENV_PYTHON := $(firstword $(wildcard .venv/bin/python3 .venv/bin/python venv/bin/python3 venv/bin/python))
+endif
+ifneq ($(strip $(VENV_PYTHON)),)
+PYTHON := $(VENV_PYTHON)
+endif
 endif
 
-PWD := $(shell pwd)
+PIP ?= $(PYTHON) -m pip
+PYTEST ?= $(PYTHON) -m pytest
+NPM ?= npm
+DOCKER ?= docker
+PIO ?= pio
+CMAKE ?= cmake
+ROOT := $(CURDIR)
+FIRMWARE_TEST_BUILD ?= build/firmware-tests
+
+ifeq ($(OS),Windows_NT)
+FIRMWARE_TEST_BIN := $(FIRMWARE_TEST_BUILD)/Release/run_host_tests.exe
+else
+FIRMWARE_TEST_BIN := $(FIRMWARE_TEST_BUILD)/run_host_tests
+endif
 
 .PHONY: help install install-backend install-frontend \
-        run dev dev-backend dev-frontend dev-pipeline dev-sim demo \
-        hil-test stress-test sim-test \
-        generate_data train_all train_synthetic \
-        test test-backend test-frontend test-all test-safety test-e2e \
+        run dev demo production prod dev-backend dev-frontend \
+        dev-pipeline dev-pipeline-demo dev-pipeline-hardware \
+        dev-sim dev-sim-demo \
+        hil-test stress-test sim-test test-firmware-sim test-firmware-host \
+        generate_data train_all train_synthetic train_demo enroll_demo \
+        test test-all test-backend test-frontend test-safety test-e2e \
+        verify-ml verify-chaos \
         lint lint-frontend build-frontend \
-        docker-build docker-up docker-down \
+        firmware-build firmware-upload firmware-monitor \
+        docker-build docker-up docker-down docker-logs \
         graph-update clean
 
 # ── Default Target ──────────────────────────────────────────────────────────
@@ -32,34 +61,48 @@ help:
 	@echo "  Setup & Installation:"
 	@echo "    make install           - Install all Python & Frontend dependencies"
 	@echo "    make install-backend   - Install Python dependencies only"
-	@echo "    make install-frontend  - Install Frontend npm dependencies only"
+	@echo "    make install-frontend  - Install locked Frontend npm dependencies"
 	@echo ""
 	@echo "  Development & Run:"
 	@echo "    make run / make dev    - Start full stack (Mosquitto, Pipeline, API, Frontend, Sim)"
-	@echo "    make demo              - Start full software demo (Pipeline, API, Virtual ESP32 Fleet)"
+	@echo "    make demo              - Start software demo with the demo profile and virtual fleet"
+	@echo "    make production        - Build and start the authenticated Docker Compose stack"
 	@echo "    make hil-test          - Run 10-scenario Hardware-In-The-Loop test suite"
 	@echo "    make dev-backend       - Start FastAPI backend (Port 8000)"
 	@echo "    make dev-frontend      - Start Vite Tailwind frontend (Port 5173)"
 	@echo "    make dev-pipeline      - Start real-time NILM ingestion pipeline"
+	@echo "    make dev-pipeline-demo - Start pipeline with config/config.demo.yaml"
+	@echo "    make dev-pipeline-hardware - Start pipeline with the physical profile"
 	@echo "    make dev-sim           - Start ESP32 telemetry simulator"
+	@echo "    make dev-sim-demo      - Start consumer-electronics simulator fleet"
 	@echo ""
 	@echo "  Data & Model Training:"
 	@echo "    make generate_data     - Generate synthetic & mock UK-DALE data"
 	@echo "    make train_all         - Train ProtoNet + OpenMax on all datasets (ukdale redd synd)"
 	@echo "    make train_synthetic   - Train models on synthetic dataset"
+	@echo "    make train_demo        - Train the demo-profile consumer-electronics model"
+	@echo "    make enroll_demo CAPTURE=file.npz - Enroll measured demo-device windows"
 	@echo ""
 	@echo "  Testing & Quality:"
-	@echo "    make test              - Run all backend pytest & frontend vitest tests"
-	@echo "    make test-backend      - Run Python pytest suite"
+	@echo "    make test              - Run backend pytest & frontend vitest tests"
+	@echo "    make test-all          - Run application tests and host firmware tests"
+	@echo "    make test-backend      - Run the CI-aligned Python pytest suite"
 	@echo "    make test-frontend     - Run Frontend vitest suite"
 	@echo "    make test-safety       - Run safety cutoff & arc fault test"
 	@echo "    make test-e2e          - Run end-to-end integration tests"
+	@echo "    make test-firmware-host - Build and run host-side firmware tests"
+	@echo "    make test-firmware-sim  - Run firmware/AI simulation integration test"
+	@echo "    make verify-ml         - Run ML verification checks"
+	@echo "    make verify-chaos      - Run adversarial/chaos verification checks"
 	@echo "    make lint              - Run frontend ESLint"
 	@echo "    make build-frontend    - Build production Tailwind frontend bundle"
 	@echo ""
-	@echo "  Docker & Maintenance:"
+	@echo "  Firmware, Docker & Maintenance:"
+	@echo "    make firmware-build    - Build ESP32 firmware with PlatformIO"
+	@echo "    make firmware-upload   - Flash ESP32 firmware with PlatformIO"
 	@echo "    make docker-up         - Start services with docker-compose"
 	@echo "    make docker-down       - Stop docker-compose services"
+	@echo "    make docker-logs       - Follow docker-compose service logs"
 	@echo "    make graph-update      - Update Graphify knowledge graph"
 	@echo "    make clean             - Remove DB state, pycache, dist & build artifacts"
 	@echo "=================================================================="
@@ -71,7 +114,7 @@ install-backend:
 	$(PIP) install -r requirements.txt
 
 install-frontend:
-	cd frontend && npm install
+	cd frontend && $(NPM) ci
 
 # ── Development & Full Stack Runner ─────────────────────────────────────────
 run: dev
@@ -82,86 +125,136 @@ dev:
 	if ss -tlnp 2>/dev/null | grep -q ":1883 "; then \
 		echo "✅ Mosquitto broker already running on port 1883"; \
 	elif command -v mosquitto >/dev/null 2>&1; then \
-		mosquitto -c mosquitto/config/mosquitto.conf -d; \
+		mosquitto -c mosquitto/config/mosquitto-host.conf -d; \
 		echo "✅ Mosquitto broker started"; \
 	else \
 		echo "⚠️  mosquitto not found — start via Docker or sudo apt-get install -y mosquitto"; \
 	fi; \
 	sleep 1; \
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/run_pipeline.py & \
-	export PYTHONPATH=$(PWD) && $(PYTHON) -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 & \
-	(cd frontend && npm run dev) & \
+	$(PYTHON) scripts/run_pipeline.py & \
+	$(PYTHON) -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 & \
+	(cd frontend && $(NPM) run dev) & \
 	sleep 2; \
-	export PYTHONPATH=$(PWD) && $(PYTHON) backend/scripts/simulate_esp32.py & \
+	$(PYTHON) backend/scripts/simulate_esp32.py --all & \
 	wait'
 
 dev-backend:
-	export PYTHONPATH=$(PWD) && $(PYTHON) -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+	$(PYTHON) -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 dev-frontend:
-	cd frontend && npm run dev
+	cd frontend && $(NPM) run dev
 
 dev-pipeline:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/run_pipeline.py
+	$(PYTHON) scripts/run_pipeline.py
+
+dev-pipeline-demo:
+	$(PYTHON) scripts/run_pipeline.py --config config/config.demo.yaml
+
+dev-pipeline-hardware:
+	$(PYTHON) scripts/run_pipeline.py --config config/config.hardware.yaml
 
 demo:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/demo_full_system.py --demo
+	$(PYTHON) scripts/demo_full_system.py --demo
+
+production: docker-build docker-up
+
+prod: production
 
 hil-test:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/hil_hardware_test.py
+	$(PYTHON) scripts/hil_hardware_test.py
 
 stress-test:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/stress_test_hardware_sim.py
+	$(PYTHON) scripts/stress_test_hardware_sim.py
 
 sim-test:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/test_firmware_and_ai_e2e.py
+	$(PYTHON) scripts/test_firmware_and_ai_e2e.py
+
+test-firmware-sim: sim-test
+
+test-firmware-host:
+	$(CMAKE) -S firmware/tests -B $(FIRMWARE_TEST_BUILD) -DCMAKE_BUILD_TYPE=Release
+	$(CMAKE) --build $(FIRMWARE_TEST_BUILD) --config Release
+	$(FIRMWARE_TEST_BIN)
 
 dev-sim:
-	export PYTHONPATH=$(PWD) && $(PYTHON) backend/scripts/simulate_esp32.py --all
+	$(PYTHON) backend/scripts/simulate_esp32.py --all
+
+dev-sim-demo:
+	$(PYTHON) backend/scripts/simulate_esp32.py --demo
 
 # ── Data Generation & Training ──────────────────────────────────────────────
 generate_data:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/generate_mock_ukdale.py
+	$(PYTHON) scripts/generate_mock_ukdale.py
 
 train_all:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --sources ukdale redd synd --episodes 2000
+	$(PYTHON) scripts/train_models.py --sources ukdale redd synd --episodes 2000
 
 train_synthetic:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/train_models.py --sources synd --episodes 2000
+	$(PYTHON) scripts/train_models.py --sources synd --episodes 2000
+
+train_demo:
+	$(PYTHON) scripts/train_demo_models.py $(TRAIN_DEMO_ARGS)
+
+enroll_demo:
+ifndef CAPTURE
+	$(error CAPTURE is required, for example: make enroll_demo CAPTURE=bench.npz)
+endif
+	$(PYTHON) scripts/enroll_demo_devices.py --capture "$(CAPTURE)" $(ENROLL_ARGS)
 
 # ── Testing ─────────────────────────────────────────────────────────────────
 test: test-backend test-frontend
 
+test-all: test test-firmware-host
+
 test-backend:
-	export PYTHONPATH=$(PWD) && $(PYTHON) -m pytest tests/ -v --tb=short
+	$(PYTEST) tests/ -v --tb=short --ignore=tests/test_e2e.py -m "not e2e"
 
 test-frontend:
-	cd frontend && npm test
+	cd frontend && $(NPM) test
 
 test-safety:
-	export PYTHONPATH=$(PWD) && $(PYTHON) scripts/test_safety_cutoff.py --spike 4000
+	$(PYTHON) scripts/test_safety_cutoff.py --spike 4000
 
 test-e2e:
-	export PYTHONPATH=$(PWD) && $(PYTHON) -m pytest tests/test_e2e.py -v
+	$(PYTEST) tests/test_e2e.py -v --tb=short
+
+verify-ml:
+	$(PYTHON) scripts/verify_ml_agent.py
+
+verify-chaos:
+	$(PYTHON) scripts/verify_chaos_agent.py
 
 # ── Build & Lint ────────────────────────────────────────────────────────────
 lint: lint-frontend
 
 lint-frontend:
-	cd frontend && npm run lint
+	cd frontend && $(NPM) run lint
 
 build-frontend:
-	cd frontend && npm run build
+	cd frontend && $(NPM) run build
 
 # ── Docker ──────────────────────────────────────────────────────────────────
 docker-build:
-	docker compose build
+	$(DOCKER) compose build
 
 docker-up:
-	docker compose up -d
+	$(DOCKER) compose up -d
 
 docker-down:
-	docker compose down
+	$(DOCKER) compose down
+
+docker-logs:
+	$(DOCKER) compose logs -f
+
+# ── Firmware ────────────────────────────────────────────────────────────────
+firmware-build:
+	cd firmware/esp32_node && $(PIO) run
+
+firmware-upload:
+	cd firmware/esp32_node && $(PIO) run --target upload
+
+firmware-monitor:
+	cd firmware/esp32_node && $(PIO) device monitor -b 115200
 
 # ── Knowledge Graph ─────────────────────────────────────────────────────────
 graph-update:
@@ -171,5 +264,6 @@ graph-update:
 clean:
 	rm -f data/ems_state.db data/ems_state.db-shm data/ems_state.db-wal
 	rm -rf frontend/dist
+	rm -rf $(FIRMWARE_TEST_BUILD)
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true

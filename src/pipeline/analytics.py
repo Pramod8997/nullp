@@ -79,14 +79,27 @@ class AnalyticsEngine:
         self.daily_usage: Dict[str, Dict[str, float]] = {}
         self.daily_cost: Dict[str, Dict[str, float]] = {}
 
+    @staticmethod
+    def _as_utc(timestamp: Optional[datetime.datetime] = None) -> datetime.datetime:
+        """Return a timezone-aware UTC datetime.
+
+        Telemetry callers historically supplied both naive and aware values.
+        Naive values are defined as UTC at this boundary rather than being
+        compared with a local clock or mixed with aware values.
+        """
+        value = timestamp if timestamp is not None else datetime.datetime.now(datetime.timezone.utc)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=datetime.timezone.utc)
+        return value.astimezone(datetime.timezone.utc)
+
     def get_tou_rate(self, hour_or_dt: Union[datetime.datetime, int, None] = None) -> float:
         """
         Get the Time-of-Use rate for a given hour or datetime.
         """
         if hour_or_dt is None:
-            hour = datetime.datetime.now().hour
+            hour = self._as_utc().hour
         elif isinstance(hour_or_dt, datetime.datetime):
-            hour = hour_or_dt.hour
+            hour = self._as_utc(hour_or_dt).hour
         else:
             hour = int(hour_or_dt)
 
@@ -114,7 +127,8 @@ class AnalyticsEngine:
         Returns:
             float: kWh accumulated in this reading.
         """
-        dt = timestamp or datetime.datetime.now()
+        # Do not use ``timestamp or now``: epoch zero is a valid timestamp.
+        dt = self._as_utc(timestamp)
         today = dt.date().isoformat()
 
         if today not in self.daily_usage:

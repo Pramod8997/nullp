@@ -2,7 +2,7 @@
  * Module 7: Production ESP32 Firmware — Dual-Core FreeRTOS
  *
  * Edge-hybrid safety architecture for the Smart Home EMS.
- * PZEM-004T v3.0 UART Edition
+ * PZEM-004T-100A(V4.0)-type external-CT UART Edition
  *
  * CORE 0 (High Priority — SafetySamplingTask):
  *   - Continuous PZEM polling at 100ms intervals
@@ -49,16 +49,17 @@
 #error "Missing firmware/esp32_node/include/secrets.h - copy secrets.h.example to secrets.h and fill in your Wi-Fi SSID/password, broker IP and broker password."
 #endif
 #include "secrets.h"
+#include "hardware_config.h"
 
 // ═══════════════════════════════════════════════════════
 //  CONFIGURATION — set these in include/secrets.h
 // ═══════════════════════════════════════════════════════
-// Single aggregate sense point: ONE PZEM measures ONE IS 1293 6 A socket, and a
-// 3-pin earthed multi-plug adapter in that socket puts the laptop brick and the
-// phone charger behind the same shunt at the same time. That simultaneity is
-// what NILM disaggregates -- one load at a time would be single-appliance
-// classification, not disaggregation.
-// See claude_debug/HARDWARE_FINAL_SPEC.md (scope S1/S2/S5, decision D12').
+// Single aggregate sense point: ONE external-CT PZEM measures ONE IS 1293 6 A
+// socket, and a 3-pin earthed multi-plug adapter in that socket puts the laptop
+// brick and phone charger behind the same CT at the same time. The available
+// meter is the 100 A CT/V4-type board; its L/N terminals sense voltage and the
+// load live conductor passes through the external CT. See
+// docs/ems_hardware/ACTUAL_100A_CT_WIRING.md.
 const char* DEVICE_ID      = EMS_DEVICE_ID;
 const char* ssid           = EMS_WIFI_SSID;
 const char* password       = EMS_WIFI_PASSWORD;
@@ -75,33 +76,33 @@ const char* mqtt_password  = EMS_MQTT_PASSWORD;
 // never fire, making the headline safety feature undemonstrable in hardware.
 // That is blocking issue B-9; the 600 W ceiling belongs to the *simulated*
 // `make demo` fleet in config/config.demo.yaml, which has no hardware.
-const float RATED_WATTS    = 250.0;               // Rated power for this node
-const float POWER_FACTOR   = 1.0;                 // Reference only; PZEM reports measured PF
+const float RATED_WATTS    = ems_hardware::RATED_WATTS;
+const float POWER_FACTOR   = ems_hardware::POWER_FACTOR;
 
 // ═══════════════════════════════════════════════════════
 //  HARDWARE PINS & CONSTANTS
 // ═══════════════════════════════════════════════════════
-const int   RELAY_PIN      = 18;
+const int   RELAY_PIN      = ems_hardware::RELAY_PIN;
 // Approved build: H-trigger relay module, driven directly from GPIO 18.
 // The mandatory 100 kOhm IN1->GND pull-down makes reset/Hi-Z fail open.
 // Re-verify OPEN-at-boot and COM-NO behavior with a multimeter before any mains.
-const bool  RELAY_ACTIVE_LOW = false;
-const int   PZEM_RX_PIN    = 16;
-const int   PZEM_TX_PIN    = 17;
-const float VOLTAGE        = 230.0;    // Mains voltage (India: 230V) for reference
-const float CRITICAL_PCT   = 1.25;     // 125% of rated → hardware cutoff
+const bool  RELAY_ACTIVE_LOW = ems_hardware::RELAY_ACTIVE_LOW;
+const int   PZEM_RX_PIN    = ems_hardware::PZEM_RX_PIN;
+const int   PZEM_TX_PIN    = ems_hardware::PZEM_TX_PIN;
+const float VOLTAGE        = ems_hardware::MAINS_VOLTAGE_V;
+const float CRITICAL_PCT   = ems_hardware::CRITICAL_PCT;
 
 // PZEM Instance
 PZEM004Tv30 pzem(Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
 
 // ── Edge Arc-Fault Detection Constants ──
-const float EDGE_ROC_THRESHOLD = 1000.0; // W/s — rapid dP/dt trip
-const int   BASELINE_WINDOW    = 5;      // Sliding baseline sample count
-const float BASELINE_INRUSH_CEIL = 50.0; // Baseline avg must be below this for inrush suppression
-const float INRUSH_HEADROOM    = 100.0;  // Extra W above baseline avg to tolerate during inrush
+const float EDGE_ROC_THRESHOLD = ems_hardware::EDGE_ROC_THRESHOLD_W_PER_S;
+const int   BASELINE_WINDOW    = ems_hardware::BASELINE_WINDOW;
+const float BASELINE_INRUSH_CEIL = ems_hardware::BASELINE_INRUSH_CEIL_W;
+const float INRUSH_HEADROOM    = ems_hardware::INRUSH_HEADROOM_W;
 
 // ── Anti-Thrashing Constants ──
-const unsigned long SAFETY_LOCKOUT_MS = 300000;  // 5-minute relay lockout after safety trip
+const unsigned long SAFETY_LOCKOUT_MS = ems_hardware::SAFETY_LOCKOUT_MS;
 
 // ── PZEM Loss-of-Measurement Watchdog ──
 // Consecutive failed/non-finite PZEM reads before the relay is opened. This is
@@ -115,11 +116,17 @@ const unsigned long SAFETY_LOCKOUT_MS = 300000;  // 5-minute relay lockout after
 //     channels are off, and at the ≤312 W trip ceiling of D8 (1.36 A through a
 //     5 A fuse and 1.0 mm² wire) 3 s is thermally irrelevant.
 // Raise it only with evidence of nuisance trips; never above ~100 (10 s).
-const int PZEM_FAIL_TRIP_COUNT = 30;
+const int PZEM_FAIL_TRIP_COUNT = ems_hardware::PZEM_FAIL_TRIP_COUNT;
 // Elapsed-age guard for the successful PZEM transaction, independent of how
 // long a failed getter/library timeout takes. The value is a software claim
 // until Gate 8 measures the installed dependency on the target ESP32/PZEM.
-const unsigned long PZEM_MAX_BLIND_MS = 3000;
+const unsigned long PZEM_MAX_BLIND_MS = ems_hardware::PZEM_MAX_BLIND_MS;
+// Only a voltage in the meter's specified 80–260 V range can arm an ON
+// command. This rejects finite zero-valued/no-mains frames as sensor-invalid.
+const float PZEM_MIN_VALID_VOLTAGE_V = ems_hardware::PZEM_MIN_VALID_VOLTAGE_V;
+const float PZEM_MAX_VALID_VOLTAGE_V = ems_hardware::PZEM_MAX_VALID_VOLTAGE_V;
+const float PZEM_MAX_VALID_CURRENT_A = ems_hardware::PZEM_MAX_VALID_CURRENT_A;
+const float PZEM_MAX_VALID_POWER_W = ems_hardware::PZEM_MAX_VALID_POWER_W;
 
 // ═══════════════════════════════════════════════════════
 //  SHARED STATE (Core 0 ↔ Core 1)
@@ -127,9 +134,9 @@ const unsigned long PZEM_MAX_BLIND_MS = 3000;
 portMUX_TYPE sharedMux = portMUX_INITIALIZER_UNLOCKED;
 
 volatile float sharedPowerWatts  = 0.0;
-volatile float sharedVoltage     = 230.0;
+volatile float sharedVoltage     = ems_hardware::MAINS_VOLTAGE_V;
 volatile float sharedCurrent     = 0.0;
-volatile float sharedPf          = 1.0;
+volatile float sharedPf          = ems_hardware::POWER_FACTOR;
 volatile bool  sharedArcFault    = false;
 volatile float sharedArcFaultRoC = 0.0;
 
@@ -240,15 +247,19 @@ void SafetySamplingTask(void* pvParameters) {
         float dt = (nowMs - lastReadMs) / 1000.0f;
         lastReadMs = nowMs;
 
-        // ── Reject any non-finite PZEM read ──
-        // !isfinite, not isnan: the library signals a failed Modbus frame with
-        // NAN, but a corrupted frame decoded into a float can also land on
-        // ±Inf, and an Inf reaching lastWatts/the baseline ring poisons the
-        // dP/dt channel permanently (every later comparison against it is
-        // false). isnan is a strict subset of !isfinite, so this only ever
-        // rejects more.
+        // ── Reject invalid PZEM reads ──
+        // Reject both non-finite frames and finite values outside the PZEM's
+        // physical range. In particular, a finite 0 V frame with no mains must
+        // not arm a relay ON request or be treated as a healthy measurement.
         if (!isfinite(powerWatts) || !isfinite(pzemVoltage)
-            || !isfinite(pzemCurrent) || !isfinite(pzemPf)) {
+            || !isfinite(pzemCurrent) || !isfinite(pzemPf)
+            || pzemVoltage < PZEM_MIN_VALID_VOLTAGE_V
+            || pzemVoltage > PZEM_MAX_VALID_VOLTAGE_V
+            || pzemCurrent < 0.0f
+            || pzemCurrent > PZEM_MAX_VALID_CURRENT_A
+            || powerWatts < 0.0f
+            || powerWatts > PZEM_MAX_VALID_POWER_W
+            || pzemPf < 0.0f || pzemPf > 1.0f) {
             measurementFresh = false;
             // A pending ON is rejected as soon as the safety task observes
             // that the measurement channel is unavailable. OFF remains
@@ -461,10 +472,21 @@ void setup() {
     Serial.begin(115200);
     
     // Initialize PZEM Serial
-    Serial2.begin(9600, SERIAL_8N1, PZEM_RX_PIN, PZEM_TX_PIN);
+    Serial2.begin(ems_hardware::PZEM_UART_BAUD, SERIAL_8N1,
+                  PZEM_RX_PIN, PZEM_TX_PIN);
 
+    // Preload the OFF output latch before enabling the output driver. The
+    // external 100 kΩ IN1→GND pull-down also holds the H-trigger relay open
+    // while GPIO18 is high-impedance during reset/boot.
+    digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
     pinMode(RELAY_PIN, OUTPUT);
     setRelay(false); // Start with relay OFF for safety
+
+#if EMS_BENCH_MODE
+    Serial.println("[BENCH] DRY MODE: mains and relay contacts must be disconnected");
+    Serial.println("[BENCH] Commands: DRY_ON, DRY_OFF, STATUS");
+    return;
+#endif
 
     // ═══ Launch Core 0 Safety Sampling Task ═══
     // Launched BEFORE WiFi so safety works offline
@@ -558,6 +580,26 @@ void reconnectMQTT() {
 //  MAIN LOOP (Core 1 — MQTT + Telemetry)
 // ═══════════════════════════════════════════════════════
 void loop() {
+#if EMS_BENCH_MODE
+    if (Serial.available() > 0) {
+        String command = Serial.readStringUntil('\n');
+        command.trim();
+        if (command == "DRY_ON") {
+            setRelay(true);
+            Serial.println("[BENCH] DRY_ON: relay closed; verify COM-NO continuity");
+        } else if (command == "DRY_OFF") {
+            setRelay(false);
+            Serial.println("[BENCH] DRY_OFF: relay open; verify COM-NO open");
+        } else if (command == "STATUS") {
+            Serial.printf("[BENCH] GPIO18=%s\n", relayClosed ? "HIGH/ON" : "LOW/OFF");
+        } else if (command.length() > 0) {
+            Serial.println("[BENCH] Unknown command; use DRY_ON, DRY_OFF or STATUS");
+        }
+    }
+    delay(10);
+    return;
+#endif
+
     if (!client.connected()) {
         reconnectMQTT();
     }

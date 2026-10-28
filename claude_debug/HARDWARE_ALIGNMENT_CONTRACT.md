@@ -50,9 +50,25 @@
 | `DEVICE_ID = "node_bench_agg"` | `firmware/esp32_node/include/secrets.h` (`EMS_DEVICE_ID`) → main.cpp:58 | `config/config.hardware.yaml` `devices.node_bench_agg`; runbook Gate 1b | Any mismatch = backend **silently ignores every reading** |
 | MQTT topics | main.cpp `snprintf` :339-343 — `home/sensor/%s/power`, `home/sensor/%s/telemetry`, `home/plug/%s/command`, `home/sensor/%s/status`, `home/plug/%s/ack` | pipeline subscriptions (`scripts/run_pipeline.py` :1521-1526: config `reads` = `home/sensor/+/power`, plus `home/plug/+/ack`, `home/ml/label`, `home/sensor/+/status`); config `mqtt.topics` (`reads`/`writes`/`events`) | `home/sensor/+/telemetry` subscription is being wired (WS-E.2/Run 4) — see gap G1 |
 | MQTT auth | `secrets.h` `EMS_MQTT_USER`/`EMS_MQTT_PASSWORD` | broker passwd (`ems_pipeline`, dedicated `esp32` user + ACL — runbook Gate 0); pipeline env `MQTT_USERNAME`/`MQTT_PASSWORD` | repo `mosquitto/config/acl` carries the grant matrix |
-| Board | ESP32-**WROOM-32D** DevKit (spec D10) | spec §2 BOM; wiring guide §1 | **Not WROVER** — PSRAM steals GPIO 16/17 and silently kills metering |
+| Board | ESP32-**WROOM-32D** DevKit, **38-pin physical board** | `Hardware.md`; current wiring guide; current hardware docs | **Not WROVER** — PSRAM steals GPIO 16/17 and silently kills metering |
 
-### 1.5 PZEM cadence — the ROC dt note (ledger C4)
+### 1.5 Physical sensor and relay identity
+
+The current physical build is the unit actually available on the bench, not the
+retired procurement target:
+
+| Component | Canonical current value | Required gate |
+|---|---|---|
+| Meter | PZEM-004T-100A(V4.0)-type external CT | Confirm exact marking/manual, CT pair/polarity and L/N sense terminals |
+| Meter topology | CT around one live conductor; no shunt current path | Never reuse the 10 A direct-connect diagram |
+| Relay | Available 4-channel 5 V module, channel 1 only; verified H-trigger target | Confirm H/L, VCC/JD-VCC, input/coil current and COM/NO/NC labels |
+| Level shifter | Four-channel board unused | Do not insert without a separate electrical review |
+
+The installed `PZEM-004T-v30` library is retained for its v3/v4-compatible
+Modbus protocol, but the actual V4-type board remains a physical protocol and
+calibration validation gate. There is no active ESP32 ADC/analog CT path.
+
+### 1.6 PZEM cadence — the ROC dt note (ledger C4)
 
 Firmware loop period ≈ **0.134–0.16 s effective** (PZEM-004T v3 register cache ≈ 200 ms; the
 100 ms poll reads stale registers between refreshes). The arc-fault division therefore uses an
@@ -72,7 +88,7 @@ implementation is wrong (breaks every first-sample overcurrent test); any dt ≥
 | G1 | **Telemetry subscription** | ~~Backend does not subscribe `home/sensor/+/telemetry`~~ **WIRED (2026-09-10, wave 1/2)**: subscribed, parsed, WS-broadcast, and pinned by a HARD assertion in `tests/test_hardware_alignment.py` (no xfail remains). |
 | G2 | **Envelopes pending physical capture** | `registry_path` is deliberately absent from `config.hardware.yaml`; the shipped UK-DALE fallback cannot represent this rig (its `laptop` prototype is a 21 W netbook; `phone_charger` has zero windows above the 20 W on-threshold). Recognition on this rig is **not physically verified** until Run 2 (state-scoped capture per ledger C7). |
 | G3 | **QoS-0 reality** | Power/telemetry/label transports are QoS 0 — delivery is best-effort by design. The 503-on-publish-failure fix (Run 0.10) makes failures *visible*, not deliveries guaranteed. |
-| G4 | **30- vs 38-pin procurement note** | Spec D6″/BOM specify a **30-pin** DevKit + 30-pin shield; the wiring guide documents the **38-pin** DevKit actually on the bench (its §2 "Finding the pins on a 38-pin DevKit"; shield must match the board you have — a 30-pin shield will not seat a 38-pin board and vice versa). Pins 16/17/18, silkscreen labels, and all firmware constants are identical either way; **trust the silkscreen over any description**. |
+| G4 | **30- vs 38-pin procurement note** | The owned board is **38-pin**. Any old 30-pin BOM/shield reference is superseded; use a matching 38-pin shield only. Pins 16/17/18 are firmware GPIO numbers, but the physical board and silkscreen still require inspection. |
 | G5 | **secrets.h placeholders** | Current file holds placeholders (`PLACEHOLDER_SSID`, `192.168.1.100`) — firmware builds green and WiFi silently never associates. Real values go in at Gate 1b. |
 
 ---

@@ -13,7 +13,7 @@ This document serves as the permanent reference point for AI models and engineer
 graph TD
     subgraph Edge ["Hardware Node (ESP32 + PZEM-004T)"]
         PZEM["PZEM-004T v3.0<br/>V, I, W, PF, Hz, kWh"] -->|UART 9600| ESP["ESP32 Dual-Core"]
-        ESP -->|GPIO 18 Active-LOW| RELAY["30A Optoisolated Relay"]
+        ESP -->|GPIO 18 Active-HIGH| RELAY["Verified H-trigger Relay CH1"]
         ESP -->|Core 0 100ms| LOCAL_SAFETY["Local Arc-Fault & Overcurrent Protection"]
         ESP -->|Core 1 1Hz MQTT| BROKER["Mosquitto MQTT Broker (Auth Required)"]
     end

@@ -1,33 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import SafetyAlerts from '../../components/SafetyAlerts';
 import { Bell, ShieldAlert, ShieldCheck, AlertTriangle, Zap } from 'lucide-react';
 
-const AlertsPage = ({ alerts = [] }) => {
+const AlertsPage = ({ alerts = [], relayStates = {} }) => {
   const [filter, setFilter] = useState('all');
 
   const criticalCount = alerts.filter(
     (a) => (a.level || a.severity || '').toUpperCase() === 'CRITICAL' || (a.message && a.message.includes('ARC'))
   ).length;
   const warningCount = alerts.length - criticalCount;
-  // Breaker status is derived from the live alert feed, not hardcoded:
-  // a cutoff / overcurrent / arc-fault alert WITHIN THE LOCKOUT WINDOW
-  // (5 min, the firmware's SAFETY_LOCKOUT_MS) means the relay is open.
-  // Older alerts leave it "Armed & Nominal" — the lockout has expired and
-  // the relay can be re-energized, so a stale alert must not claim TRIPPED
-  // forever. The alert id is Date.now()-based at append time, so it doubles
-  // as the machine timestamp; the interval re-render lets the window expire.
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 5000);
-    return () => clearInterval(id);
-  }, []);
-  const LOCKOUT_MS = 5 * 60 * 1000;
-  const isTripped = alerts.some(
-    (a) =>
-      (a?.type === 'SAFETY_CUTOFF' ||
-        /OVERCURRENT|ARC[_ ]?FAULT|RELAY.*FORCED OFF|RELAY FORCED OFF/i.test(a?.message || '')) &&
-      nowMs - (a?.id || 0) < LOCKOUT_MS
-  );
+  const relayEntries = Object.values(relayStates || {});
+  const hasRelayState = relayEntries.length > 0;
+  const isTripped = relayEntries.some((relay) => (
+    relay?.state === 'OFF' && (relay?.safety || relay?.lockout || relay?.ack === 'LOCKOUT_NACK')
+  ));
 
   const filteredAlerts = alerts.filter((alert) => {
     if (filter === 'critical') {
@@ -99,7 +85,7 @@ const AlertsPage = ({ alerts = [] }) => {
         <div
           data-testid="breaker-status"
           className={`bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-2xl p-4 border shadow-sm flex items-center justify-between ${
-            isTripped
+            !hasRelayState || isTripped
               ? 'border-rose-300 dark:border-rose-800'
               : 'border-gray-200/80 dark:border-gray-700/80'
           }`}
@@ -108,27 +94,29 @@ const AlertsPage = ({ alerts = [] }) => {
             <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Breaker Status</span>
             <div
               className={`text-lg font-bold mt-0.5 flex items-center gap-1.5 ${
-                isTripped
+                !hasRelayState || isTripped
                   ? 'text-rose-600 dark:text-rose-400'
                   : 'text-emerald-600 dark:text-emerald-400'
               }`}
             >
               {isTripped ? <ShieldAlert size={16} /> : <ShieldCheck size={16} />}
               <span>
-                {isTripped
-                  ? 'TRIPPED — relay open'
-                  : 'Armed & Nominal'}
+                {!hasRelayState
+                  ? 'Unknown — edge state unavailable'
+                  : isTripped
+                    ? 'TRIPPED — relay open'
+                    : 'Armed & Nominal'}
               </span>
             </div>
           </div>
           <div
             className={`p-2.5 rounded-xl ${
-              isTripped
+              !hasRelayState || isTripped
                 ? 'bg-rose-500/10 text-rose-500'
                 : 'bg-emerald-500/10 text-emerald-500'
             }`}
           >
-            {isTripped ? <ShieldAlert size={20} /> : <ShieldCheck size={20} />}
+            {!hasRelayState ? <ShieldAlert size={20} /> : isTripped ? <ShieldAlert size={20} /> : <ShieldCheck size={20} />}
           </div>
         </div>
 

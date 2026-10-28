@@ -1,7 +1,11 @@
-# Current Low-Voltage Wiring
+# Current Low-Voltage Wiring — Actual 100A CT Build
 
 **Board:** 38-pin ESP32-WROOM-32 DevKit. **Mains disconnected.** Dupont wires
 are permitted only on this low-voltage side.
+
+The available meter is the **PZEM-004T-100A(V4.0)-type external-CT variant**.
+Its external CT measures one live conductor; its `L/N` terminals are voltage
+sense. Do not use the retired 10 A shunt series path.
 
 ## Pin map
 
@@ -12,6 +16,11 @@ are permitted only on this low-voltage side.
 | GPIO18 / D18 | Relay IN1 | Direct connection; no MOSFET |
 | GND | Relay GND and PZEM GND | One common low-voltage ground |
 | VIN / 5 V | Relay VCC and PZEM 5 V | Use an isolated 5 V supply |
+
+Relay hardware contract: the available board may have four channels; use only
+channel 1. Channels 2–4 and the separate four-channel level shifter are unused.
+Direct GPIO18 drive is permitted only after the actual relay is verified as
+H/high-trigger with its VCC/JD-VCC arrangement and contact labels identified.
 
 ## PZEM TX safety check
 
@@ -51,6 +60,7 @@ PZEM TX directly to GPIO16.
 
 ## Stop conditions
 
-Stop before powering the assembly if the board is WROVER, the shield is 30-pin,
-the relay has no verified H/L behavior, the PZEM is a 100 A CT variant, or the
-PZEM TX voltage has not been measured.
+Stop before powering the assembly if the board is WROVER, a 30-pin shield is
+being used on the 38-pin board, the relay has no verified H/L behavior, the
+PZEM TX voltage has not been measured, or any PZEM AC/CT or relay contact wire
+is connected during the low-voltage bench stage.

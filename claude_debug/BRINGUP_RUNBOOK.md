@@ -26,7 +26,7 @@
 
 | Gate | Status | Evidence |
 | :--- | :--- | :--- |
-| 1. Compile firmware | ✅ PASS | `firmware.bin` 756,989 B (57.8% flash), RAM 45,304 B (13.8%); `src/main.cpp.o` rebuilt with zero warnings; PZEM-004T-v30 @ 1.1.2, PubSubClient @ 2.8.0 |
+| 1. Compile firmware | ✅ PASS | ESP32 production and dedicated mains-disconnected `bench` environments must build; PZEM UART library uses the v3/v4-compatible Modbus protocol; physical CT-board compatibility remains a bring-up gate |
 | 2. Fix compile errors | ✅ N/A | none existed |
 | 3. Network config | ✅ code ready | credentials moved to gitignored `include/secrets.h`; `#error` guard fires if absent |
 | 4. MQTT auth | ✅ PASS | pipeline + API now pass `MQTT_USERNAME`/`MQTT_PASSWORD`; anonymous path unchanged; 527 tests pass |
@@ -147,7 +147,9 @@ mosquitto_sub -h localhost -u ems_pipeline -P <pw> -t 'home/#' -v
 **If `[MQTT] Failed rc=`**: `rc=-2` is network/DNS, `rc=4` is bad credentials,
 `rc=5` is not authorised. Fix the credential or IP, do not move on.
 
-**Expect zeros or NaN-skips from the PZEM here** — no mains is connected yet.
+**Expect invalid/no-mains PZEM frames here** — no mains is connected yet. The
+firmware must not treat a finite 0 V frame as a healthy measurement or arm an
+ON command.
 Core 0 skips non-finite reads (the `isnan()` guard in `SafetySamplingTask`), so the power topic
 may publish `0.00`. That is correct at this gate.
 
@@ -156,8 +158,10 @@ may publish `0.00`. That is correct at this gate.
 ## GATE 6 — Real PZEM readings (MAINS LIVE — ⚠ safety gate)
 
 > **STOP.** Everything from here involves 230 V. Do not proceed without the
-> locked wiring of `HARDWARE_FINAL_SPEC.md`: PZEM 10 A direct-connect, SRD 10 A
-> relay, 100 kΩ IN→GND pull-down, 5 A load fuse, earthed 3-pin socket.
+> actual-board wiring in `docs/ems_hardware/ACTUAL_100A_CT_WIRING.md`: PZEM
+> 100 A external CT with verified CT pair/polarity and L/N sense terminals,
+> verified relay board, 100 kΩ IN→GND pull-down, 5 A load fuse, earthed 3-pin
+> socket and upstream 30 mA RCBO/RCD.
 > Confirm the relay is OPEN (Gate 7 below) *before* energising a load.
 
 Single resistive load first: the 100 W incandescent lamp (spec BOM item 19,
@@ -190,11 +194,15 @@ Continuity meter across the relay's load contacts, nothing plugged in.
 1. Power-on / reset → contacts must read **OPEN**. The pre-Wi-Fi `setRelay(false)` call in
    `setup()` and the 100 kΩ pull-down holds the input low while
    GPIO 18 is high-impedance during boot.
-2. `mosquitto_pub -t home/plug/node_bench_agg/command -m ON` → **CLOSED**, and
-   `home/plug/node_bench_agg/ack` publishes `ON_CONFIRMED`.
-3. `-m OFF` → **OPEN**, ack `OFF_CONFIRMED`.
+2. Build and flash the dedicated bench environment:
+   `pio run -e bench -t upload --upload-port COM3`.
+3. Open the serial monitor and send `DRY_ON` → **CLOSED**.
+4. Send `DRY_OFF` → **OPEN**.
+5. Reflash the normal `esp32dev` production environment before integration.
+   Production MQTT `ON` is intentionally rejected until a valid 80–260 V PZEM
+   measurement exists.
 
-**PASS** = all three. **FAIL on step 1 = stop entirely**: an inverted relay
+**PASS** = all five. **FAIL on step 1 = stop entirely**: an inverted relay
 energises the load at boot and makes every safety cutoff *close* the contacts
 (defect B-7). Do not connect mains until step 1 passes.
 

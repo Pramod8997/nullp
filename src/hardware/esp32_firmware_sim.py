@@ -28,6 +28,8 @@ import random
 import time
 from typing import Optional, Callable, Dict, Any
 
+from src.telemetry_contract import encode_telemetry_frame
+
 logger = logging.getLogger("ESP32_FIRMWARE_SIM")
 
 # Loss-of-measurement watchdog threshold. Mirrors the PZEM_FAIL_TRIP_COUNT
@@ -522,11 +524,11 @@ class ESP32FirmwareNode:
         # 10s Rich Diagnostics publish (JSON)
         if force_publish or (now - self._last_10s_telemetry >= 10.0):
             self._last_10s_telemetry = now
-            diag_payload = json.dumps({
-                "v": round(self.shared_voltage, 1),
-                "i": round(self.shared_current, 2),
-                "w": round(power_w, 1),
-                "pf": round(self.shared_pf, 2)
-            })
+            diag_payload = encode_telemetry_frame(
+                self.shared_voltage,
+                self.shared_current,
+                power_w,
+                self.shared_pf,
+            )
             if self.mqtt_publish:
                 await self.mqtt_publish(self.topic_telemetry, diag_payload)

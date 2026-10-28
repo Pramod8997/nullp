@@ -1,7 +1,17 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { BrainCircuit, Zap, ShieldOff, Thermometer, Tag, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { requestJson } from '../api/client';
 
-const API_BASE = `http://${window.location.hostname}:8000`;
+const getValidPowerSegments = (segments) => {
+  if (!Array.isArray(segments)) return [];
+
+  return segments.filter((segment) => (
+    Array.isArray(segment)
+      && segment.length === 128
+      && segment.every((watts) => Number.isFinite(watts) && watts >= 0)
+      && Math.max(...segment) >= 20
+  ));
+};
 
 const getPmvLabel = (pmv) => {
   if (pmv <= -2) return { label: 'Cold', cls: 'cold text-blue-500 bg-blue-50 dark:bg-blue-950/50 border-blue-200 dark:border-blue-800' };
@@ -16,6 +26,9 @@ const LabelRequestCard = ({ event, onLabeled }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
+  const requestRef = useRef(null);
+
+  useEffect(() => () => requestRef.current?.abort(), []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -24,6 +37,9 @@ const LabelRequestCard = ({ event, onLabeled }) => {
 
     setLoading(true);
     setError('');
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
 
     try {
       // Enrollment needs the raw 128-sample POWER windows, in watts, that the
@@ -32,9 +48,7 @@ const LabelRequestCard = ({ event, onLabeled }) => {
       // validation and then had the CNN run over it as though it were a power
       // trace, producing a prototype built from nonsense. `segments` is the
       // field that carries watts; `embedding` is for display/clustering only.
-      const segments = Array.isArray(event.segments)
-        ? event.segments.filter((s) => Array.isArray(s) && s.length === 128)
-        : [];
+      const segments = getValidPowerSegments(event.segments);
 
       if (segments.length === 0) {
         setError('No power-window data in event yet. Retrying next cycle.');
@@ -42,26 +56,22 @@ const LabelRequestCard = ({ event, onLabeled }) => {
         return;
       }
 
-      const res = await fetch(`${API_BASE}/api/submit-label`, {
+      await requestJson('/api/submit-label', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': import.meta.env.VITE_API_KEY || 'changeme-ems-prod-key'
         },
         body: JSON.stringify({ device_id: event.device_id, label: trimmed, segments }),
       });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
-
+      if (controller.signal.aborted) return;
       setDone(true);
       if (onLabeled) onLabeled(trimmed);
     } catch (err) {
-      setError(err.message);
+      if (err?.name !== 'AbortError') setError(err?.message || 'Unable to submit label');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 

@@ -9,6 +9,8 @@ import os
 import io
 import csv
 import random
+from datetime import datetime, timezone
+import re
 from typing import List, Dict, Any, Optional, TypedDict
 from contextlib import asynccontextmanager
 
@@ -19,7 +21,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import aiomqtt
 
 
@@ -43,6 +45,59 @@ json_handler.setFormatter(JSONFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[json_handler])
 logger = logging.getLogger(__name__)
 
+
+# MQTT is an untrusted transport boundary.  Keep limits explicit and shared
+# by the decoder, event models, and REST validators so malformed frames cannot
+# become unbounded state or expensive downstream work.
+MAX_MQTT_PAYLOAD_BYTES = 256 * 1024
+MAX_DEVICE_ID_LENGTH = 64
+MAX_POWER_WATTS = 50_000.0
+MAX_TRACKED_DEVICES = 200
+DEVICE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+VALID_RELAY_COMMANDS = {"ON", "OFF", "WARNING"}
+
+
+def _finite_number(value: Any, *, minimum: float, maximum: float, field_name: str) -> float:
+    """Validate an event number without accepting bool/string coercion."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a JSON number")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite")
+    if value < minimum or value > maximum:
+        raise ValueError(f"{field_name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _validate_device_id(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > MAX_DEVICE_ID_LENGTH:
+        raise ValueError("device_id must be a non-empty identifier of at most 64 characters")
+    import re
+    if re.fullmatch(DEVICE_ID_PATTERN, value) is None:
+        raise ValueError("device_id contains unsupported characters")
+    return value
+
+
+class _StrictEventModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+def _validate_segment_list(value: List[List[float]]) -> List[List[float]]:
+    if len(value) > 100:
+        raise ValueError("Maximum 100 segments allowed")
+    for index, segment in enumerate(value):
+        if len(segment) != 128:
+            raise ValueError(f"Segment {index} must have exactly 128 dimensions")
+        for sample in segment:
+            if isinstance(sample, bool) or not isinstance(sample, (int, float)):
+                raise ValueError(f"Segment {index} contains a non-numeric sample")
+            sample = float(sample)
+            if not math.isfinite(sample) or sample < 0.0:
+                raise ValueError(f"Segment {index} contains an invalid power sample")
+        if max(segment) < 20.0:
+            raise ValueError(f"Segment {index} never exceeds 20 W")
+    return value
+
 # ─── Issue #18: Audit Logger ────────────────────────────────────────
 audit_logger = logging.getLogger("ems.audit")
 audit_handler = logging.handlers.RotatingFileHandler(
@@ -61,6 +116,9 @@ class DeviceState(TypedDict, total=False):
     confidence: float
     pmv: float
     last_seen: float
+    relay_state: str
+    last_ack: str
+    command_id: int
 
 
 class SystemState(TypedDict):
@@ -103,6 +161,39 @@ _ws_throttle: Dict[str, float] = {}
 # broadcast as a single batched update every 1 second.
 _ws_power_buffer: Dict[str, float] = {}
 
+# MQTT delivery is at-least-once. These watermarks prevent retained or
+# out-of-order events from rolling the dashboard back to an older state.
+_device_event_watermarks: Dict[str, float] = {}
+
+
+def _event_epoch(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """Normalize numeric or ISO-8601 timestamps to finite UTC epoch seconds."""
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        if isinstance(value, (int, float)):
+            result = float(value)
+        else:
+            text = str(value).strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            result = parsed.astimezone(timezone.utc).timestamp()
+        return result if math.isfinite(result) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+# API-side state is fed by untrusted MQTT topic names.  Keep the fan-out and
+# snapshot stores bounded even when a compromised/buggy publisher invents
+# device IDs faster than the normal one-second aggregation loop can flush.
+MAX_API_DEVICES = 200
+API_DEVICE_TTL_SECONDS = 3600.0
+MAX_MQTT_EVENT_BYTES = 256 * 1024
+MAX_WS_QUEUE_SIZE = 64
+_api_device_last_seen: Dict[str, float] = {}
+
 
 # ─── Issue #24: Pydantic Models for MQTT Event Validation ───────────
 class DeviceStatusEvent(BaseModel):
@@ -114,6 +205,14 @@ class DeviceStatusEvent(BaseModel):
     confidence: float = 0
     pmv: float = 0
     timestamp: Optional[Any] = None
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > 64 or "/" in value:
+            raise ValueError("device_id must be a non-empty MQTT-safe identifier")
+        return value
 
 
 class PhantomLoadEvent(BaseModel):
@@ -140,10 +239,20 @@ class LabelRequestEvent(BaseModel):
     # Raw 128-sample power windows in watts. This is what enrollment consumes;
     # without it the dashboard has nothing valid to submit and falls back to
     # sending the embedding, which enrolls a meaningless prototype.
-    segments: List[List[float]] = []
-    embedding: List[float] = []
+    segments: List[List[float]] = Field(default_factory=list)
+    embedding: List[float] = Field(default_factory=list)
     suggested_label: str = ""
     message: str = ""
+
+    @field_validator("segments")
+    @classmethod
+    def validate_segments(cls, value):
+        if len(value) > 100:
+            raise ValueError("too many segments")
+        for segment in value:
+            if len(segment) != 128 or not all(math.isfinite(x) for x in segment):
+                raise ValueError("segments must contain finite 128-sample windows")
+        return value
 
 
 class LowConfidenceEvent(BaseModel):
@@ -176,40 +285,117 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
         self._lock = asyncio.Lock()
+        self._queues: Dict[WebSocket, asyncio.Queue] = {}
+        self._sender_tasks: Dict[WebSocket, asyncio.Task] = {}
+        self.max_connections = 256
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         async with self._lock:
+            if len(self.active_connections) >= self.max_connections:
+                await websocket.close(code=1013, reason="WebSocket capacity reached")
+                return False
             self.active_connections.append(websocket)
-        logger.info(f"WebSocket client connected. Total: {len(self.active_connections)}")
+            queue = asyncio.Queue(maxsize=MAX_WS_QUEUE_SIZE)
+            self._queues[websocket] = queue
+            self._sender_tasks[websocket] = asyncio.create_task(
+                self._sender_loop(websocket, queue),
+                name="ws-sender",
+            )
+            total = len(self.active_connections)
+        logger.info("WebSocket client connected. Total: %d", total)
+        return True
 
-    async def disconnect(self, websocket: WebSocket):
+    async def _sender_loop(self, websocket: WebSocket, queue: asyncio.Queue) -> None:
+        """Serialize writes per client and evict clients that stop draining.
+
+        A shared broadcast task must never await a slow socket.  The bounded
+        queue deliberately drops the oldest update when a browser falls
+        behind; the next power batch/init state repairs the client's snapshot.
+        """
+        try:
+            while True:
+                message = await queue.get()
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_json(message), timeout=0.5
+                    )
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("WebSocket sender stopped: %s", exc)
+            await self.disconnect(websocket, _from_sender=True)
+
+    async def disconnect(self, websocket: WebSocket, *, _from_sender: bool = False):
         async with self._lock:
             if websocket in self.active_connections:
                 self.active_connections.remove(websocket)
-        logger.info(f"WebSocket client disconnected. Total: {len(self.active_connections)}")
+            queue = self._queues.pop(websocket, None)
+            sender = self._sender_tasks.pop(websocket, None)
+            total = len(self.active_connections)
+        if sender is not None and sender is not asyncio.current_task() and not sender.done():
+            sender.cancel()
+            try:
+                await sender
+            except asyncio.CancelledError:
+                pass
+        if queue is not None:
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                    queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+        logger.info("WebSocket client disconnected. Total: %d", total)
 
     async def broadcast(self, message: dict):
-        """Issue #3 fix: Snapshot list under lock, concurrent send via gather.
-        Issue #16: Disconnects slow/dead clients automatically."""
+        """Enqueue one bounded update per client without blocking the producer."""
         async with self._lock:
-            snapshot = list(self.active_connections)
+            queues = list(self._queues.items())
 
-        if not snapshot:
-            return
+            for websocket, queue in queues:
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                        queue.task_done()
+                    except asyncio.QueueEmpty:
+                        pass
+                try:
+                    queue.put_nowait(message)
+                except asyncio.QueueFull:
+                    # A concurrent sender can refill the queue between the
+                    # full check and put_nowait.  Drop this update rather than
+                    # allowing an unbounded waiter to retain the payload.
+                    logger.debug("Dropping WebSocket update for slow client")
 
-        disconnected: List[WebSocket] = []
-
-        async def _send(ws: WebSocket):
+    async def send(self, websocket: WebSocket, message: dict) -> bool:
+        """Queue a per-client message, preserving ordering with broadcasts."""
+        async with self._lock:
+            queue = self._queues.get(websocket)
+            if queue is None:
+                return False
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                    queue.task_done()
+                except asyncio.QueueEmpty:
+                    return False
             try:
-                await asyncio.wait_for(ws.send_json(message), timeout=0.5)
-            except (asyncio.TimeoutError, Exception):
-                disconnected.append(ws)
+                queue.put_nowait(message)
+                return True
+            except asyncio.QueueFull:
+                return False
 
-        await asyncio.gather(*[_send(ws) for ws in snapshot], return_exceptions=True)
+    async def close_all(self) -> None:
+        async with self._lock:
+            connections = list(self.active_connections)
+        for websocket in connections:
+            await self.disconnect(websocket)
 
-        for ws in disconnected:
-            await self.disconnect(ws)
+    def connection_count(self) -> int:
+        return len(self.active_connections)
 
 
 manager = ConnectionManager()
@@ -217,6 +403,24 @@ manager = ConnectionManager()
 # ─── Issue #13: Global MQTT client reference ────────────────────────
 _shared_mqtt_client: Optional[aiomqtt.Client] = None
 _shared_db: Optional[aiosqlite.Connection] = None
+_mqtt_listener_alive = False
+_mqtt_subscriptions_ready = False
+
+
+def _evict_api_devices(now: Optional[float] = None) -> None:
+    """Bound API device/index/batch state under hostile topic churn."""
+    now = time.time() if now is None else now
+    stale = {
+        device_id for device_id, seen in _api_device_last_seen.items()
+        if now - seen > API_DEVICE_TTL_SECONDS
+    }
+    if len(_api_device_last_seen) > MAX_API_DEVICES:
+        oldest = sorted(_api_device_last_seen, key=_api_device_last_seen.get)
+        stale.update(oldest[:len(_api_device_last_seen) - MAX_API_DEVICES])
+    for device_id in stale:
+        _api_device_last_seen.pop(device_id, None)
+        system_state["devices"].pop(device_id, None)
+        _ws_power_buffer.pop(device_id, None)
 
 
 def _mqtt_connect_kwargs() -> dict:
@@ -256,7 +460,7 @@ async def mqtt_listener_task():
     Subscribes to all EMS MQTT topics and forwards messages to
     connected WebSocket clients AND updates shared system_state.
     """
-    global _shared_mqtt_client
+    global _shared_mqtt_client, _mqtt_listener_alive, _mqtt_subscriptions_ready
     attempt = 0  # Issue #6: Exponential backoff counter
 
     while True:
@@ -264,20 +468,32 @@ async def mqtt_listener_task():
             # Bug 4.5 fix: Use MQTT_BROKER env var instead of hardcoded localhost
             async with aiomqtt.Client(**_mqtt_connect_kwargs()) as client:
                 _shared_mqtt_client = client
+                _mqtt_listener_alive = True
+                _mqtt_subscriptions_ready = False
                 logger.info("FastAPI MQTT bridge connected.")
-                system_state["pipeline_status"] = "connected"
+                system_state["pipeline_status"] = "mqtt_subscribing"
                 attempt = 0  # Reset backoff on successful connection
 
                 await client.subscribe("home/sensor/+/power")
                 await client.subscribe("home/plug/+/command")
                 await client.subscribe("home/ui/events")
+                _mqtt_subscriptions_ready = True
+                system_state["pipeline_status"] = "connected"
 
                 async for message in client.messages:
                     topic = str(message.topic)
+                    raw_payload = message.payload
+                    if isinstance(raw_payload, (bytes, bytearray)):
+                        if len(raw_payload) > MAX_MQTT_EVENT_BYTES:
+                            logger.warning("Dropping oversized MQTT frame on %s", topic)
+                            continue
+                    elif len(str(raw_payload).encode("utf-8")) > MAX_MQTT_EVENT_BYTES:
+                        logger.warning("Dropping oversized MQTT frame on %s", topic)
+                        continue
                     try:
-                        payload = (message.payload.decode()
-                                   if isinstance(message.payload, bytes)
-                                   else str(message.payload))
+                        payload = (raw_payload.decode()
+                                   if isinstance(raw_payload, bytes)
+                                   else str(raw_payload))
                     except (UnicodeDecodeError, TypeError) as exc:
                         logger.warning(
                             "Dropping undecodable MQTT frame on %s: %s", topic, exc
@@ -293,12 +509,17 @@ async def mqtt_listener_task():
                             if event_type == "DEVICE_STATUS":
                                 evt = DeviceStatusEvent(**event_data)
                                 did = evt.device_id
-                                # Issue #5: Standardize timestamp to epoch float
-                                ts = evt.timestamp if evt.timestamp else time.time()
-                                try:
-                                    ts = float(ts)
-                                except (ValueError, TypeError):
-                                    ts = time.time()
+                                # Issue #5: Standardize timestamp to epoch float.
+                                # A supplied zero is valid and must be preserved.
+                                ts = _event_epoch(evt.timestamp, time.time())
+                                previous_ts = _device_event_watermarks.get(did)
+                                if previous_ts is not None and ts <= previous_ts:
+                                    logger.debug(
+                                        "Ignoring duplicate/stale DEVICE_STATUS for %s "
+                                        "(%.3f <= %.3f)", did, ts, previous_ts
+                                    )
+                                    continue
+                                _device_event_watermarks[did] = ts
                                 system_state["devices"][did] = {
                                     "power": evt.power,
                                     "state": evt.state,
@@ -307,6 +528,8 @@ async def mqtt_listener_task():
                                     "pmv": evt.pmv,
                                     "last_seen": ts,
                                 }
+                                _api_device_last_seen[did] = time.time()
+                                _evict_api_devices()
                             elif event_type == "PHANTOM_LOAD":
                                 evt = PhantomLoadEvent(**event_data)
                                 system_state["phantom_loads"] = evt.loads
@@ -338,6 +561,12 @@ async def mqtt_listener_task():
                                     "timestamp": time.time(),
                                 }
                                 async with state_lock:
+                                    # Reconnects can replay the same request;
+                                    # retain one current entry per device.
+                                    system_state["pending_labels"] = [
+                                        p for p in system_state["pending_labels"]
+                                        if p.get("device_id") != evt.device_id
+                                    ]
                                     system_state["pending_labels"].append(label_entry)
                                     system_state["pending_labels"] = system_state["pending_labels"][-50:]
                                 # Open-set hook: buffer the raw windows behind
@@ -415,11 +644,27 @@ async def mqtt_listener_task():
                     elif "/power" in topic:
                         device_id = topic.split("/")[-2]
                         try:
-                            power_watts = float(payload)
+                            power_event_ts = None
+                            if payload.lstrip().startswith("{"):
+                                power_data = json.loads(payload)
+                                raw_power = power_data.get(
+                                    "power", power_data.get("watts")
+                                )
+                                power_watts = float(raw_power)
+                                power_event_ts = _event_epoch(
+                                    power_data.get("timestamp")
+                                )
+                            else:
+                                power_watts = float(payload)
                             # NaN/Inf payloads parse cleanly as floats; never
                             # let them into the state or the WS broadcast.
                             if not math.isfinite(power_watts):
                                 raise ValueError("non-finite power")
+                            if power_event_ts is not None:
+                                previous_ts = _device_event_watermarks.get(device_id)
+                                if previous_ts is not None and power_event_ts <= previous_ts:
+                                    continue
+                                _device_event_watermarks[device_id] = power_event_ts
                             if device_id not in system_state["devices"]:
                                 system_state["devices"][device_id] = {}
                             system_state["devices"][device_id]["power"] = power_watts
@@ -428,23 +673,65 @@ async def mqtt_listener_task():
                             # instead of broadcasting each reading individually.
                             # The ws_aggregation_task flushes this buffer every 1s.
                             _ws_power_buffer[device_id] = power_watts
+                            _api_device_last_seen[device_id] = time.time()
+                            _evict_api_devices()
                         except ValueError:
                             # Issue #11: Log instead of silently swallowing
                             logger.debug(f"Non-numeric power payload on {topic}: {payload[:50]}")
 
-                    # ── Relay Commands ──
+                    # ── Relay acknowledgements ──
+                    elif "/ack" in topic:
+                        device_id = topic.split("/")[-2]
+                        match = re.fullmatch(
+                            r"(ON_CONFIRMED|OFF_CONFIRMED|LOCKOUT_NACK|STALE_COMMAND)\|([1-9][0-9]{0,19})",
+                            payload,
+                        )
+                        if match is None:
+                            logger.warning("Dropping invalid relay ACK on %s", topic)
+                            continue
+                        ack, command_id_text = match.groups()
+                        command_id = int(command_id_text)
+                        relay_state = (
+                            "ON" if ack == "ON_CONFIRMED" else
+                            "OFF" if ack == "OFF_CONFIRMED" else
+                            "LOCKED" if ack == "LOCKOUT_NACK" else
+                            "STALE"
+                        )
+                        system_state["devices"].setdefault(device_id, {})
+                        system_state["devices"][device_id].update({
+                            "relay_state": relay_state,
+                            "last_ack": ack,
+                            "command_id": command_id,
+                            "last_seen": time.time(),
+                        })
+                        await manager.broadcast({
+                            "type": "HARDWARE_ACK",
+                            "device_id": device_id,
+                            "ack": ack,
+                            "command_id": command_id,
+                            "relay_state": relay_state,
+                            "accepted": ack in {"ON_CONFIRMED", "OFF_CONFIRMED"},
+                        })
+
+                    # ── Relay command observations ──
                     elif "/command" in topic:
                         device_id = topic.split("/")[-2]
+                        if re.fullmatch(
+                            r"(?:ON|OFF)\|[1-9][0-9]{0,19}", payload
+                        ) is None:
+                            logger.warning("Dropping invalid relay command on %s", topic)
+                            continue
                         await manager.broadcast({
-                            "type": "safety_alert",
-                            "severity": "critical",
+                            "type": "RELAY_COMMAND",
                             "device_id": device_id,
-                            "message": f"Relay Cutoff: {device_id} forced {payload}",
-                            "command": payload,
+                            "command": payload.split("|", 1)[0],
+                            "command_id": int(payload.split("|", 1)[1]),
                         })
 
         except aiomqtt.MqttError as e:
             _shared_mqtt_client = None
+            _mqtt_listener_alive = False
+            _mqtt_subscriptions_ready = False
             # Issue #6: Exponential backoff with jitter
             attempt += 1
             backoff = min(60, 2 ** attempt) + random.uniform(0, 1)
@@ -453,7 +740,22 @@ async def mqtt_listener_task():
             await asyncio.sleep(backoff)
         except asyncio.CancelledError:
             _shared_mqtt_client = None
+            _mqtt_listener_alive = False
+            _mqtt_subscriptions_ready = False
             break
+        except Exception as e:
+            # A malformed frame, iterator termination, or unexpected callback
+            # must never leave stale connected/readiness state behind.
+            _shared_mqtt_client = None
+            _mqtt_listener_alive = False
+            _mqtt_subscriptions_ready = False
+            system_state["pipeline_status"] = "mqtt_reconnecting"
+            attempt += 1
+            backoff = min(60, 2 ** attempt) + random.uniform(0, 1)
+            logger.exception(
+                "MQTT bridge task failed; reconnecting in %.1fs: %s", backoff, e
+            )
+            await asyncio.sleep(backoff)
 
 
 # ─── Heartbeat ───────────────────────────────────────────────────────
@@ -477,7 +779,12 @@ async def ws_aggregation_task():
     100 individual messages/sec, preventing browser JS thread saturation."""
     while True:
         await asyncio.sleep(1.0)
-        if not manager.active_connections or not _ws_power_buffer:
+        if not manager.active_connections:
+            # Do not send stale readings to a client that connects after an
+            # outage; a future live sample will repopulate the batch.
+            _ws_power_buffer.clear()
+            continue
+        if not _ws_power_buffer:
             continue
         # Atomically snapshot and clear the buffer
         snapshot = dict(_ws_power_buffer)
@@ -495,7 +802,7 @@ async def ws_aggregation_task():
 # Issue #10 & #22: Properly await cancelled tasks; catch and log errors
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _shared_db
+    global _shared_db, _shared_mqtt_client
     db_path = os.path.join(os.getcwd(), "data", "ems_state.db")
     try:
         if os.path.exists(db_path):
@@ -529,6 +836,13 @@ async def lifespan(app: FastAPI):
                 logger.info("Shared DB connection closed.")
             except Exception as e:
                 logger.error(f"Error closing DB connection: {e}")
+            finally:
+                _shared_db = None
+        _shared_mqtt_client = None
+        _ws_power_buffer.clear()
+        _device_event_watermarks.clear()
+        async with manager._lock:
+            manager.active_connections.clear()
 
 
 app = FastAPI(title="Digital Twin EMS", lifespan=lifespan)
@@ -582,7 +896,11 @@ async def health_check() -> StatusResponse:
 async def readiness_check():
     """Readiness probe: checks MQTT and DB connectivity."""
     checks = {
-        "mqtt": "connected" if _shared_mqtt_client is not None else "disconnected",
+        "mqtt": "connected" if (
+            _shared_mqtt_client is not None
+            and _mqtt_listener_alive
+            and _mqtt_subscriptions_ready
+        ) else "disconnected",
         "database": "available" if _shared_db is not None else "unavailable",
     }
     all_ok = all(v in ("connected", "available") for v in checks.values())
@@ -594,7 +912,8 @@ async def readiness_check():
 @app.get("/api/devices")
 async def get_devices():
     """Current power state of all monitored devices."""
-    return {"devices": system_state["devices"]}
+    async with state_lock:
+        return {"devices": {k: dict(v) for k, v in system_state["devices"].items()}}
 
 
 @app.get("/api/analytics")
@@ -628,7 +947,8 @@ async def get_status():
 @app.get("/api/pending-labels")
 async def get_pending_labels():
     """Devices awaiting user classification label."""
-    return {"pending_labels": system_state["pending_labels"]}
+    async with state_lock:
+        return {"pending_labels": [dict(v) for v in system_state["pending_labels"]]}
 
 
 @app.get("/api/low-confidence")
@@ -995,7 +1315,7 @@ async def export_csv():
                 conn.row_factory = aiosqlite.Row
                 async with conn.execute(
                     "SELECT timestamp, device_id, power FROM measurements "
-                    "WHERE timestamp >= ? ORDER BY timestamp ASC",
+                    "WHERE timestamp >= ? ORDER BY timestamp ASC, id ASC",
                     (cutoff,),
                 ) as cursor:
                     while True:
@@ -1036,10 +1356,12 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.warning(f"Rejected WebSocket handshake: disallowed Origin {origin!r}")
         await websocket.close(code=1008)
         return
-    await manager.connect(websocket)
+    connected = await manager.connect(websocket)
+    if not connected:
+        return
     # Issue #23: Send initial state snapshot ONCE on connection only
     try:
-        await websocket.send_json({
+        await manager.send(websocket, {
             "type": "init_state",
             "devices": system_state["devices"],
             "pmv_score": system_state["pmv_score"],

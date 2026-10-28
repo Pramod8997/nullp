@@ -85,6 +85,10 @@ class NILMTransientDetector:
         # We account for this smoothing factor so a physical step >= threshold W triggers.
         self.sg_deriv_factor = max(1.0, (self.sg_window - 1) / 2.0)
         self.scaled_threshold = (threshold / self.sg_deriv_factor) / self.sample_rate_hz
+        # Keep the same wall-clock coverage at every input rate, then decimate
+        # once at the fixed-size model boundary.
+        self._segment_samples = self.embed_window * self.sample_rate_hz
+        self._buffer_limit = max(self.embed_window * 3, self._segment_samples)
 
         self._buffer: list = []            # rolling power samples
         self._cooldown = 0                 # prevent consecutive triggers
@@ -101,7 +105,14 @@ class NILMTransientDetector:
         Returns (is_transient: bool, segment_array | None).
         segment_array is shape (embed_window,), zero-padded if near buffer edge.
         """
-        val = float(power_w)
+        try:
+            val = float(power_w)
+        except (TypeError, ValueError):
+            logger.warning(
+                "NILMTransientDetector: dropped non-numeric sample (%r); "
+                "buffer left unchanged.", power_w
+            )
+            return False, None
 
         # Reject non-finite samples instead of buffering them. A single NaN/Inf
         # (a corrupted PZEM read or a bare "nan" MQTT payload) propagates through
@@ -117,9 +128,9 @@ class NILMTransientDetector:
             return False, None
 
         self._buffer.append(val)
-        # Trim to 3× embed_window for efficiency
-        if len(self._buffer) > self.embed_window * 3:
-            self._buffer = self._buffer[-(self.embed_window * 3):]
+        # Retain enough source samples for a rate-normalized model window.
+        if len(self._buffer) > self._buffer_limit:
+            self._buffer = self._buffer[-self._buffer_limit:]
 
         if len(self._buffer) < self.sg_window:
             return False, None
@@ -139,18 +150,18 @@ class NILMTransientDetector:
             # Fix: Since peak_idx is the most recent sample, we can't look ahead.
             # We must either delay the decision, or take the last embed_window samples.
             # We take the last embed_window samples so the transient is at the end.
-            start    = max(0, peak_idx - self.embed_window + 1)
+            start    = max(0, peak_idx - self._segment_samples + 1)
             end      = peak_idx + 1
             segment  = arr[start:end]
             # zero-pad if near edges (on the left side)
-            if len(segment) < self.embed_window:
+            if len(segment) < self._segment_samples:
                 segment = np.pad(segment,
-                                 (self.embed_window - len(segment), 0),
+                                 (self._segment_samples - len(segment), 0),
                                  mode='constant')
 
             # If sample rate > 1Hz, downsample the segment to embed_window
             # by taking evenly-spaced samples (preserves transient shape)
-            if self.sample_rate_hz > 1 and len(segment) > self.embed_window:
+            if len(segment) > self.embed_window:
                 indices = np.linspace(0, len(segment) - 1,
                                       self.embed_window, dtype=int)
                 segment = segment[indices]
@@ -170,15 +181,19 @@ class NILMTransientDetector:
         Returns:
             (embed_window,) float32 array, or None if buffer is too small.
         """
-        if len(self._buffer) < self.embed_window:
+        if len(self._buffer) < self._segment_samples:
             if len(self._buffer) < self.sg_window:
                 return None
-            # Zero-pad on left if buffer is smaller than embed_window
+            # Zero-pad on left if buffer is smaller than the source-rate
+            # window, then downsample to the CNN's fixed input length.
             arr = np.array(self._buffer, dtype=np.float32)
-            return np.pad(arr, (self.embed_window - len(arr), 0),
-                          mode='constant').astype(np.float32)
-        arr = np.array(self._buffer[-self.embed_window:], dtype=np.float32)
-        return arr
+            arr = np.pad(arr, (self._segment_samples - len(arr), 0),
+                         mode='constant')
+        else:
+            arr = np.array(self._buffer[-self._segment_samples:], dtype=np.float32)
+        if len(arr) > self.embed_window:
+            arr = arr[np.linspace(0, len(arr) - 1, self.embed_window, dtype=int)]
+        return arr.astype(np.float32)
 
     def reset(self):
         self._buffer.clear()
@@ -267,12 +282,23 @@ class OverlapAwareNILMDetector:
             label_hint is one of: "single", "multi_device", or a device name
             when subtraction successfully isolates a known device.
         """
-        ts = timestamp or time.time()
-        self._power_buffer.append(float(power_w))
-        if len(self._power_buffer) > self.embed_window * 3:
-            self._power_buffer = self._power_buffer[-(self.embed_window * 3):]
+        # Timestamp zero is valid in replayed traces and must not be replaced
+        # by wall-clock time (which can break overlap ordering).
+        try:
+            value = float(power_w)
+        except (TypeError, ValueError):
+            logger.warning("Overlap NILM: dropped non-numeric sample (%r)", power_w)
+            return [(False, None, "")]
+        if not np.isfinite(value):
+            logger.warning("Overlap NILM: dropped non-finite sample (%r)", power_w)
+            return [(False, None, "")]
 
-        is_transient, segment = self._base.push(power_w)
+        ts = timestamp if timestamp is not None else time.time()
+        self._power_buffer.append(value)
+        if len(self._power_buffer) > self._base._buffer_limit:
+            self._power_buffer = self._power_buffer[-self._base._buffer_limit:]
+
+        is_transient, segment = self._base.push(value)
 
         if not is_transient:
             return [(False, None, "")]

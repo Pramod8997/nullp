@@ -75,7 +75,9 @@ def mock_power_event(
         power=power,
         state=state,
         confidence=confidence,
-        timestamp=timestamp or time.time(),
+        # Epoch zero is a valid fixture timestamp; only an omitted timestamp
+        # should be replaced with the current clock value.
+        timestamp=timestamp if timestamp is not None else time.time(),
     )
 
 

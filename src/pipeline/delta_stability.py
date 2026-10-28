@@ -75,6 +75,24 @@ class DeltaStabilityAnalyzer:
         Returns:
             ('stable', cluster_mean_array) | ('transient', None)
         """
+        # MQTT/model boundaries are untrusted. Reject empty, non-finite, or
+        # dimension-changing signatures before np.stack() can fail the stream.
+        try:
+            embedding = np.asarray(embedding, dtype=np.float32)
+        except (TypeError, ValueError):
+            self._temp_log.append({'embedding': None, 'ts': timestamp,
+                                   'reason': 'invalid_shape'})
+            return 'transient', None
+        if (embedding.ndim != 1 or embedding.size == 0
+                or not np.all(np.isfinite(embedding))):
+            self._temp_log.append({'embedding': None, 'ts': timestamp,
+                                   'reason': 'invalid_signature'})
+            return 'transient', None
+        if self._buffer and embedding.shape != self._buffer[-1][0].shape:
+            self._temp_log.append({'embedding': None, 'ts': timestamp,
+                                   'reason': 'dimension_mismatch'})
+            return 'transient', None
+
         self._buffer.append((embedding.copy(), timestamp))
 
         if len(self._buffer) < self.min_count:
@@ -196,7 +214,15 @@ class DeltaStabilityTracker:
         self.buffer.append(np.asarray(embedding, dtype=np.float32))
 
     async def process(self, embedding: np.ndarray, timestamp: Optional[float] = None) -> Optional[LabelRequestEvent]:
-        emb = np.asarray(embedding, dtype=np.float32)
+        try:
+            emb = np.asarray(embedding, dtype=np.float32)
+        except (TypeError, ValueError):
+            return None
+        if (emb.ndim != 1 or emb.size == 0
+                or not np.all(np.isfinite(emb))):
+            return None
+        if self.buffer and emb.shape != self.buffer[-1].shape:
+            return None
         self._add_to_buffer(emb)
 
         if len(self.buffer) < self.min_occurrences:

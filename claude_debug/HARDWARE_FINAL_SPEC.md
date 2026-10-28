@@ -16,23 +16,33 @@
 > **Explicitly NOT rated for:** kettle, oven, HVAC, washing machine, EV charger, projector, desktop PC.
 > **Build class:** ≤₹3,000 rig budget, **integrated modules only, zero soldering, zero firmware change.**
 
+> **CURRENT-BUILD OVERRIDE (2026-10-27):** The physical board available for the
+> current bring-up is a **38-pin ESP32-WROOM-32** with a
+> **PZEM-004T-100A(V4.0)-type external CT** and an available relay board that
+> may have four channels. Use channel 1 only. The 10 A direct/shunt PZEM,
+> 30-pin BOM, PZEM in/out current path, and generic 2-channel assumption below
+> are historical procurement targets and are **not wiring instructions for the
+> current bench**. Use `docs/ems_hardware/ACTUAL_100A_CT_WIRING.md` and
+> `docs/ems_hardware/PRE_POWER_MULTIMETER_CHECKLIST.md` as the current physical
+> release documents. The four-channel level shifter is unused.
+
 ---
 
 ## 0. The five scope decisions everything else follows from
 
 | | Decision | Consequence |
 | :-- | :--- | :--- |
-| **S1** | **Prototype only, ~250 W envelope** | 10 A sensing, 10 A switching, 5 A fusing, 1.0 mm² wire. The 3.5 kW household profile in `config/config.yaml` and the 600 W fleet in `config/config.demo.yaml` are **software-only** and have no hardware. |
+| **S1** | **Prototype only, ~250 W envelope** | External-CT sensing, verified relay/socket rating, 5 A fusing, 1.0 mm² wire. The 3.5 kW household profile in `config/config.yaml` and the 600 W fleet in `config/config.demo.yaml` are **software-only** and have no hardware. |
 | **S2** | **One aggregate sense point (true NILM)** | 1× ESP32 + 1× PZEM. NILM must disaggregate — which is the entire point of the ML stack. No per-appliance sub-meters. |
 | **S3** | **India, 230 V 50 Hz, IS 1293** | 6 A 3-pin load socket, 30 mA RCBO, PE mandatory on every Class I load. |
 | **S4** | **Builder has no hardware background → integrated modules, no solder, ≤₹3,000** | Every discrete/SMD part is replaced by a pre-assembled module or a screw-terminal-mounted resistor. No SMD, no PCB-pin modules, no hand-soldered mains. See D3′/D6′ and §2. |
-| **S5** | 🆕 **ONE switched socket. Laptop + phone charger, plugged in *simultaneously*** | A **3-pin multi-plug adapter** sits in that socket so both loads share the PZEM shunt. This is load-bearing, not convenience — see D12′. Ceiling drops 600 W → **250 W**, so the cutoff is physically reachable. |
+| **S5** | 🆕 **ONE switched socket. Laptop + phone charger, plugged in *simultaneously*** | A **3-pin multi-plug adapter** sits in that socket so both loads share the external CT. This is load-bearing, not convenience — see D12′. Ceiling is **250 W**. |
 
 ### S5 — why one socket must still carry two loads at once
 
 > 🔴 **One device at a time is not disaggregation.** With a single load energised, the aggregate signal *is* that appliance — that is single-appliance classification. `OverlapAwareNILMDetector` (power subtraction) would never execute on real data, and the central ML claim of the project would be demonstrated only in simulation.
 >
-> A ₹50 multi-plug adapter restores the real behaviour: laptop and charger draw through **one** PZEM at **one** sense point, and the pipeline must separate them. One port, one meter, two overlapping loads — S2 fully intact.
+> A ₹50 multi-plug adapter restores the real behaviour: laptop and charger draw through **one** external CT at **one** sense point, and the pipeline must separate them. One port, one meter, two overlapping loads — S2 fully intact.
 
 **Demonstration sequence** (each step is a real NILM event on one meter):
 1. Laptop alone → baseline + `laptop` classification.
@@ -45,17 +55,15 @@
 ```
                       ┌──────────── EMS NODE (enclosed) ─────────────┐
                       │                                              │
-[ 6A plug ]──L────────┼──[ 5A ceramic ]──[ PZEM in-L ]               │
+[ 6A plug ]──L────────┼──[ 5A ceramic ]──┬──[ PZEM L sense ]          │
    to wall            │                       │                      │
-   socket             │                  [ PZEM shunt ]              │
+   socket             │                  [ external CT ]             │
    (on 30mA           │                       │                      │
-    RCBO)             │                  [ PZEM out-L ]              │
-                      │                       │                      │
-                      │                  [ Relay COM ]               │
-                      │                       │                      │
-                      │                  [ Relay NO ]────────────────┼──> L
-           ───N───────┼───────────────────────┴──────────────────────┼──> N   [IS 1293
-                      │            (also PZEM voltage-sense N)        │        6A socket]
+     RCBO)             │                  [ Relay COM ]               │
+                       │                       │                      │
+                       │                  [ Relay NO ]──(CT around L)──┼──> L
+            ───N───────┼──────────[ PZEM N sense ]────────────────────┼──> N   [IS 1293
+                       │                                               │        6A socket]
            ───PE──────┼──[ Earth block ]════ UNSWITCHED ═════════════┼──> PE     │
                       │         ║                                     │          │
                       │    (enclosure bond)                           │          ▼
@@ -78,23 +86,30 @@
 
 ## 1. Locked component decisions
 
-### D1 — Sensor: PZEM-004T v3.0, **10 A direct-connect (shunt) variant**
+### D1 — Sensor: PZEM-004T-100A(V4.0)-type **external CT variant**
 
-| | 10 A direct (**CHOSEN**) | 100 A CT (rejected) |
-| :--- | :--- | :--- |
-| Range | 0–10 A / 0–2.3 kW | 0–100 A / 0–23 kW |
-| Start current | 0.01 A ≈ **2.3 W** | 0.02 A ≈ 4.6 W |
-| Resolution | 0.001 A ≈ **0.23 W/step** | 0.01 A ≈ 2.3 W/step |
+| Property | Current physical build |
+| :--- | :--- |
+| Current measurement | External split-core CT around one live conductor |
+| Voltage measurement | PZEM `L`/`N` sense terminals, per the exact manual |
+| TTL header | `GND, TX, RX, 5V`; Modbus UART at 9600 baud |
+| ESP32 interface | GPIO16 ← TX; GPIO17 → RX; no ESP32 ADC |
+| CT burden | No user-added SCT-013 burden resistor; use only the PZEM's marked CT input |
 
-Rejected because the 100 A CT's 4.6 W start floor sits *above* a 3–10 W phone charger (reads 0 W or flickers) and its 2.3 W/step quantisation makes a 60 W monitor a 26-step signal — too coarse for NILM feature extraction. The 2.3 kW ceiling of the 10 A part is 3.8× the 600 W envelope.
+The 10 A direct/shunt variant is a retired procurement target. Do not route the
+load current through the available CT board as if it had an internal shunt.
+Verify the exact CT terminal polarity, arrow direction, AC sense labels, and
+V4-type protocol behavior before mains work. The actual CT's low-current
+resolution and start threshold must be measured before claiming phone-charger
+recognition.
 
-**Consequences:** no CT clamp, no SCT-013, no burden resistor, no ADC input. Load current physically passes through the module's screw terminals.
+### D2 — Switch: verified 5 V opto-isolated relay module, H/L trigger target
 
-### D2 — Switch: **2-channel 5 V opto-isolated relay module with H/L trigger jumper** (SRD-05VDC-SL-C, 10 A / 250 VAC)
-
-Replaces the SLA-05VDC-SL-C 30 A. The 30 A part is 3.8× oversized on contacts and its 180 mA coil is the single largest draw on the 5 V rail; the SRD coil is ~71 mA. Contact margin at the 2.6 A worst-case demo load is 3.8×.
-
-Module must be **opto-isolated**. Buy the **2-channel** variant specifically: 1-channel boards are overwhelmingly fixed low-trigger, whereas 2-channel boards almost always carry the **H/L selector jumper** that D3′ depends on. Channel 1 is the relay; channel 2 is a free spare. ~₹120 either way.
+The available board may have four channels. The architecture uses channel 1
+only; channels 2–4 are unused. A two-channel equivalent is acceptable only if
+it has the same verified H/L behavior, 5 V/VCC/JD-VCC arrangement and contact
+labels. The relay model, input/coil current and contact rating are physical
+validation gates; a generic “30 A” listing is not evidence.
 
 ### D3′ — 🔒 Level shifter **DELETED**. GPIO 18 drives a **high-trigger** opto input directly.
 
@@ -142,11 +157,11 @@ The original defect B-7 is still worth reading: `RELAY_ACTIVE_LOW = true` meant 
 
 > **Supersedes D6 (HLK-5M05).** The HLK-5M05 is a bare PCB module with **solder pins and exposed AC pads** — it requires soldering, and it puts unguarded mains inside a first-time builder's enclosure. S4 rules it out.
 
-| Rail consumer | Peak |
+| Rail consumer | Peak (unverified until measured) |
 | :--- | :--- |
 | ESP32 WiFi TX burst | 500 mA |
 | SRD relay coil | 71 mA |
-| PZEM-004T v3.0 | 20 mA |
+| PZEM-004T-100A CT/V4-type TTL side | 20 mA nominal assumption |
 | **Total** | **≈591 mA** |
 
 A 5 V **2 A** charger leaves **238 % margin** (HLK-PM01's 600 mA left 1.5 %, HLK-5M05's 1 A left 41 %). Feed one 5 V/GND pair through a gland into the shield's `VIN`/`GND` screw terminals and distribute to the relay `VCC` and PZEM `5V` from adjacent terminals.
@@ -157,20 +172,24 @@ Buy **BIS-marked** (IS 13252). An uncertified ₹60 charger has neither the isol
 
 **D13 still applies, and is unaffected:** its hazard is a *host laptop* USB cable tying ESP32 GND to an earthed chassis. A 2-pin isolated charger has no earth reference, so powering from it while mains-live is exactly the intended configuration.
 
-### D6″ — 🆕 Wiring interface: **ESP32 30-pin screw-terminal expansion shield**
+### D6″ — Wiring interface: **matching 38-pin expansion shield or secure headers**
 
 The DevKit plugs in; every GPIO lands on a labelled screw terminal. Its value is **strain relief and non-slip terminations** for the PZEM UART, relay IN and 5 V feed — dupont jumpers on bare header pins work loose, and a GPIO 16 wire that falls off mid-demo reads identically to a dead PZEM.
 
-⚠️ **Match the variant at purchase:** **30-pin**, and the same board *width* as your DevKit. 36/38-pin shields and wide-body shields will not seat. GPIO 16/17/18 are all broken out — no pin remap, so the `PZEM_RX_PIN`/`PZEM_TX_PIN`/`RELAY_PIN` constants in `main.cpp` are unchanged.
+⚠️ **Match the owned board:** **38-pin**, with the same board width and
+silkscreen. A 30-pin shield is not mechanically compatible. GPIO 16/17/18 are
+all broken out — no pin remap, so the `PZEM_RX_PIN`/`PZEM_TX_PIN`/`RELAY_PIN`
+constants in `main.cpp` are unchanged.
 
-### D7 — Load-path order: fuse → **PZEM** → **relay** → socket
+### D7 — Load-path order for the actual CT meter: fuse → sense branch / relay → CT → socket
 
-The PZEM's voltage sense and current shunt share one terminal block, so its position decides what a trip looks like:
+The available PZEM has an external CT. Its `L/N` terminals sense voltage; they
+are not a current shunt input/output path:
 
 | Order | On relay trip | Verdict |
 | :--- | :--- | :--- |
-| **PZEM upstream of relay (CHOSEN)** | 230 V, 0.000 A, 0 W | Proves the load is dead ✅ |
-| PZEM downstream of relay | 0 V, 0 A, 0 W | Indistinguishable from a dead sensor ❌ |
+| PZEM `L/N` sense upstream of relay; CT around switched live | 230 V, 0.000 A, 0 W | Proves the load is dead ✅ |
+| PZEM voltage sense downstream of relay | 0 V, 0 A, 0 W | Indistinguishable from a dead sensor ❌ |
 
 ### D8 — Protection: **5 A ceramic** on the load branch. Single mains tap.
 
@@ -189,7 +208,7 @@ The 5 A ceramic is retained even though the trip fell from 3.26 A to 1.36 A. **D
 | WARNING (110 %) | 275 W | 1.20 A | pipeline event |
 | **CRITICAL (125 %) → relay opens** | 312 W | **1.36 A** | **functional protection** |
 | Load fuse | ~1150 W | 5.00 A | wiring backup only |
-| PZEM shunt / relay contacts | 2300 W | 10.0 A | component rating |
+| External-CT meter / verified relay contacts | per actual datasheets | unverified | component rating gate |
 | 1.0 mm² conductor | ~3000 W | ~13 A | ampacity |
 
 **The relay is the functional protective element. The fuse protects wiring. The 30 mA RCBO protects people.** Do not conflate them.
@@ -216,7 +235,7 @@ The prototype loads are now *only* SMPS (laptop brick, phone charger) plus a pur
 
 ### D12′ — Load interface: **ONE IS 1293 6 A panel socket + a 3-pin multi-plug adapter**
 
-One socket = one switched point = one PZEM = S2 honoured. The multi-plug adapter in that socket is what makes S5 work: it puts the laptop brick and the phone charger **behind the same shunt at the same time**, so the pipeline sees a genuine superposed signal instead of one appliance at a time.
+One socket = one switched point = one PZEM = S2 honoured. The multi-plug adapter in that socket is what makes S5 work: it puts the laptop brick and the phone charger **behind the same external CT at the same time**, so the pipeline sees a genuine superposed signal instead of one appliance at a time.
 
 Inlet is a **pre-moulded** 6 A plug on 1.0 mm² flex through a cable gland. Do not wire your own plug top.
 
@@ -231,7 +250,8 @@ The old 4-way strip is deleted — there is no fourth load to put on it, and it 
 
 ### D13 — 🔴 **USB and mains are mutually exclusive. Never both.**
 
-PZEM-004T v3.0 clones cannot be assumed to galvanically isolate their TTL side from mains. USB ties ESP32 GND to the host laptop's chassis. Hard rule:
+PZEM-004T CT/V4-type clones cannot be assumed to galvanically isolate their TTL
+side from mains. USB ties ESP32 GND to the host laptop's chassis. Hard rule:
 
 * **Flashing / serial monitor:** laptop USB connected, **mains fully disconnected**.
 * **Running:** powered from the 5 V charger via the screw-terminal breakout, **laptop USB removed**.
@@ -249,10 +269,10 @@ Prices are **indicative Indian retail (Aug 2026)** from Robu / Robocraze / Quart
 
 | # | Item | Exact part / spec | Qty | ₹ | Note |
 | :-- | :--- | :--- | :-: | --: | :--- |
-| 1 | MCU dev board | ESP32 DevKit V1, **ESP32-WROOM-32D**, **30-pin** | 1 | 400 | **Not WROVER** (D10) |
-| 2 | 🆕 Screw-terminal shield | ESP32 **30-pin** GPIO expansion, screw terminals | 1 | 300 | Match pin count **and board width** (D6″) |
-| 3 | Energy meter | PZEM-004T **v3.0, 10 A direct-connect** | 1 | 800 | **Not** the CT variant (D1) |
-| 4 | Relay module | **2-ch** 5 V opto-isolated, SRD-05VDC-SL-C 10 A, **H/L trigger jumper** | 1 | 120 | Ch.1 live, ch.2 spare (D2/D3′) |
+| 1 | MCU dev board | ESP32 DevKit V1, **ESP32-WROOM-32D**, **38-pin** | 1 | 400 | **Not WROVER** (D10) |
+| 2 | 🆕 Screw-terminal shield | ESP32 **38-pin** GPIO expansion, screw terminals | 1 | 300 | Match pin count **and board width** (D6″) |
+| 3 | Energy meter | PZEM-004T-100A **V4-type external CT** | 1 | — | Actual board; confirm exact model/manual |
+| 4 | Relay module | Available **4-ch** 5 V board, verified H/L target | 1 | — | Ch.1 live; channels 2–4 unused |
 | 5 | 🆕 5 V supply | **BIS-marked 5 V 2 A USB charger** | 1 | 180 | IS 13252 (D6′) |
 | 6 | 🆕 DC breakout | USB-A female → screw-terminal adapter | 1 | 70 | No solder on the DC side |
 | 7 | **Pull-down resistor** | **100 kΩ 0.25 W** metal film, through-hole | 5 | 15 | 🔴 **Mandatory** — legs into screw terminals (D3′) |
@@ -370,19 +390,19 @@ Prices are **indicative Indian retail (Aug 2026)** from Robu / Robocraze / Quart
 ## 6. Pre-power-on inspection gate
 
 **Wiring**
-* ☐ Continuity: plug L → 5 A fuse → PZEM in-L → PZEM out-L → relay COM
+* ☐ Continuity: plug L → 5 A fuse → branch to PZEM `L` sense and relay COM → relay NO → CT around live → socket L
 * ☐ Continuity: plug PE → PE barrier block → enclosure → socket PE, **unswitched**, <0.1 Ω
 * ☐ Isolation ≥10 MΩ: L/N to the 5 V rail, and L/N to enclosure earth
 * ☐ Creepage ≥6.3 mm between every mains net and every 3.3 V/5 V net — inspect under magnification
 * ☐ **Only one mains branch enters the box** (the load branch). The 5 V charger is external (D6′)
 * ☐ Every stranded conductor **folded back on itself** before clamping, every screw torqued, every one tug-tested
-* ☐ PZEM is **upstream** of the relay (D7)
+* ☐ PZEM `L/N` sense labels and CT pair/orientation are verified; the CT is around one live conductor only
 
 **Polarity & orientation**
-* ☐ Relay module jumper set to **H (high-trigger)** (D3′)
+* ☐ Relay module selector verified as **H (high-trigger)** (D3′); use channel 1 only even if the board has four channels
 * ☐ GPIO 18 → relay `IN` **direct**; **100 kΩ from `IN` to `GND`** landed in the screw terminals (D3′)
 * ☐ Relay module `VCC` = 5 V, `GND` common with the ESP32 — verified with a DMM, not assumed
-* ☐ PZEM UART crossed: GPIO 16 (RX2) ← PZEM TX · GPIO 17 (TX2) → PZEM RX
+* ☐ PZEM UART crossed: GPIO 16 (RX2) ← PZEM TX · GPIO 17 (TX2) → PZEM RX; PZEM is the 100A CT/V4-type board
 * ☐ **B-4 logic-level measurement done and recorded** before GPIO 16 is connected
 * ☐ Multi-plug adapter is **earthed** and its PE is continuous to the socket (D12′)
 
@@ -401,12 +421,12 @@ Never skip a stage. Each has an abort condition.
 | Stage | Connect | Verify | Abort if |
 | :-: | :--- | :--- | :--- |
 | **1** | Laptop USB only. No mains. Relay module unplugged | Boots, WiFi joins, MQTT connects; **GPIO 18 measures LOW** at idle and through a reset | Bootloop, or GPIO 18 idles HIGH → the load would be live at boot |
-| **2** | USB + relay module + the 100 kΩ. **No mains on contacts** | `set_relay(true)` → **DMM continuity COM–NO closes**; `set_relay(false)` → opens. Verify with the meter, **not by ear** — a click is not continuity | Inverted, or will not latch at 3.3 V → take the **D5 fallback** (B-8), then repeat this stage |
+| **2** | USB + relay module + the 100 kΩ. **No mains on contacts** | Dedicated `bench` firmware `DRY_ON` → **DMM continuity COM–NO closes**; `DRY_OFF` → opens. Verify with the meter, **not by ear** | Inverted, unknown H/L mode, or will not release → stop and resolve the relay interface |
 | **3** | 5 V charger via the breakout on mains. **Laptop USB removed** (D13). Contacts open | 5 V rail holds ≥4.75 V through a WiFi TX burst | Rail dips below 4.4 V → charger is underrated or the breakout is high-resistance |
-| **4** | PZEM in-line, load branch open. **B-4 test passed first** | Voltage ≈230 V, current 0.000 A | No UART response, or TX measured 5 V |
+| **4** | PZEM CT board with verified L/N sense and CT pair; load branch open. **B-4 test passed first** | Voltage ≈230 V, current 0.000 A | No UART response, wrong CT/manual topology, or TX measured 5 V without a divider |
 | **5** | 100 W lamp alone through the relay | PZEM power within **±5 %** of the lamp's voltage-scaled nameplate (§3); clean step edge visible in the pipeline | Error >5 % → run `scripts/calibrate_ct.py` |
-| **6** | Multi-plug: **laptop + phone charger together** (S5) | Aggregate tracks both; NILM raises a distinct event on **each** plug-in, including the charger plugged in *while the laptop runs*; `laptop` and `phone_charger` both classify | Only one event ever fires, or the second load is invisible → overlap is not working, re-check §5 |
-| **7** | Add the lamp to force **>312 W with the broker killed** | **Relay opens on CRITICAL with WiFi and MQTT down** — Core 0 alone | Cutoff needs the network → the safety path is not local |
+| **6** | Multi-plug: **laptop + phone charger together** (S5) | Aggregate tracks both; recognition is physical-validation work, not assumed from simulation | CT resolution or second-load signal is absent → stop and recalibrate/review |
+| **7** | Controlled overload only after an explicit rating review | **Relay opens on CRITICAL with WiFi and MQTT down** — Core 0 alone | Do not exceed the 250 W profile merely to force a test without written electrical approval |
 | **8** | ~250 W continuous, enclosure closed, 1 h | No terminal or conductor warm to the back of the hand; no discolouration, no smell | Any hotspot → stop and re-torque |
 
 **Verify before trusting the software**

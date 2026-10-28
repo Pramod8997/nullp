@@ -30,6 +30,7 @@ from src.hardware.esp32_firmware_sim import (
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 MAIN_CPP = REPO_ROOT / "firmware" / "esp32_node" / "src" / "main.cpp"
+HARDWARE_HEADER = REPO_ROOT / "firmware" / "esp32_node" / "include" / "hardware_config.h"
 TWIN_PY = REPO_ROOT / "src" / "hardware" / "esp32_firmware_sim.py"
 CONFIG_HW = REPO_ROOT / "config" / "config.hardware.yaml"
 PIPELINE_PY = REPO_ROOT / "scripts" / "run_pipeline.py"
@@ -44,6 +45,7 @@ if not MAIN_CPP.exists():
     )
 
 _MAIN_CPP = MAIN_CPP.read_text(encoding="utf-8")
+_HARDWARE_HEADER = HARDWARE_HEADER.read_text(encoding="utf-8") if HARDWARE_HEADER.exists() else ""
 _TWIN_PY = TWIN_PY.read_text(encoding="utf-8")
 _PIPELINE_PY = PIPELINE_PY.read_text(encoding="utf-8")
 _HW_CONFIG = yaml.safe_load(CONFIG_HW.read_text(encoding="utf-8"))
@@ -54,20 +56,32 @@ _HW_CONFIG = yaml.safe_load(CONFIG_HW.read_text(encoding="utf-8"))
 
 def _fw_float(name: str) -> float:
     m = re.search(rf"const\s+float\s+{name}\s*=\s*([0-9.eE+-]+)\s*;", _MAIN_CPP)
+    if not m:
+        alias = re.search(rf"const\s+float\s+{name}\s*=\s*ems_hardware::(\w+)\s*;", _MAIN_CPP)
+        if alias:
+            m = re.search(rf"constexpr\s+float\s+{alias.group(1)}\s*=\s*([0-9.eE+-]+)", _HARDWARE_HEADER)
     assert m, f"const float {name} not found in {MAIN_CPP}"
-    return float(m.group(1))
+    return float(m.group(1) if m.lastindex == 1 else m.group(2))
 
 
 def _fw_int(decl: str, name: str) -> int:
     m = re.search(rf"const\s+{decl}\s+{name}\s*=\s*(\d+)\s*;", _MAIN_CPP)
+    if not m:
+        alias = re.search(rf"const\s+{decl}\s+{name}\s*=\s*ems_hardware::(\w+)\s*;", _MAIN_CPP)
+        if alias:
+            m = re.search(rf"constexpr\s+{decl}\s+{alias.group(1)}\s*=\s*(\d+)", _HARDWARE_HEADER)
     assert m, f"const {decl} {name} not found in {MAIN_CPP}"
-    return int(m.group(1))
+    return int(m.group(1) if m.lastindex == 1 else m.group(2))
 
 
 def _fw_bool(name: str) -> bool:
     m = re.search(rf"const\s+bool\s+{name}\s*=\s*(true|false)\s*;", _MAIN_CPP)
+    if not m:
+        alias = re.search(rf"const\s+bool\s+{name}\s*=\s*ems_hardware::(\w+)\s*;", _MAIN_CPP)
+        if alias:
+            m = re.search(rf"constexpr\s+bool\s+{alias.group(1)}\s*=\s*(true|false)", _HARDWARE_HEADER)
     assert m, f"const bool {name} not found in {MAIN_CPP}"
-    return m.group(1) == "true"
+    return (m.group(1) if m.lastindex == 1 else m.group(2)) == "true"
 
 
 FW_RATED_WATTS = _fw_float("RATED_WATTS")

@@ -14,7 +14,7 @@ The ESP32 firmware at `main.cpp` is a reference implementation for the physical 
 ### Architecture
 - **Tier-0 Safety Relay**: Runs independently on ESP32 Core 0 (`SafetySamplingTask`, 100 ms). NO ML inference on device — the ESP32 publishes power readings via MQTT and trips the relay locally.
 - **Relay Trigger**: At **125% of `RATED_WATTS`** (`CRITICAL_PCT = 1.25`, matching `critical_pct` in config). The relay disconnects on-device, independent of the MQTT broker or the ML pipeline.
-- **Metering**: **PZEM-004T v3.0, 10 A direct-connect variant**, read over UART Modbus RTU. Load current passes through the module's screw terminals; the ESP32 reads true-RMS V / I / P / PF / kWh registers digitally.
+- **Metering**: The available **PZEM-004T-100A(V4.0)-type external-CT variant** is read over the v3/v4-compatible UART Modbus register protocol. Its external CT surrounds one live conductor; its `L/N` terminals are voltage sense. The ESP32 reads digital V / I / P / PF registers; it does not calculate ADC RMS.
 
 > ⚠️ **There is no analog CT path.** An earlier revision of this file specified an
 > SCT-013-030 clamp into GPIO 34 (ADC) with a 33 Ω burden resistor, the relay on

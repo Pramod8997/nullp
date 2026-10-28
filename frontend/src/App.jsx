@@ -9,9 +9,76 @@ import SchedulePage from './pages/SchedulePage/SchedulePage';
 import AlertsPage from './pages/AlertsPage/AlertsPage';
 import SettingsPage from './pages/SettingsPage/SettingsPage';
 import { Sun, Moon } from 'lucide-react';
+import { requestJson, WS_URL } from './api/client';
 
-const WS_URL = `ws://${window.location.hostname}:8000/ws`;
 const MAX_RECONNECT_DELAY = 10000;
+const MAX_POWER = 1000000;
+
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const finiteNumber = (value) => {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+const getReceivedAt = () => Date.now();
+
+const getSourceTimestamp = (value) => {
+  const numeric = finiteNumber(value);
+  if (numeric !== null && numeric > 0) return numeric > 1e12 ? numeric : numeric * 1000;
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+};
+
+const normalizeDevice = (device, receivedAt, provenance = 'BACKEND_SNAPSHOT') => {
+  if (!isRecord(device)) return null;
+  const power = finiteNumber(device.power);
+  const sourceTimestamp = getSourceTimestamp(device.source_timestamp ?? device.timestamp ?? device.last_seen, receivedAt);
+  const ageMs = sourceTimestamp === null ? 0 : Math.max(0, receivedAt - sourceTimestamp);
+  return {
+    ...device,
+    ...(power !== null ? { power: Math.max(0, Math.min(power, MAX_POWER)) } : {}),
+    _receivedAt: receivedAt,
+    source_timestamp: sourceTimestamp,
+    provenance: device.provenance || device.source || provenance,
+    freshness: ageMs > 15000 ? 'stale' : 'live',
+  };
+};
+
+const normalizeDeviceMap = (devices, receivedAt, provenance) => {
+  if (!isRecord(devices)) return {};
+  return Object.entries(devices).reduce((result, [deviceId, device]) => {
+    if (!deviceId) return result;
+    const normalized = normalizeDevice(device, receivedAt, provenance);
+    if (normalized) result[deviceId] = normalized;
+    return result;
+  }, {});
+};
+
+const asFiniteReadings = (readings) => {
+  if (!isRecord(readings)) return {};
+  return Object.entries(readings).reduce((result, [deviceId, watts]) => {
+    const power = finiteNumber(watts);
+    if (deviceId && power !== null && power >= 0 && power <= MAX_POWER) result[deviceId] = power;
+    return result;
+  }, {});
+};
+
+const offlineDevices = (devices) => Object.keys(devices || {}).reduce((result, deviceId) => {
+  result[deviceId] = {
+    ...devices[deviceId],
+    power: 0,
+    state: 'OFF',
+    _receivedAt: Date.now(),
+    source_timestamp: null,
+    provenance: 'OFFLINE',
+    freshness: 'offline',
+  };
+  return result;
+}, {});
 
 function Dashboard() {
   const { toggleTheme, isDark } = useTheme();
@@ -33,41 +100,125 @@ function Dashboard() {
   const [latencyStats, setLatencyStats] = useState({ avg_ms: 0, max_ms: 0, p95_ms: 0 });
   const [latencyHistory, setLatencyHistory] = useState([]);
   const [telemetry, setTelemetry] = useState({});
+  const [relayStates, setRelayStates] = useState({});
   const wsRef = useRef(null);
   const reconnectDelay = useRef(1000);
   const reconnectTimer = useRef(null);
+  const mountedRef = useRef(false);
+  const connectionGeneration = useRef(0);
+  const snapshotRequestRef = useRef(null);
+
+  const syncSnapshot = useCallback(async (signal, generation) => {
+    const responses = await Promise.allSettled([
+      requestJson('/api/devices', { signal }),
+      requestJson('/api/analytics', { signal }),
+      requestJson('/api/phantom', { signal }),
+      requestJson('/api/status', { signal }),
+      requestJson('/api/safety-warnings', { signal }),
+    ]);
+
+    if (!mountedRef.current || signal.aborted || generation !== connectionGeneration.current) return;
+
+    const [devicesResponse, analyticsResponse, phantomResponse, statusResponse, warningsResponse] = responses;
+    const receivedAt = getReceivedAt();
+    if (devicesResponse.status === 'fulfilled') {
+      const body = devicesResponse.value;
+      const devices = isRecord(body) ? body.devices : null;
+      if (isRecord(devices)) setDevices(normalizeDeviceMap(devices, receivedAt, 'BACKEND_SNAPSHOT'));
+    }
+    if (analyticsResponse.status === 'fulfilled') {
+      const body = analyticsResponse.value;
+      const summary = isRecord(body) ? body.analytics : null;
+      if (isRecord(summary)) setAnalytics(summary);
+    }
+    if (phantomResponse.status === 'fulfilled') {
+      const body = phantomResponse.value;
+      if (isRecord(body)) {
+        setPhantomData((previous) => ({
+          ...previous,
+          loads: isRecord(body.phantom_loads) ? body.phantom_loads : previous.loads,
+          total: finiteNumber(body.total_phantom_watts) ?? previous.total,
+        }));
+      }
+    }
+    if (statusResponse.status === 'fulfilled') {
+      const body = statusResponse.value;
+      if (isRecord(body) && typeof body.pipeline_status === 'string') {
+        setPipelineStatus(body.pipeline_status);
+      }
+    }
+    if (warningsResponse.status === 'fulfilled') {
+      const body = warningsResponse.value;
+      const warnings = isRecord(body) && Array.isArray(body.safety_warnings) ? body.safety_warnings : null;
+      if (warnings) {
+        setAlerts(warnings.slice(-50).reverse().map((warning, index) => ({
+          ...warning,
+          id: warning.id ?? `snapshot-${index}-${warning.timestamp ?? receivedAt}`,
+          type: warning.type || 'SAFETY_WARNING',
+          timestamp: warning.timestamp || receivedAt,
+        })));
+      }
+    }
+  }, []);
+
+  const startSnapshotSync = useCallback((generation) => {
+    snapshotRequestRef.current?.abort();
+    const controller = new AbortController();
+    snapshotRequestRef.current = controller;
+    syncSnapshot(controller.signal, generation).catch((error) => {
+      if (error?.name !== 'AbortError' && mountedRef.current) {
+        console.warn('[EMS] Snapshot sync failed:', error);
+      }
+    });
+  }, [syncSnapshot]);
+
   // ── Message Router ──
   const handleMessage = useCallback(
     (data) => {
+      if (!isRecord(data) || typeof data.type !== 'string') return;
       const { type } = data;
+      const receivedAt = getReceivedAt();
 
       switch (type) {
         case 'init_state': {
           const summary = data.analytics?.summary || data.analytics;
-          if (data.devices) {
-            setDevices(data.devices);
+          if (isRecord(data.devices)) {
+            setDevices(normalizeDeviceMap(data.devices, receivedAt, 'BACKEND_SNAPSHOT'));
           }
-          if (data.pmv_score !== undefined) setPmvScore(data.pmv_score);
+          const pmv = finiteNumber(data.pmv_score);
+          if (pmv !== null) setPmvScore(pmv);
           if (Array.isArray(data.power_history)) setPowerHistory(data.power_history.slice(-120));
-          if (summary) setAnalytics(summary);
-          if (data.telemetry) setTelemetry(data.telemetry);
-          if (data.phantom_loads) setPhantomData((prev) => ({ ...prev, loads: data.phantom_loads }));
-          if (data.pipeline_status) setPipelineStatus(data.pipeline_status);
+          if (isRecord(summary)) setAnalytics(summary);
+          if (isRecord(data.telemetry)) setTelemetry(data.telemetry);
+          if (isRecord(data.phantom_loads)) {
+            setPhantomData((prev) => ({
+              ...prev,
+              loads: data.phantom_loads,
+              total: finiteNumber(data.total_phantom_watts ?? data.phantom_total) ?? prev.total,
+            }));
+          }
+          if (typeof data.pipeline_status === 'string') setPipelineStatus(data.pipeline_status);
+          if (isRecord(data.relay_states)) setRelayStates(data.relay_states);
           break;
         }
 
         case 'heartbeat':
-          setPipelineStatus(data.status || 'connected');
+          if (typeof data.status === 'string') setPipelineStatus(data.status);
           break;
 
         case 'power_reading':
+          if (!data.device_id) break;
+          {
+            const power = finiteNumber(data.power);
+            if (power === null || power < 0 || power > MAX_POWER) break;
           setPowerHistory((prev) => {
             const next = [
               ...prev,
               {
-                time: new Date().toLocaleTimeString('en-US', { hour12: false }),
-                [data.device_id]: data.power,
+                time: new Date(receivedAt).toLocaleTimeString('en-US', { hour12: false }),
+                [data.device_id]: power,
                 device_id: data.device_id,
+                timestamp: receivedAt,
               },
             ];
             return next.length > 120 ? next.slice(-120) : next;
@@ -75,19 +226,26 @@ function Dashboard() {
           setDevices((prev) => ({
             ...prev,
             [data.device_id]: {
-              ...prev[data.device_id],
-              power: data.power,
-            },
-          }));
+               ...prev[data.device_id],
+               power,
+               _receivedAt: receivedAt,
+               source_timestamp: getSourceTimestamp(data.timestamp, receivedAt),
+               provenance: data.provenance || 'LIVE_HARDWARE',
+               freshness: 'live',
+             },
+           }));
+          }
           break;
 
         case 'power_batch': {
-          const readings = data.readings || {};
-          const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+          const readings = asFiniteReadings(data.readings);
+          const sourceTimestamp = getSourceTimestamp(data.timestamp, receivedAt);
+          const ts = new Date(sourceTimestamp || receivedAt).toLocaleTimeString('en-US', { hour12: false });
           const entry = { time: ts };
           Object.entries(readings).forEach(([devId, watts]) => {
             entry[devId] = watts;
           });
+          entry.timestamp = sourceTimestamp || receivedAt;
           setPowerHistory((prev) => {
             const next = [...prev, entry];
             return next.length > 120 ? next.slice(-120) : next;
@@ -95,7 +253,14 @@ function Dashboard() {
           setDevices((prev) => {
             const updated = { ...prev };
             Object.entries(readings).forEach(([devId, watts]) => {
-              updated[devId] = { ...updated[devId], power: watts };
+              updated[devId] = {
+                ...updated[devId],
+                power: watts,
+                _receivedAt: receivedAt,
+                source_timestamp: sourceTimestamp,
+                provenance: data.provenance || 'LIVE_HARDWARE',
+                freshness: 'live',
+              };
             });
             return updated;
           });
@@ -103,21 +268,27 @@ function Dashboard() {
         }
 
         case 'DEVICE_STATUS':
+          if (!data.device_id) break;
           setDevices((prev) => ({
             ...prev,
             [data.device_id]: {
               ...prev[data.device_id],
-              power: data.power,
-              state: data.state,
-              classification: data.classification,
-              confidence: data.confidence,
-              pmv: data.pmv,
+              ...(finiteNumber(data.power) !== null ? { power: Math.max(0, finiteNumber(data.power)) } : {}),
+              ...(typeof data.state === 'string' ? { state: data.state } : {}),
+              ...(typeof data.classification === 'string' ? { classification: data.classification } : {}),
+              ...(finiteNumber(data.confidence) !== null ? { confidence: finiteNumber(data.confidence) } : {}),
+              ...(finiteNumber(data.pmv) !== null ? { pmv: finiteNumber(data.pmv) } : {}),
               last_seen: data.timestamp,
+              _receivedAt: receivedAt,
+              source_timestamp: getSourceTimestamp(data.timestamp, receivedAt),
+              provenance: data.provenance || data.source || 'LIVE_HARDWARE',
+              freshness: 'live',
               ...(data.label !== undefined ? { label: data.label } : {}),
               ...(data.rated !== undefined ? { rated: data.rated } : {}),
             },
           }));
-          if (data.pmv !== undefined) setPmvScore(data.pmv);
+          if (finiteNumber(data.pmv) !== null) setPmvScore(finiteNumber(data.pmv));
+          if (isRecord(data.relay)) setRelayStates((prev) => ({ ...prev, [data.device_id]: data.relay }));
           break;
 
         // Real PZEM electrical telemetry (voltage / current / power factor)
@@ -125,7 +296,14 @@ function Dashboard() {
           if (data.device_id) {
             setTelemetry((prev) => ({
               ...prev,
-              [data.device_id]: { v: data.v, i: data.i, pf: data.pf, ts: Date.now() },
+              [data.device_id]: {
+                v: finiteNumber(data.v),
+                i: finiteNumber(data.i),
+                pf: finiteNumber(data.pf),
+                ts: receivedAt,
+                source_timestamp: getSourceTimestamp(data.timestamp, receivedAt),
+                provenance: data.provenance || 'LIVE_HARDWARE',
+              },
             }));
           }
           break;
@@ -199,42 +377,83 @@ function Dashboard() {
           break;
         }
 
+        case 'HARDWARE_ACK': {
+          if (!data.device_id || typeof data.message !== 'string') break;
+          const ack = data.ack || data.command || data.message.match(/\b(ON_CONFIRMED|OFF_CONFIRMED|LOCKOUT_NACK)\b/i)?.[1];
+          setRelayStates((prev) => ({
+            ...prev,
+            [data.device_id]: {
+              ...prev[data.device_id],
+              ack: ack || 'UNKNOWN',
+              state: ack === 'ON_CONFIRMED' ? 'ON' : ack === 'OFF_CONFIRMED' ? 'OFF' : prev[data.device_id]?.state,
+              confirmed: ack === 'ON_CONFIRMED' || ack === 'OFF_CONFIRMED',
+              ackTimestamp: receivedAt,
+              provenance: 'EDGE_ACK',
+            },
+          }));
+          setAlerts((prev) => [{
+            id: `ack-${data.device_id}-${receivedAt}`,
+            type: 'HARDWARE_ACK',
+            severity: ack === 'LOCKOUT_NACK' ? 'warning' : 'info',
+            device_id: data.device_id,
+            message: data.message,
+            timestamp: receivedAt,
+            provenance: 'EDGE_ACK',
+          }, ...prev].slice(0, 50));
+          break;
+        }
+
+        case 'SAFETY_EVENT': {
+          if (!data.device_id) break;
+          setRelayStates((prev) => ({
+            ...prev,
+            [data.device_id]: {
+              ...prev[data.device_id],
+              state: /OFFLINE|FAULT|CUTOFF|LOCKED/i.test(data.message || '') ? 'OFF' : prev[data.device_id]?.state,
+              safety: data.message,
+              safetyTimestamp: receivedAt,
+              provenance: 'EDGE_STATUS',
+            },
+          }));
+          break;
+        }
+
         case 'PHANTOM_LOAD':
           setPhantomData({
-            loads: data.loads || {},
-            total: data.total || 0,
-            offenders: data.offenders || [],
+            loads: isRecord(data.loads) ? data.loads : {},
+            total: finiteNumber(data.total) ?? 0,
+            offenders: Array.isArray(data.offenders) ? data.offenders : [],
           });
           break;
 
         case 'ANALYTICS_UPDATE': {
-          setAnalytics((prev) => ({ ...prev, ...data.summary }));
+          if (isRecord(data.summary)) setAnalytics((prev) => ({ ...prev, ...data.summary }));
           break;
         }
 
         case 'PMV_UPDATE':
-          setPmvScore(data.pmv || 0);
+          if (finiteNumber(data.pmv) !== null) setPmvScore(finiteNumber(data.pmv));
           break;
 
         case 'LATENCY_STATS':
           setLatencyStats({
-            avg_ms: data.avg_ms || 0,
-            max_ms: data.max_ms || 0,
-            p95_ms: data.p95_ms || 0,
+            avg_ms: finiteNumber(data.avg_ms) ?? 0,
+            max_ms: finiteNumber(data.max_ms) ?? 0,
+            p95_ms: finiteNumber(data.p95_ms) ?? 0,
           });
           setLatencyHistory((prev) => {
             const next = [
               ...prev,
               {
-                time: new Date().toLocaleTimeString('en-US', {
+                 time: new Date(receivedAt).toLocaleTimeString('en-US', {
                   hour12: false,
                   hour: '2-digit',
                   minute: '2-digit',
                   second: '2-digit',
                 }),
-                avg: data.avg_ms || 0,
-                p95: data.p95_ms || 0,
-                max: data.max_ms || 0,
+                 avg: finiteNumber(data.avg_ms) ?? 0,
+                 p95: finiteNumber(data.p95_ms) ?? 0,
+                 max: finiteNumber(data.max_ms) ?? 0,
               },
             ];
             return next.length > 20 ? next.slice(-20) : next;
@@ -252,8 +471,10 @@ function Dashboard() {
   const connectRef = useRef(null);
 
   const scheduleReconnect = useCallback(() => {
+    if (!mountedRef.current) return;
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     reconnectTimer.current = setTimeout(() => {
+      if (!mountedRef.current) return;
       console.log(`[EMS] Reconnecting in ${reconnectDelay.current}ms...`);
       if (connectRef.current) connectRef.current();
       reconnectDelay.current = Math.min(reconnectDelay.current * 1.5, MAX_RECONNECT_DELAY);
@@ -262,18 +483,23 @@ function Dashboard() {
 
   // ── WebSocket with auto-reconnect ──
   const connect = useCallback(() => {
+    if (!mountedRef.current) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
+    const generation = ++connectionGeneration.current;
 
     ws.onopen = () => {
+      if (!mountedRef.current || wsRef.current !== ws || generation !== connectionGeneration.current) return;
       console.log('[EMS] WebSocket connected');
       setConnectionStatus('connected');
       reconnectDelay.current = 1000;
+      startSnapshotSync(generation);
     };
 
     ws.onmessage = (event) => {
+      if (!mountedRef.current || wsRef.current !== ws || generation !== connectionGeneration.current) return;
       try {
         const data = JSON.parse(event.data);
         handleMessage(data);
@@ -283,27 +509,68 @@ function Dashboard() {
     };
 
     ws.onclose = () => {
+      if (wsRef.current !== ws || generation !== connectionGeneration.current) return;
       console.log('[EMS] WebSocket disconnected');
-      setConnectionStatus('reconnecting');
+      wsRef.current = null;
+      if (mountedRef.current) {
+        setConnectionStatus('reconnecting');
+        setDevices((prev) => offlineDevices(prev));
+        setTelemetry({});
+      }
       scheduleReconnect();
     };
 
     ws.onerror = () => {
+      if (!mountedRef.current || wsRef.current !== ws || generation !== connectionGeneration.current) return;
       ws.close();
     };
-  }, [handleMessage, scheduleReconnect]);
+  }, [handleMessage, scheduleReconnect, startSnapshotSync]);
 
   useEffect(() => {
     connectRef.current = connect;
   }, [connect]);
 
   useEffect(() => {
+    mountedRef.current = true;
     connect();
     return () => {
+      mountedRef.current = false;
+      connectionGeneration.current += 1;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      if (wsRef.current) wsRef.current.close();
+      snapshotRequestRef.current?.abort();
+      if (wsRef.current) {
+        const socket = wsRef.current;
+        wsRef.current = null;
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.onerror = null;
+        socket.close();
+      }
     };
   }, [connect]);
+
+  useEffect(() => {
+    const freshnessTimer = setInterval(() => {
+      const now = Date.now();
+      setDevices((previous) => Object.entries(previous).reduce((next, [deviceId, device]) => {
+        const age = now - (device?._receivedAt || 0);
+        if (age <= 15000 || device?.freshness === 'offline') {
+          next[deviceId] = device;
+          return next;
+        }
+        next[deviceId] = {
+          ...device,
+          power: 0,
+          state: 'OFF',
+          freshness: 'stale',
+          provenance: 'STALE',
+        };
+        return next;
+      }, {}));
+    }, 5000);
+    return () => clearInterval(freshnessTimer);
+  }, []);
 
   // ── Page Renderer ──
   const renderPage = () => {
@@ -344,7 +611,7 @@ function Dashboard() {
         return <SchedulePage />;
 
       case 'alerts':
-        return <AlertsPage alerts={alerts} />;
+        return <AlertsPage alerts={alerts} relayStates={relayStates} />;
 
       case 'settings':
         return <SettingsPage />;

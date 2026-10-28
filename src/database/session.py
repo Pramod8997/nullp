@@ -15,12 +15,14 @@ logger = logging.getLogger(__name__)
 
 class DatabaseSession:
     def __init__(self, db_path: str, fallback_csv: str = "data/fallback_measurements.csv",
-                 retention_days: int = 30):
+                 retention_days: int = 30, write_queue_size: int = 4096):
         self.db_path = db_path
         self.fallback_csv = fallback_csv
         self.retention_days = retention_days
         self._conn: Optional[aiosqlite.Connection] = None
-        self._write_queue: asyncio.Queue[Tuple[str, tuple]] = asyncio.Queue()
+        self._write_queue: asyncio.Queue[Tuple[str, tuple]] = asyncio.Queue(
+            maxsize=max(1, write_queue_size)
+        )
         self._flush_task: Optional[asyncio.Task] = None
         self._retention_task: Optional[asyncio.Task] = None
         self._running = False
@@ -29,6 +31,11 @@ class DatabaseSession:
         self._csv_lock = asyncio.Lock()
 
     async def connect(self) -> None:
+        if self._conn is not None and self._running:
+            return
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
         self._conn = await aiosqlite.connect(self.db_path)
         await self._conn.execute("PRAGMA journal_mode=WAL;")
         await self._conn.execute("PRAGMA synchronous=NORMAL;")
@@ -81,8 +88,35 @@ class DatabaseSession:
     async def insert_measurement(self, timestamp: float, device_id: str, power: float) -> None:
         if not self._running:
             raise RuntimeError("Database not running")
+        if not isinstance(timestamp, (int, float)) or not np.isfinite(timestamp):
+            raise ValueError("timestamp must be finite")
+        if not isinstance(power, (int, float)) or not np.isfinite(power):
+            raise ValueError("power must be finite")
         query = "INSERT INTO measurements (timestamp, device_id, power) VALUES (?, ?, ?)"
-        await self._write_queue.put((query, (timestamp, device_id, power)))
+        item = (query, (timestamp, device_id, power))
+        if self._write_queue.full():
+            # Measurements are periodic snapshots.  Keep the newest sample
+            # rather than letting a database outage grow process memory
+            # without bound.  The batch fallback still handles write errors
+            # after dequeuing.
+            try:
+                self._write_queue.get_nowait()
+                self._write_queue.task_done()
+            except asyncio.QueueEmpty:
+                pass
+            logger.warning("Database write queue full; dropping oldest measurement")
+        try:
+            self._write_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            logger.warning("Database write queue remained full; dropping measurement")
+
+    @property
+    def queued_writes(self) -> int:
+        return self._write_queue.qsize()
+
+    @property
+    def max_queued_writes(self) -> int:
+        return self._write_queue.maxsize
 
     async def _flush_loop(self) -> None:
         while self._running or not self._write_queue.empty():
@@ -94,9 +128,6 @@ class DatabaseSession:
                     # Wait for 10 seconds for batching, as per INV-6
                     item = await asyncio.wait_for(self._write_queue.get(), timeout=10.0)
                     batch.append(item)
-                    # Bug 4.6 fix: Removed task_done() calls — they can cause
-                    # ValueError if calls get desynchronized without join()
-                    
                     while not self._write_queue.empty():
                         batch.append(self._write_queue.get_nowait())
                 except asyncio.TimeoutError:
@@ -115,9 +146,13 @@ class DatabaseSession:
                                 await self._conn.executemany(query, param_list)
                         await self._conn.commit()
                         logger.debug(f"Flushed {len(batch)} records to database.")
+                        for _ in batch:
+                            self._write_queue.task_done()
                     except Exception as db_err:
                         logger.error(f"DB write error in flush loop: {db_err}")
                         await self._csv_fallback_batch_async(batch)
+                        for _ in batch:
+                            self._write_queue.task_done()
 
             except asyncio.CancelledError:
                 # Drain ALL remaining items from the queue before exiting
@@ -139,9 +174,13 @@ class DatabaseSession:
                                 await self._conn.executemany(query, param_list)
                         await self._conn.commit()
                         logger.info(f"Flushed {len(batch)} records during shutdown.")
+                        for _ in batch:
+                            self._write_queue.task_done()
                     except Exception as shutdown_err:
                         logger.error(f"Shutdown flush failed: {shutdown_err}")
                         await self._csv_fallback_batch_async(batch)
+                        for _ in batch:
+                            self._write_queue.task_done()
                 raise
             except Exception as e:
                 logger.error(f"Error in DB flush loop: {e}")
@@ -253,48 +292,31 @@ class DatabaseSession:
             logger.warning("DB not connected — cannot save unmapped cluster")
             return
 
+        mean_embedding = np.asarray(mean_embedding, dtype=np.float32)
+        if mean_embedding.ndim != 1 or not np.all(np.isfinite(mean_embedding)):
+            raise ValueError("mean_embedding must be a finite vector")
+        if not isinstance(timestamp, (int, float)) or not np.isfinite(timestamp):
+            raise ValueError("timestamp must be finite")
         cluster_hash = self._quantized_cluster_hash(mean_embedding)
-        embedding_blob = mean_embedding.astype(np.float32).tobytes()
+        embedding_blob = mean_embedding.tobytes()
 
         try:
-            cursor = await self._conn.execute(
-                "SELECT id, hit_count FROM unmapped_clusters WHERE cluster_hash = ?",
-                (cluster_hash,)
+            # Do the increment and first insert in one SQLite transaction. A
+            # SELECT-then-INSERT pair races when two ingest tasks see a new
+            # signature at the same time and can raise UNIQUE constraint errors.
+            await self._conn.execute(
+                """
+                INSERT INTO unmapped_clusters
+                    (cluster_hash, mean_embedding, hit_count,
+                     first_seen, last_seen, device_id, labeled)
+                VALUES (?, ?, 1, ?, ?, ?, 0)
+                ON CONFLICT(cluster_hash) DO UPDATE SET
+                    hit_count = unmapped_clusters.hit_count + 1,
+                    last_seen = excluded.last_seen,
+                    device_id = excluded.device_id
+                """,
+                (cluster_hash, embedding_blob, timestamp, timestamp, device_id),
             )
-            row = await cursor.fetchone()
-
-            if row:
-                # Existing cluster — increment hit_count, update last_seen
-                await self._conn.execute(
-                    """
-                    UPDATE unmapped_clusters
-                    SET hit_count = hit_count + 1,
-                        last_seen = ?,
-                        device_id = ?
-                    WHERE id = ?
-                    """,
-                    (timestamp, device_id, row[0])
-                )
-                logger.debug(
-                    f"Cluster {cluster_hash[:8]}… hit_count → {row[1] + 1} "
-                    f"for {device_id}"
-                )
-            else:
-                # New cluster — insert
-                await self._conn.execute(
-                    """
-                    INSERT INTO unmapped_clusters
-                        (cluster_hash, mean_embedding, hit_count,
-                         first_seen, last_seen, device_id, labeled)
-                    VALUES (?, ?, 1, ?, ?, ?, 0)
-                    """,
-                    (cluster_hash, embedding_blob, timestamp,
-                     timestamp, device_id)
-                )
-                logger.info(
-                    f"New unmapped cluster {cluster_hash[:8]}… "
-                    f"for {device_id}"
-                )
 
             await self._conn.commit()
 
@@ -362,6 +384,7 @@ class DatabaseSession:
                 pass
         if self._conn:
             await self._conn.close()
+            self._conn = None
         logger.info("Database connection closed gracefully.")
 
 
@@ -489,7 +512,13 @@ class DBSession:
             power = float(r.get("power", 0.0))
             ts = r.get("timestamp")
             if ts is None:
-                ts = datetime.datetime.now().isoformat()
+                ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            elif isinstance(ts, datetime.datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=datetime.timezone.utc)
+                else:
+                    ts = ts.astimezone(datetime.timezone.utc)
+                ts = ts.isoformat()
             else:
                 ts = str(ts)
             await self._conn.execute(
@@ -514,7 +543,11 @@ class DBSession:
                     continue
                 device = record.get("device", record.get("device_id", ""))
                 power = float(record.get("power", 0.0))
-                ts = str(record.get("timestamp", ""))
+                ts = record.get("timestamp", "")
+                if isinstance(ts, datetime.datetime):
+                    ts = ts.isoformat()
+                else:
+                    ts = str(ts)
                 cursor = await self._conn.execute(
                     "SELECT 1 FROM power_log WHERE device = ? AND power = ? AND timestamp = ?",
                     (device, power, ts),
@@ -530,7 +563,7 @@ class DBSession:
         if self._conn is None:
             await self.initialize()
         cutoff_dt = (
-            datetime.datetime.now()
+            datetime.datetime.now(datetime.timezone.utc)
             - datetime.timedelta(days=retention_days)
             - datetime.timedelta(seconds=5)
         )
@@ -554,4 +587,5 @@ class DBSession:
         if self._conn:
             await self._conn.close()
             self._conn = None
+        self._initialized = False
 

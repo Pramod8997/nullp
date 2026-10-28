@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { memo, useMemo } from 'react';
 import {
   BarChart,
   Bar,
@@ -10,47 +10,44 @@ import {
 } from 'recharts';
 import { useTheme } from '../../contexts/ThemeContext';
 import { BarChart3 } from 'lucide-react';
+import {
+  buildEnergyChartData,
+  finiteNonNegative,
+} from '../chartDataUtils';
 
-const finiteEnergy = (value) => (
-  (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
-  && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null
-);
+const finiteEnergy = finiteNonNegative;
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
+  const validEntries = payload.filter((entry) => finiteEnergy(entry?.value) !== null);
+  if (validEntries.length === 0) return null;
   return (
     <div className="bg-gray-950/95 dark:bg-gray-900/95 backdrop-blur-md p-3 rounded-xl border border-gray-800 shadow-2xl text-xs z-50">
       <p className="text-gray-400 font-mono mb-2 pb-1 border-b border-gray-800">{label}</p>
-      {payload.filter((entry) => finiteEnergy(entry.value) !== null).map((entry, i) => (
+      {validEntries.map((entry, i) => (
         <p key={i} className="font-mono font-semibold flex items-center justify-between gap-3" style={{ color: entry.color }}>
           <span>{entry.name}:</span>
-          <span>{Number(entry.value).toFixed(2)} kWh</span>
+          <span>{finiteEnergy(entry.value).toFixed(2)} kWh</span>
         </p>
       ))}
     </div>
   );
 };
 
-const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
+const EnergyChart = ({ powerHistory = [], analytics = {}, loading = false, error = null }) => {
   const { isDark } = useTheme();
 
   const chartData = useMemo(
-    () => (Array.isArray(analytics?.energy_history) ? analytics.energy_history : [])
-      .filter((row) => row && (
-        (typeof row.time === 'string' && row.time.trim() !== '')
-        || (typeof row.time === 'number' && Number.isFinite(row.time))
-      ))
-      .map((row) => ({ time: row.time, yesterday: finiteEnergy(row.yesterday), today: finiteEnergy(row.today) }))
-      .filter((row) => row.yesterday !== null || row.today !== null),
+    () => buildEnergyChartData(analytics?.energy_history),
     [analytics]
   );
-  const hasHistory = chartData.length > 0;
+  const hasHistory = chartData.length > 0 && !loading && !error;
 
   const gridColor = isDark ? '#1f2937' : '#f3f4f6';
   const axisColor = isDark ? '#6b7280' : '#9ca3af';
 
   return (
-    <div className="w-full bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-2xl p-5 shadow-sm flex flex-col justify-between" data-history-count={powerHistory.length}>
+    <div className="w-full bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-2xl p-5 shadow-sm flex flex-col justify-between" data-history-count={Array.isArray(powerHistory) ? powerHistory.length : 0}>
       {/* Header & Range Filters */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-gray-200/60 dark:border-gray-700/60">
         <div className="flex items-center gap-2">
@@ -69,7 +66,11 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
 
        </div>
 
-       {hasHistory ? (
+        {loading || error ? (
+          <div className="flex min-h-[240px] items-center justify-center text-center text-sm text-gray-500 dark:text-gray-400" role="status" aria-live="polite">
+            {loading ? 'Loading measured energy history…' : 'Unable to display measured energy history.'}
+          </div>
+        ) : hasHistory ? (
          <>
            {/* Legend */}
            <div className="flex items-center justify-end gap-4 text-xs font-medium py-2">
@@ -130,4 +131,11 @@ const EnergyChart = ({ powerHistory = [], analytics = {} }) => {
   );
 };
 
-export default EnergyChart;
+const areEqual = (previous, next) => (
+  previous.analytics?.energy_history === next.analytics?.energy_history
+  && previous.powerHistory === next.powerHistory
+  && previous.loading === next.loading
+  && previous.error === next.error
+);
+
+export default memo(EnergyChart, areEqual);

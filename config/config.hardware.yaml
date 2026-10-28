@@ -9,7 +9,33 @@
 #   python scripts/run_pipeline.py --config config/config.hardware.yaml
 #
 # Anything not overridden here mirrors config/config.yaml.
-# Hardware of record: claude_debug/HARDWARE_FINAL_SPEC.md (scope S1-S5).
+# Hardware of record: docs/ems_hardware/ACTUAL_100A_CT_WIRING.md and the
+# 38-pin/250 W physical scope below. The older 10 A shunt design is historical.
+
+hardware:
+  board: "ESP32-WROOM-32-38-pin"
+  mains_voltage_v: 230.0
+  mains_frequency_hz: 50.0
+  pzem:
+    model: "PZEM-004T-100A-CT-V4-type"
+    topology: "external_ct"
+    ttl_header: [GND, TX, RX, 5V]
+    uart_baud: 9600
+    tx_to_gpio16: "measure_first; use_1k_2k_divider_if_5V"
+    ac_terminals: "CT, CT, N, L"
+    physical_validation: "pending"
+  relay:
+    available_channels: 4
+    channel_used: 1
+    trigger_target: "H/high-trigger"
+    gpio: 18
+    active_low: false
+    input_pulldown_ohms: 100000
+    channels_2_to_4: "unused"
+    four_channel_level_shifter: "unused; not part of the approved path"
+    physical_validation: "pending"
+  low_voltage_supply: "isolated/BIS-marked 5V 2A external charger"
+  mains_release: "blocked_until_physical_gates_pass"
 
 app:
   name: "Digital Twin EMS — Physical Prototype (1 node, 1 port)"
@@ -82,9 +108,9 @@ protonet:
   # than any pre-seeded band.
 
 devices:
-  # The ONLY node. One ESP32, one relay, one IS 1293 6 A socket. A 3-pin
-  # multi-plug adapter in that socket puts the laptop and the phone charger on
-  # the same PZEM shunt at once -- that simultaneity is what gives NILM
+  # The ONLY node. One ESP32, one active relay channel, one IS 1293 6 A socket.
+  # A 3-pin multi-plug adapter in that socket puts the laptop and phone charger
+  # on the same external CT at once -- that simultaneity is what gives NILM
   # something to disaggregate. One device at a time is single-appliance
   # classification, not disaggregation, and does not exercise
   # OverlapAwareNILMDetector.
@@ -99,15 +125,15 @@ devices:
 # Only the two classes the prototype can physically produce. The trained model
 # still has all 7 heads; restricting the list here keeps the UI from advertising
 # appliances that no socket on this rig can ever present.
-# The 3 classifiable physical classes (locked scope, 2026-09-10). The LED
-# bulb is deliberately ABSENT: 9 W sits below the 20 W transient threshold,
-# so it is phantom-load-tracked on the dashboard, never classified.
+# The physical prototype classes are laptop and phone. The LED bulb is
+# deliberately absent: 9 W sits below the 20 W transient threshold, so it is
+# phantom-load-tracked on the dashboard, never classified. Projector remains
+# software/demo scope and is not authorized on this 250 W socket.
 # `phone_charger` (the old UK-DALE-era name) is retired here — the physical
 # USB-PD charger enrolls and classifies as `phone`.
 appliances:
   - phone
   - laptop
-  - projector
 
 # 250 W ceiling, sized so the cutoff is reachable with the loads on hand:
 #   laptop 65 W + USB-PD charger 120 W + 100 W lamp = 285 W -> WARNING (275 W)

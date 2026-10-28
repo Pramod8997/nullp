@@ -117,6 +117,7 @@ from src.pipeline.heuristic_fallback import (
     ENVELOPE_SLACK,
     UNKNOWN as UNRECOGNISED,
 )
+from src.telemetry_contract import parse_telemetry_frame, TelemetryContractError
 
 # Wire/internal sentinel for "no known class fits this load". Kept as the string
 # "unknown" deliberately: src/api/main.py, the dashboard's DeviceCards.jsx and 54
@@ -1014,17 +1015,9 @@ class EMSOrchestrator:
             # feeds the ML path. Bad payloads are dropped at debug level.
             if topic.endswith("/telemetry"):
                 try:
-                    frame = json.loads(payload_str)
-                    vals = {k: float(frame[k]) for k in ("v", "i", "w", "pf")}
-                    # json.loads accepts NaN/Infinity literals — reject them
-                    # before they reach the WS broadcast (same contract as
-                    # the /power path).
-                    if not all(math.isfinite(x) for x in vals.values()):
-                        logger.debug(
-                            f"Non-finite telemetry on {topic}: {payload_str!r}")
-                        return
+                    vals = parse_telemetry_frame(payload_str)
                     self.device_telemetry[device_id] = vals
-                except Exception as e:
+                except TelemetryContractError as e:
                     logger.debug(
                         f"Unparseable telemetry on {topic}: {payload_str!r} ({e})")
                     return
@@ -1032,13 +1025,19 @@ class EMSOrchestrator:
                 # eviction index (and fresh) so device_telemetry cannot grow
                 # unbounded on topic floods.
                 self._device_last_seen[device_id] = time.time()
+                if len(self._device_last_seen) > self._max_tracked_devices:
+                    self._evict_stale_devices()
                 latest = self.device_telemetry[device_id]
                 await self._broadcast_event({
                     "type": "TELEMETRY",
                     "device_id": device_id,
                     "v": latest["v"],
                     "i": latest["i"],
+                    "w": latest["w"],
                     "pf": latest["pf"],
+                    # The ESP32 payload has no source clock. This is the
+                    # backend receive time, not a device measurement time.
+                    "timestamp": time.time(),
                 })
                 return
 
@@ -1847,8 +1846,12 @@ class EMSOrchestrator:
         except asyncio.CancelledError:
             pass
         finally:
+            self._running = False
             safety_task.cancel()
             ml_pipeline_task.cancel()
+            await asyncio.gather(
+                safety_task, ml_pipeline_task, return_exceptions=True
+            )
             self.agent.save()
             await self.db.close()
 
@@ -1879,7 +1882,7 @@ class EMSOrchestrator:
                       self.last_device_analytics_time, self.cnn_active_ticks,
                       self._device_last_seen, self._power_history,
                       self._delta_pending, self._classify_methods,
-                      self.device_telemetry]:
+                      self.device_telemetry, self._unknown_windows]:
                 d.pop(did, None)
         if stale_ids:
             logger.info(f"🧹 Evicted {len(stale_ids)} stale device(s) from memory")

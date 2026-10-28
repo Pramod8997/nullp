@@ -24,9 +24,9 @@ Never invent APIs. Refer to `claude_context/ARCHITECTURE_AND_APIS.md`:
 
 ### 3. HARDWARE & SAFETY TRUTHS
 - ESP32 Dual-Core FreeRTOS: Core 0 = 100ms `SafetySamplingTask` (Tier-0 cutoff, 0 network dependency); Core 1 = Arduino loop/MQTT.
-- Hardware Pins: PZEM-004T UART (GPIO 16 RX / 17 TX), Relay (GPIO 18, Active-LOW: LOW=ON, HIGH=OFF).
+- Hardware Pins: PZEM UART (GPIO 16 RX / 17 TX), verified H-trigger Relay CH1 (GPIO 18, Active-HIGH: LOW=OPEN, HIGH=CLOSED).
 - Safety Thresholds: Overcurrent > 125% rated, Arc-fault proxy dP/dt > 1000W/s, Anti-thrashing lockout = 300s.
-- Physical Realities: 3.3V GPIO 18 requires 2N7000 MOSFET level shifter to 5V relay IN; RC snubber (100Ω + 0.1µF X2) across relay COM-NO; HLK-5M05 PSU + 1000µF low-ESR bulk capacitor.
+- Physical Realities: available PZEM is the 100A external-CT variant; GPIO18 is direct active-HIGH only for a verified H-trigger relay with 100kΩ IN1→GND pull-down; no ADC CT path, generic level shifter or HLK supply is active.
 
 ### 4. WORKFLOW & VERIFICATION COMMANDS
 1. Query Architecture: `graphify query "<question>"`

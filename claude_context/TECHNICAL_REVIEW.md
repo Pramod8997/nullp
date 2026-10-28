@@ -12,7 +12,7 @@
 graph TD
     subgraph Edge_Node [Physical / Simulated ESP32 Node]
         Mains["230V AC Mains (50Hz)"] --> CT["100A Split-Core CT Clamp"]
-        CT --> PZEM["PZEM-004T v3.0 (Modbus RTU)"]
+        CT --> PZEM["PZEM-004T-100A CT/V4-type (Modbus RTU)"]
         PZEM -->|UART Serial2 9600 baud| ESP32["ESP32 DevKit V1 (Xtensa LX6)"]
         
         subgraph FreeRTOS [Dual-Core FreeRTOS Partitioning]
@@ -24,8 +24,7 @@ graph TD
             Spinlock <-->|Atomic Float Data| Core1
         end
         
-        Core0 -->|Overcurrent / Arc Fault| RelayDriver["2N7000 MOSFET Inverter"]
-        RelayDriver --> Relay["30A Active-LOW Relay (GPIO 18)"]
+        Core0 -->|Overcurrent / Arc Fault| Relay["Verified H-trigger Relay CH1 (GPIO 18)"]
         Relay --> Load["Appliance Load"]
     end
 

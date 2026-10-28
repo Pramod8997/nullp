@@ -1,18 +1,20 @@
-EMS BENCH PROCUREMENT LIST — EXISTING ESP32-WROOM-32, 38-PIN
+EMS BENCH PROCUREMENT / INVENTORY NOTE — EXISTING ESP32-WROOM-32, 38-PIN
 ================================================================
 
 Prepared: 2026-10-14
 Purpose: Buy the missing low-voltage/prototyping parts for the EMS bench
 prototype. The user already owns the 38-pin ESP32-WROOM-32 development board.
-The user does NOT currently have the PZEM, relay, wires, power supply,
-breakout, breadboard or other parts.
+The current physical inventory includes the ESP32, breadboard, jumper wires,
+USB cable, a PZEM-004T-100A(V4.0)-type external-CT board, and an available
+multi-channel relay board. This file is not a mains authorization.
 
 IMPORTANT STATUS
 ----------------
 This is a bench-prototype procurement list, not authorization to connect
-230 V mains. The current PZEM candidate is the closest available match, but
-the retailer page does not explicitly prove both "PZEM-004T v3.0" and
-"10 A direct/shunt". Confirm those two points with the seller before paying.
+230 V mains. The available PZEM is not the retired 10 A direct/shunt target.
+Confirm its exact marking/manual, CT terminal polarity, L/N voltage-sense
+terminals and UART behavior before any mains work. Do not apply the old shunt
+diagram.
 
 CURRENT PHYSICAL STATUS
 -----------------------
@@ -33,16 +35,11 @@ No.  Qty  Item / exact required specification
      Unit price before GST       Line total before GST       Availability
      Direct purchase link
 
-01   1    PZEM-004T-D-P PCB-only AC energy meter candidate.
-     ₹430.80                   ₹430.80                    5 shown
-     https://www.electronicscomp.com/peacefair-pzem-004t-d-p-pcb-onlyhot-ac-meter
-     ORDER GATE: Seller must confirm PZEM-004T v3.0, 10 A rating and
-     direct/shunt connection. Do NOT substitute a 100 A CT version.
+01   1    PZEM-004T-100A(V4.0)-type external-CT meter — ALREADY AVAILABLE.
+      No purchase claim. Use CT/CT/N/L terminal order only after manual check.
 
-02   1    5 V 2-channel relay module, 30 A contacts, high/low trigger,
-          optocoupler-isolated.
-     ₹519.00                   ₹519.00                    6 shown
-     https://www.electronicscomp.com/2-channel-5v-30a-relay-module-supports-high-and-low-trigger-optocoupler
+02   1    Available 5 V multi-channel relay board — ALREADY AVAILABLE.
+      Use channel 1 only after H/L, VCC/JD-VCC and COM/NO labels are verified.
 
 03   1    ESP32 38-pin expansion/breakout board.
      ₹152.40                   ₹152.40                    4 shown
@@ -70,10 +67,12 @@ No.  Qty  Item / exact required specification
       feed the final shield VIN/GND rail and is not included in this price
       total. Do not substitute loose USB wires or Dupont jumpers on mains.
 
-07   1    8-channel bidirectional logic-level converter.
+07   1    8-channel bidirectional logic-level converter — OPTIONAL/SPARE.
       ₹68.00                    ₹68.00                     108 shown
       https://www.electronicscomp.com/8-channel-bi-directional-logic-level-converter-module
-      Use this for the PZEM UART only after confirming the module's HV/LV
+      Use this for PZEM TX only after the TX voltage measurement and exact
+      converter rails/pinout are confirmed. It is not part of the relay path.
+      Confirm the module's HV/LV
       rails and pinout: HV=5 V, LV=3.3 V, common GND; PZEM TX→HV1→LV1→GPIO16
       and GPIO17→LV2→HV2→PZEM RX. Do not wire an unverified PZEM TX output
       directly to GPIO16. This converter is not for the relay input.
@@ -146,12 +145,14 @@ and automated tests do not validate those physical safety properties.
 5. ORDER CHECKLIST
 ------------------
 
-[ ] Confirm PZEM listing is v3.0, 10 A, direct/shunt, not 100 A CT.
-[ ] Confirm relay is 5 V, 2-channel, optocoupler-isolated, high/low trigger,
-    and rated at least 10 A for the intended switching arrangement.
+[ ] Confirm the available PZEM is the 100 A CT/V4-type unit and record its
+    manual, CT polarity, L/N sense labels and measured TX idle voltage.
+[ ] Confirm the available relay's channel 1 is 5 V, H/high-trigger as wired,
+    and its VCC/JD-VCC and COM/NO/NC labels are known.
 [ ] Confirm the 38-pin breakout fits the exact ESP32 board.
 [ ] Confirm the ESP32 USB connector is micro-USB before buying item 06.
-[ ] Confirm item 07 HV/LV rails, PZEM UART pinout and the measured TX voltage.
+[ ] Confirm item 07 only if needed: exact HV/LV rails, PZEM UART pinout and
+    measured TX voltage. Leave it unused otherwise.
 [ ] Confirm the final runtime supply has the required USB-A-to-screw-terminal
     breakout; the micro-USB cable is not a substitute.
 [ ] Confirm the relay board's H/L jumper, VCC/JD-VCC arrangement and 5 V input
@@ -166,14 +167,14 @@ and automated tests do not validate those physical safety properties.
 6. REJECTED / NOT APPROVED SUBSTITUTES
 ---------------------------------------
 
-- 100 A CT PZEM listings from Techtonics or Sharvi: wrong sensing variant for
-  the 10 A direct/shunt target.
+- The old 10 A direct/shunt PZEM candidate: it is not the physically available
+  board and its wiring must not be mixed with the CT build.
 - Robu generic 2-channel relay: contact rating is shown, but trigger
   polarity and optocoupler/isolation details were not verified.
 - Robu SmartElex 2-channel relay: only 3 A contact rating was shown, below
   the target.
-- ElectronicsComp 1-channel relay listing: not enough channels for the
-  2-channel target.
+- The separate four-channel level shifter is not a relay driver by assumption;
+  leave it unused unless its exact interface is reviewed.
 
 
 7. FINAL LINK / PRICE CHECK

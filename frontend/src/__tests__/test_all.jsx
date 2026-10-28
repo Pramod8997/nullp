@@ -6,7 +6,7 @@ import DeviceCards from '../components/DeviceCards';
 import SafetyAlerts from '../components/SafetyAlerts';
 import DigitalTwin from '../components/DigitalTwin';
 import SystemStatus from '../components/SystemStatus';
-import ApplianceTable from '../components/ApplianceTable';
+import ApplianceTable from '../components/ApplianceTable/ApplianceTable';
 import AlertsPage from '../pages/AlertsPage/AlertsPage';
 import SummaryCards from '../components/SummaryCards/SummaryCards';
 import EnergyChart from '../components/EnergyChart/EnergyChart';
@@ -178,37 +178,32 @@ test("shows disconnected banner on WS drop", () => {
     expect(screen.getByText(/disconnected/i)).toBeInTheDocument();
 });
 
-// TEST 9E-1: Breaker status derived from alerts — TRIPPED on SAFETY_CUTOFF
-test("breaker status shows TRIPPED when a cutoff alert exists", () => {
+// TEST 9E-1: Breaker status is unknown until edge relay state is reported.
+test("breaker status does not infer a trip from an alert alone", () => {
     const alerts = [
         { id: Date.now(), type: "SAFETY_CUTOFF", severity: "critical", device_id: "node_bench_agg",
           message: "Critical power threshold breached — edge relay has been activated" },
     ];
     render(<AlertsPage alerts={alerts} />);
     const breaker = screen.getByTestId("breaker-status");
-    expect(breaker.textContent).toMatch(/tripped/i);
-    expect(breaker.textContent).toMatch(/relay open/i);
-    expect(breaker.textContent).not.toMatch(/armed & nominal/i);
+    expect(breaker.textContent).toMatch(/unknown/i);
 });
 
-// TEST 9E-3: A cutoff alert OLDER than the 5-minute lockout leaves the
-// breaker Armed & Nominal — the lockout expired and the relay can be
-// re-energized, so a stale alert must not claim TRIPPED forever.
-test("breaker status resets after the lockout window expires", () => {
+test("breaker status shows TRIPPED from edge relay state", () => {
     const alerts = [
-        { id: Date.now() - 6 * 60 * 1000, type: "SAFETY_CUTOFF", severity: "critical",
+        { id: Date.now(), type: "SAFETY_CUTOFF", severity: "critical",
           device_id: "node_bench_agg", message: "Critical power threshold breached" },
     ];
-    render(<AlertsPage alerts={alerts} />);
-    expect(screen.getByTestId("breaker-status").textContent).toMatch(/armed & nominal/i);
+    render(<AlertsPage alerts={alerts} relayStates={{ node_bench_agg: { state: 'OFF', safety: 'edge cutoff' } }} />);
+    expect(screen.getByTestId("breaker-status").textContent).toMatch(/tripped/i);
+    expect(screen.getByTestId("breaker-status").textContent).toMatch(/relay open/i);
 });
 
-// TEST 9E-2: Breaker status stays Armed without cutoff/overcurrent/arc alerts
-test("breaker status shows Armed & Nominal without trip alerts", () => {
+test("breaker status shows Armed & Nominal from edge relay state", () => {
     const alerts = [
         { id: 1, type: "SAFETY_WARNING", severity: "warning", device_id: "x",
           message: "Power draw approaching limit on x" },
     ];
-    render(<AlertsPage alerts={alerts} />);
+    render(<AlertsPage alerts={alerts} relayStates={{ node_bench_agg: { state: 'ON', ack: 'ON_CONFIRMED' } }} />);
     expect(screen.getByTestId("breaker-status").textContent).toMatch(/armed & nominal/i);
 });

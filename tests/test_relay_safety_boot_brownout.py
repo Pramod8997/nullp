@@ -103,6 +103,11 @@ def test_default_polarity_matches_locked_firmware_constant():
     import re, pathlib
     src = pathlib.Path("firmware/esp32_node/src/main.cpp").read_text(encoding="utf-8")
     m = re.search(r'const\s+bool\s+RELAY_ACTIVE_LOW\s*=\s*(true|false)\s*;', src)
+    if not m:
+        header = pathlib.Path("firmware/esp32_node/include/hardware_config.h").read_text(encoding="utf-8")
+        alias = re.search(r'const\s+bool\s+RELAY_ACTIVE_LOW\s*=\s*ems_hardware::(\w+)\s*;', src)
+        if alias:
+            m = re.search(rf'constexpr\s+bool\s+{alias.group(1)}\s*=\s*(true|false)', header)
     assert m, "RELAY_ACTIVE_LOW not found in firmware"
     firmware_active_low = (m.group(1) == "true")
     assert ESP32FirmwareNode(device_id="polarity_probe").relay_active_low is firmware_active_low, (
@@ -120,6 +125,11 @@ def test_default_rated_watts_matches_locked_firmware_constant():
     import re, pathlib
     src = pathlib.Path("firmware/esp32_node/src/main.cpp").read_text(encoding="utf-8")
     m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', src)
+    if not m:
+        header = pathlib.Path("firmware/esp32_node/include/hardware_config.h").read_text(encoding="utf-8")
+        alias = re.search(r'const\s+float\s+RATED_WATTS\s*=\s*ems_hardware::(\w+)\s*;', src)
+        if alias:
+            m = re.search(rf'constexpr\s+float\s+{alias.group(1)}\s*=\s*([\d.]+)', header)
     assert m, "RATED_WATTS not found in firmware"
     assert ESP32FirmwareNode(device_id="rated_probe").rated_watts == float(m.group(1)), (
         "twin default rated_watts has drifted from the firmware constant"
