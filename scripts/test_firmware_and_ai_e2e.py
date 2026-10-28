@@ -48,7 +48,10 @@ def _fw_rated_watts() -> float:
     import pathlib
     firmware_src = (pathlib.Path(__file__).resolve().parents[1]
                     / "firmware" / "esp32_node" / "src" / "main.cpp").read_text(encoding="utf-8")
-    m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', firmware_src)
+    m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', firmware_src) or (
+        (h := pathlib.Path(__file__).resolve().parents[1] / "firmware" / "esp32_node" / "include" / "hardware_config.h").exists()
+        and re.search(r'constexpr\s+float\s+RATED_WATTS\s*=\s*([\d.]+)', h.read_text(encoding="utf-8"))
+    )
     assert m, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
     return float(m.group(1))
 

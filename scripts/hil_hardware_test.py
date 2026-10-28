@@ -174,7 +174,10 @@ async def run_hil_tests():
     # can never silently diverge from RATED_WATTS in main.cpp.
     firmware_src = (pathlib.Path(__file__).resolve().parents[1]
                     / "firmware" / "esp32_node" / "src" / "main.cpp").read_text(encoding="utf-8")
-    m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', firmware_src)
+    m = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', firmware_src) or (
+        (h := pathlib.Path(__file__).resolve().parents[1] / "firmware" / "esp32_node" / "include" / "hardware_config.h").exists()
+        and re.search(r'constexpr\s+float\s+RATED_WATTS\s*=\s*([\d.]+)', h.read_text(encoding="utf-8"))
+    )
     assert m, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
     rated_watts = float(m.group(1))
     critical_threshold = rated_watts * 1.25

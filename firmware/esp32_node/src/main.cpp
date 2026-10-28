@@ -756,17 +756,18 @@ void loop() {
     // ── Publish Rich Electrical Diagnostics at 0.1Hz (every 10s JSON) ──
     if (millis() - lastTelemetryMs > 10000) {
         lastTelemetryMs = millis();
-        float v, i, pf;
+        float v, i, pf, p;
         taskENTER_CRITICAL(&sharedMux);
         v  = sharedVoltage;
         i  = sharedCurrent;
         pf = sharedPf;
+        p  = sharedPowerWatts;
         taskEXIT_CRITICAL(&sharedMux);
 
         char jsonPayload[128];
         snprintf(jsonPayload, sizeof(jsonPayload),
                  "{\"v\":%.1f,\"i\":%.2f,\"w\":%.1f,\"pf\":%.2f}",
-                 v, i, powerWatts, pf);
+                 v, i, p, pf);
         client.publish(topicTelemetry, jsonPayload);
     }
 }

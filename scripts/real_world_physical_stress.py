@@ -46,7 +46,10 @@ from src.pipeline.watchdog import SoftAnomalyWatchdog
 # numbers below must track RATED_WATTS in main.cpp, never a local constant.
 _FIRMWARE_SRC = (Path(__file__).resolve().parents[1]
                  / "firmware" / "esp32_node" / "src" / "main.cpp").read_text(encoding="utf-8")
-_FIRMWARE_RATED = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', _FIRMWARE_SRC)
+_FIRMWARE_RATED = re.search(r'RATED_WATTS\s*=\s*([\d.]+)', _FIRMWARE_SRC) or (
+    (h := Path(__file__).resolve().parents[1] / "firmware" / "esp32_node" / "include" / "hardware_config.h").exists()
+    and re.search(r'constexpr\s+float\s+RATED_WATTS\s*=\s*([\d.]+)', h.read_text(encoding="utf-8"))
+)
 assert _FIRMWARE_RATED, "RATED_WATTS not found in firmware/esp32_node/src/main.cpp"
 FIRMWARE_RATED_WATTS = float(_FIRMWARE_RATED.group(1))
 

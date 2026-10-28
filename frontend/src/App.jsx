@@ -405,16 +405,31 @@ function Dashboard() {
 
         case 'SAFETY_EVENT': {
           if (!data.device_id) break;
+          const isCutoff = /OFFLINE|FAULT|CUTOFF|LOCKED|OVERCURRENT|ARC_FAULT/i.test(data.message || '');
           setRelayStates((prev) => ({
             ...prev,
             [data.device_id]: {
               ...prev[data.device_id],
-              state: /OFFLINE|FAULT|CUTOFF|LOCKED/i.test(data.message || '') ? 'OFF' : prev[data.device_id]?.state,
+              state: isCutoff ? 'OFF' : prev[data.device_id]?.state,
               safety: data.message,
               safetyTimestamp: receivedAt,
               provenance: 'EDGE_STATUS',
             },
           }));
+          if (isCutoff) {
+            setAlerts((prev) => [
+              {
+                id: `safety-${data.device_id}-${receivedAt}`,
+                type: 'SAFETY_EVENT',
+                severity: 'critical',
+                device_id: data.device_id,
+                message: data.message,
+                timestamp: new Date(receivedAt).toLocaleTimeString('en-US', { hour12: false }),
+                provenance: 'EDGE_STATUS',
+              },
+              ...prev,
+            ].slice(0, 50));
+          }
           break;
         }
 

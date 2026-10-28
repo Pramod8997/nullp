@@ -476,6 +476,8 @@ async def mqtt_listener_task():
 
                 await client.subscribe("home/sensor/+/power")
                 await client.subscribe("home/plug/+/command")
+                await client.subscribe("home/sensor/+/status")
+                await client.subscribe("home/plug/+/ack")
                 await client.subscribe("home/ui/events")
                 _mqtt_subscriptions_ready = True
                 system_state["pipeline_status"] = "connected"
@@ -530,6 +532,15 @@ async def mqtt_listener_task():
                                 }
                                 _api_device_last_seen[did] = time.time()
                                 _evict_api_devices()
+                            elif event_type == "TELEMETRY":
+                                did = event_data.get("device_id")
+                                if did:
+                                    system_state.setdefault("telemetry", {})[did] = {
+                                        "v": event_data.get("v"),
+                                        "i": event_data.get("i"),
+                                        "w": event_data.get("w"),
+                                        "pf": event_data.get("pf"),
+                                    }
                             elif event_type == "PHANTOM_LOAD":
                                 evt = PhantomLoadEvent(**event_data)
                                 system_state["phantom_loads"] = evt.loads
@@ -683,14 +694,15 @@ async def mqtt_listener_task():
                     elif "/ack" in topic:
                         device_id = topic.split("/")[-2]
                         match = re.fullmatch(
-                            r"(ON_CONFIRMED|OFF_CONFIRMED|LOCKOUT_NACK|STALE_COMMAND)\|([1-9][0-9]{0,19})",
+                            r"(ON_CONFIRMED|OFF_CONFIRMED|LOCKOUT_NACK|STALE_COMMAND)(?:\|([1-9][0-9]{0,19}))?",
                             payload,
                         )
                         if match is None:
-                            logger.warning("Dropping invalid relay ACK on %s", topic)
+                            logger.warning("Dropping invalid relay ACK on %s: %s", topic, payload)
                             continue
-                        ack, command_id_text = match.groups()
-                        command_id = int(command_id_text)
+                        ack = match.group(1)
+                        command_id_text = match.group(2)
+                        command_id = int(command_id_text) if command_id_text else None
                         relay_state = (
                             "ON" if ack == "ON_CONFIRMED" else
                             "OFF" if ack == "OFF_CONFIRMED" else
@@ -698,34 +710,53 @@ async def mqtt_listener_task():
                             "STALE"
                         )
                         system_state["devices"].setdefault(device_id, {})
-                        system_state["devices"][device_id].update({
+                        dev_update = {
                             "relay_state": relay_state,
                             "last_ack": ack,
-                            "command_id": command_id,
                             "last_seen": time.time(),
-                        })
-                        await manager.broadcast({
+                        }
+                        if command_id is not None:
+                            dev_update["command_id"] = command_id
+                        system_state["devices"][device_id].update(dev_update)
+                        ack_event = {
                             "type": "HARDWARE_ACK",
                             "device_id": device_id,
                             "ack": ack,
-                            "command_id": command_id,
+                            "message": f"Hardware confirmed: {ack}",
                             "relay_state": relay_state,
                             "accepted": ack in {"ON_CONFIRMED", "OFF_CONFIRMED"},
-                        })
+                        }
+                        if command_id is not None:
+                            ack_event["command_id"] = command_id
+                        await manager.broadcast(ack_event)
 
                     # ── Relay command observations ──
                     elif "/command" in topic:
                         device_id = topic.split("/")[-2]
-                        if re.fullmatch(
-                            r"(?:ON|OFF)\|[1-9][0-9]{0,19}", payload
-                        ) is None:
-                            logger.warning("Dropping invalid relay command on %s", topic)
+                        match = re.fullmatch(
+                            r"(ON|OFF|WARNING)(?:\|([1-9][0-9]{0,19}))?", payload
+                        )
+                        if match is None:
+                            logger.warning("Dropping invalid relay command on %s: %s", topic, payload)
                             continue
-                        await manager.broadcast({
+                        cmd = match.group(1)
+                        cmd_id = int(match.group(2)) if match.group(2) else None
+                        cmd_data = {
                             "type": "RELAY_COMMAND",
                             "device_id": device_id,
-                            "command": payload.split("|", 1)[0],
-                            "command_id": int(payload.split("|", 1)[1]),
+                            "command": cmd,
+                        }
+                        if cmd_id is not None:
+                            cmd_data["command_id"] = cmd_id
+                        await manager.broadcast(cmd_data)
+
+                    # ── Direct device safety status ──
+                    elif "/status" in topic:
+                        device_id = topic.split("/")[-2]
+                        await manager.broadcast({
+                            "type": "SAFETY_EVENT",
+                            "device_id": device_id,
+                            "message": f"Status Update: {payload}",
                         })
 
         except aiomqtt.MqttError as e:
@@ -1361,12 +1392,23 @@ async def websocket_endpoint(websocket: WebSocket):
         return
     # Issue #23: Send initial state snapshot ONCE on connection only
     try:
+        relay_states = {
+            k: {
+                "state": v.get("relay_state", "UNKNOWN"),
+                "ack": v.get("last_ack"),
+                "command_id": v.get("command_id"),
+            }
+            for k, v in system_state["devices"].items()
+            if "relay_state" in v
+        }
         await manager.send(websocket, {
             "type": "init_state",
             "devices": system_state["devices"],
             "pmv_score": system_state["pmv_score"],
             "phantom_loads": system_state["phantom_loads"],
             "pipeline_status": system_state["pipeline_status"],
+            "telemetry": system_state.get("telemetry", {}),
+            "relay_states": relay_states,
         })
     except Exception as e:
         # Issue #11: Log instead of silently swallowing
