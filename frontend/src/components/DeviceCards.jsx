@@ -35,6 +35,10 @@ const DeviceCards = ({ devices = {}, telemetry = {} }) => {
     );
   }
 
+  const activeCount = Object.values(devices || {}).filter(
+    (dev) => dev?.state !== 'OFFLINE' && dev?.state !== 'OFF' && dev?.freshness !== 'offline' && dev?.freshness !== 'stale'
+  ).length;
+
   return (
     <div className="w-full">
       {/* Fleet Header */}
@@ -48,8 +52,12 @@ const DeviceCards = ({ devices = {}, telemetry = {} }) => {
             <p className="text-xs text-gray-500 dark:text-gray-400">Active telemetry and load disaggregation</p>
           </div>
         </div>
-        <span className="px-3 py-1 text-xs font-bold font-mono rounded-full bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
-          {deviceIds.length} Active
+        <span className={`px-3 py-1 text-xs font-bold font-mono rounded-full border ${
+          activeCount > 0
+            ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800'
+            : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700'
+        }`}>
+          {activeCount} Active
         </span>
       </div>
 

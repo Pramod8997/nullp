@@ -7,6 +7,10 @@ import DigitalTwinVisualization from '../../components/DigitalTwinVisualization/
 import { Zap } from 'lucide-react';
 
 const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analytics = {} }) => {
+  const activeChannels = Object.values(devices || {}).filter(
+    (dev) => dev?.state !== 'OFFLINE' && dev?.state !== 'OFF' && dev?.freshness !== 'offline' && dev?.freshness !== 'stale'
+  ).length;
+
   return (
     <div className="space-y-6">
       {/* ── Top Row: Summary KPI Widgets ── */}
@@ -33,9 +37,13 @@ const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analyti
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />
-                {Object.keys(devices).length} Channels
+              <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${
+                activeChannels > 0
+                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
+                  : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 border border-gray-200 dark:border-gray-700'
+              }`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${activeChannels > 0 ? 'bg-emerald-500 animate-ping' : 'bg-gray-400'}`} />
+                {activeChannels} Channels
               </span>
             </div>
           </div>

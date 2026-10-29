@@ -10,6 +10,8 @@ import ApplianceTable from '../components/ApplianceTable/ApplianceTable';
 import AlertsPage from '../pages/AlertsPage/AlertsPage';
 import SummaryCards from '../components/SummaryCards/SummaryCards';
 import EnergyChart from '../components/EnergyChart/EnergyChart';
+import DigitalTwinVisualization from '../components/DigitalTwinVisualization/DigitalTwinVisualization';
+import OverviewPage from '../pages/OverviewPage/OverviewPage';
 
 // TEST 9A-1: Renders N cards for N devices
 test("renders one card per device", () => {
@@ -207,3 +209,35 @@ test("breaker status shows Armed & Nominal from edge relay state", () => {
     render(<AlertsPage alerts={alerts} relayStates={{ node_bench_agg: { state: 'ON', ack: 'ON_CONFIRMED' } }} />);
     expect(screen.getByTestId("breaker-status").textContent).toMatch(/armed & nominal/i);
 });
+
+test("DigitalTwinVisualization shows active node when online even at 0W bench power", () => {
+    const devices = {
+        node_bench_agg: { power: 0, state: 'ON', freshness: 'live', label: 'Bench' }
+    };
+    render(<DigitalTwinVisualization devices={devices} />);
+    expect(screen.getByText("1 Active Nodes")).toBeInTheDocument();
+});
+
+test("DigitalTwinVisualization shows 0 active nodes when device is OFFLINE", () => {
+    const devices = {
+        node_bench_agg: { power: 0, state: 'OFFLINE', freshness: 'offline', label: 'Bench' }
+    };
+    render(<DigitalTwinVisualization devices={devices} />);
+    expect(screen.getByText("0 Active Nodes")).toBeInTheDocument();
+});
+
+test("OverviewPage reflects active vs offline channels cleanly", () => {
+    const onlineDevices = {
+        node_bench_agg: { power: 0, state: 'ON', freshness: 'live', label: 'Bench' }
+    };
+    const { unmount } = render(<OverviewPage devices={onlineDevices} />);
+    expect(screen.getByText("1 Channels")).toBeInTheDocument();
+    unmount();
+
+    const offlineDevices = {
+        node_bench_agg: { power: 0, state: 'OFFLINE', freshness: 'offline', label: 'Bench' }
+    };
+    render(<OverviewPage devices={offlineDevices} />);
+    expect(screen.getByText("0 Channels")).toBeInTheDocument();
+});
+

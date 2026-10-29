@@ -478,6 +478,7 @@ async def mqtt_listener_task():
                 attempt = 0  # Reset backoff on successful connection
 
                 await client.subscribe("home/sensor/+/power")
+                await client.subscribe("home/sensor/+/telemetry")
                 await client.subscribe("home/plug/+/command")
                 await client.subscribe("home/sensor/+/status")
                 await client.subscribe("home/plug/+/ack")
@@ -682,6 +683,8 @@ async def mqtt_listener_task():
                             if device_id not in system_state["devices"]:
                                 system_state["devices"][device_id] = {}
                             system_state["devices"][device_id]["power"] = power_watts
+                            system_state["devices"][device_id]["state"] = "ON"
+                            system_state["devices"][device_id]["last_seen"] = time.time()
 
                             # Fix §4.3.3: Accumulate into aggregation buffer
                             # instead of broadcasting each reading individually.
@@ -753,14 +756,82 @@ async def mqtt_listener_task():
                             cmd_data["command_id"] = cmd_id
                         await manager.broadcast(cmd_data)
 
-                    # ── Direct device safety status ──
+                    # ── Direct device telemetry (PZEM diagnostics) ──
+                    elif "/telemetry" in topic:
+                        device_id = topic.split("/")[-2]
+                        try:
+                            t_data = json.loads(payload)
+                            v_val = float(t_data.get("v", t_data.get("voltage_rms", 0.0)))
+                            i_val = float(t_data.get("i", t_data.get("current_rms", 0.0)))
+                            w_val = float(t_data.get("w", t_data.get("active_power_w", 0.0)))
+                            pf_val = float(t_data.get("pf", t_data.get("power_factor", 1.0)))
+                            t_event = {
+                                "type": "TELEMETRY",
+                                "device_id": device_id,
+                                "v": v_val,
+                                "i": i_val,
+                                "w": w_val,
+                                "pf": pf_val,
+                                "timestamp": time.time(),
+                            }
+                            system_state.setdefault("telemetry", {})[device_id] = {
+                                "v": v_val,
+                                "i": i_val,
+                                "w": w_val,
+                                "pf": pf_val,
+                            }
+                            _api_device_last_seen[device_id] = time.time()
+                            await manager.broadcast(t_event)
+                        except Exception as exc:
+                            logger.debug("Failed parsing telemetry on %s: %s", topic, exc)
+
+                    # ── Direct device safety status & lifecycle ──
                     elif "/status" in topic:
                         device_id = topic.split("/")[-2]
-                        await manager.broadcast({
-                            "type": "SAFETY_EVENT",
-                            "device_id": device_id,
-                            "message": f"Status Update: {payload}",
-                        })
+                        status_str = payload.strip().upper()
+                        now_ts = time.time()
+                        if status_str == "ONLINE":
+                            if device_id not in system_state["devices"]:
+                                system_state["devices"][device_id] = {}
+                            system_state["devices"][device_id]["state"] = "ON"
+                            system_state["devices"][device_id].setdefault("power", 0.0)
+                            system_state["devices"][device_id]["last_seen"] = now_ts
+                            _api_device_last_seen[device_id] = now_ts
+                            await manager.broadcast({
+                                "type": "DEVICE_STATUS",
+                                "device_id": device_id,
+                                "state": "ON",
+                                "power": system_state["devices"][device_id].get("power", 0.0),
+                                "timestamp": now_ts,
+                            })
+                            await manager.broadcast({
+                                "type": "SAFETY_EVENT",
+                                "device_id": device_id,
+                                "message": f"Status Update: {payload}",
+                            })
+                        elif status_str == "OFFLINE":
+                            if device_id in system_state["devices"]:
+                                system_state["devices"][device_id]["state"] = "OFFLINE"
+                                system_state["devices"][device_id]["power"] = 0.0
+                            _ws_power_buffer.pop(device_id, None)
+                            await manager.broadcast({
+                                "type": "DEVICE_STATUS",
+                                "device_id": device_id,
+                                "state": "OFFLINE",
+                                "power": 0.0,
+                                "timestamp": now_ts,
+                            })
+                            await manager.broadcast({
+                                "type": "SAFETY_EVENT",
+                                "device_id": device_id,
+                                "message": f"Status Update: {payload}",
+                            })
+                        else:
+                            await manager.broadcast({
+                                "type": "SAFETY_EVENT",
+                                "device_id": device_id,
+                                "message": f"Status Update: {payload}",
+                            })
 
         except aiomqtt.MqttError as e:
             _shared_mqtt_client = None
@@ -832,6 +903,37 @@ async def ws_aggregation_task():
         })
 
 
+# ─── Live Device Watchdog Task ───────────────────────────────────────
+async def device_watchdog_task():
+    """
+    Monitor device health. If a device stops reporting power or telemetry for > 4.0 seconds,
+    automatically mark it OFFLINE, clear it from buffers, and broadcast the transition.
+    """
+    while True:
+        await asyncio.sleep(1.0)
+        now = time.time()
+        for device_id, dev_data in list(system_state["devices"].items()):
+            last_seen = dev_data.get("last_seen", 0)
+            current_state = dev_data.get("state")
+            if current_state not in ("OFFLINE", "unknown") and last_seen > 0 and (now - last_seen > 4.0):
+                logger.info("Device %s timed out (%.1fs silent). Marking OFFLINE.", device_id, now - last_seen)
+                dev_data["state"] = "OFFLINE"
+                dev_data["power"] = 0.0
+                _ws_power_buffer.pop(device_id, None)
+                await manager.broadcast({
+                    "type": "DEVICE_STATUS",
+                    "device_id": device_id,
+                    "state": "OFFLINE",
+                    "power": 0.0,
+                    "timestamp": now,
+                })
+                await manager.broadcast({
+                    "type": "SAFETY_EVENT",
+                    "device_id": device_id,
+                    "message": "Status Update: OFFLINE (Watchdog timeout)",
+                })
+
+
 # ─── App Lifecycle ───────────────────────────────────────────────────
 # Issue #10 & #22: Properly await cancelled tasks; catch and log errors
 @asynccontextmanager
@@ -850,11 +952,12 @@ async def lifespan(app: FastAPI):
     hb_task = asyncio.create_task(heartbeat_task())
     # Fix §4.3.3: WebSocket aggregation task
     agg_task = asyncio.create_task(ws_aggregation_task())
+    watchdog_task = asyncio.create_task(device_watchdog_task())
     try:
         yield
     finally:
         for task, name in [(mqtt_task, "mqtt_listener"), (hb_task, "heartbeat"),
-                           (agg_task, "ws_aggregation")]:
+                           (agg_task, "ws_aggregation"), (watchdog_task, "device_watchdog")]:
             task.cancel()
             try:
                 await asyncio.wait_for(task, timeout=5.0)
@@ -947,7 +1050,16 @@ async def readiness_check():
 async def get_devices():
     """Current power state of all monitored devices."""
     async with state_lock:
-        return {"devices": {k: dict(v) for k, v in system_state["devices"].items()}}
+        now = time.time()
+        result = {}
+        for k, v in system_state["devices"].items():
+            dev = dict(v)
+            last_seen = dev.get("last_seen", 0)
+            if dev.get("state") not in ("OFFLINE", "unknown") and last_seen > 0 and (now - last_seen > 4.0):
+                dev["state"] = "OFFLINE"
+                dev["power"] = 0.0
+            result[k] = dev
+        return {"devices": result}
 
 
 @app.get("/api/analytics")
@@ -969,9 +1081,16 @@ async def get_phantom():
 @app.get("/api/status")
 async def get_status():
     """Full system status snapshot."""
+    now = time.time()
+    active_devices = [
+        k for k, v in system_state["devices"].items()
+        if v.get("state") not in ("OFFLINE", "unknown") and (
+            v.get("last_seen", 0) == 0 or (now - v.get("last_seen", 0) <= 4.0)
+        )
+    ]
     return {
         "pipeline_status": system_state["pipeline_status"],
-        "device_count": len(system_state["devices"]),
+        "device_count": len(active_devices),
         "pmv_score": system_state["pmv_score"],
         "total_phantom_watts": system_state["total_phantom"],
         "active_ws_clients": len(manager.active_connections),
@@ -1404,9 +1523,19 @@ async def websocket_endpoint(websocket: WebSocket):
             for k, v in system_state["devices"].items()
             if "relay_state" in v
         }
+        now = time.time()
+        active_devices_snapshot = {}
+        for k, v in system_state["devices"].items():
+            dev = dict(v)
+            last_seen = dev.get("last_seen", 0)
+            if dev.get("state") not in ("OFFLINE", "unknown") and last_seen > 0 and (now - last_seen > 4.0):
+                dev["state"] = "OFFLINE"
+                dev["power"] = 0.0
+            active_devices_snapshot[k] = dev
+
         await manager.send(websocket, {
             "type": "init_state",
-            "devices": system_state["devices"],
+            "devices": active_devices_snapshot,
             "pmv_score": system_state["pmv_score"],
             "phantom_loads": system_state["phantom_loads"],
             "pipeline_status": system_state["pipeline_status"],

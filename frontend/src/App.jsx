@@ -38,13 +38,15 @@ const normalizeDevice = (device, receivedAt, provenance = 'BACKEND_SNAPSHOT') =>
   const power = finiteNumber(device.power);
   const sourceTimestamp = getSourceTimestamp(device.source_timestamp ?? device.timestamp ?? device.last_seen, receivedAt);
   const ageMs = sourceTimestamp === null ? 0 : Math.max(0, receivedAt - sourceTimestamp);
+  const isOffline = device.state === 'OFFLINE' || device.state === 'OFF' || (sourceTimestamp !== null && ageMs > 3500);
   return {
     ...device,
-    ...(power !== null ? { power: Math.max(0, Math.min(power, MAX_POWER)) } : {}),
+    ...(power !== null ? { power: isOffline ? 0 : Math.max(0, Math.min(power, MAX_POWER)) } : {}),
     _receivedAt: receivedAt,
     source_timestamp: sourceTimestamp,
     provenance: device.provenance || device.source || provenance,
-    freshness: ageMs > 15000 ? 'stale' : 'live',
+    state: isOffline ? 'OFFLINE' : (device.state || 'ON'),
+    freshness: isOffline ? 'offline' : 'live',
   };
 };
 
@@ -232,6 +234,7 @@ function Dashboard() {
                source_timestamp: getSourceTimestamp(data.timestamp, receivedAt),
                provenance: data.provenance || 'LIVE_HARDWARE',
                freshness: 'live',
+               state: prev[data.device_id]?.state === 'OFFLINE' ? 'ON' : (prev[data.device_id]?.state || 'ON'),
              },
            }));
           }
@@ -260,6 +263,7 @@ function Dashboard() {
                 source_timestamp: sourceTimestamp,
                 provenance: data.provenance || 'LIVE_HARDWARE',
                 freshness: 'live',
+                state: updated[devId]?.state === 'OFFLINE' ? 'ON' : (updated[devId]?.state || 'ON'),
               };
             });
             return updated;
@@ -269,26 +273,29 @@ function Dashboard() {
 
         case 'DEVICE_STATUS':
           if (!data.device_id) break;
-          setDevices((prev) => ({
-            ...prev,
-            [data.device_id]: {
-              ...prev[data.device_id],
-              ...(finiteNumber(data.power) !== null ? { power: Math.max(0, finiteNumber(data.power)) } : {}),
-              ...(typeof data.state === 'string' ? { state: data.state } : {}),
-              ...(typeof data.classification === 'string' ? { classification: data.classification } : {}),
-              ...(finiteNumber(data.confidence) !== null ? { confidence: finiteNumber(data.confidence) } : {}),
-              ...(finiteNumber(data.pmv) !== null ? { pmv: finiteNumber(data.pmv) } : {}),
-              last_seen: data.timestamp,
-              _receivedAt: receivedAt,
-              source_timestamp: getSourceTimestamp(data.timestamp, receivedAt),
-              provenance: data.provenance || data.source || 'LIVE_HARDWARE',
-              freshness: 'live',
-              ...(data.label !== undefined ? { label: data.label } : {}),
-              ...(data.rated !== undefined ? { rated: data.rated } : {}),
-            },
-          }));
-          if (finiteNumber(data.pmv) !== null) setPmvScore(finiteNumber(data.pmv));
-          if (isRecord(data.relay)) setRelayStates((prev) => ({ ...prev, [data.device_id]: data.relay }));
+          {
+            const isDevOffline = data.state === 'OFFLINE';
+            setDevices((prev) => ({
+              ...prev,
+              [data.device_id]: {
+                ...prev[data.device_id],
+                ...(finiteNumber(data.power) !== null ? { power: Math.max(0, finiteNumber(data.power)) } : {}),
+                ...(typeof data.state === 'string' ? { state: data.state } : {}),
+                ...(typeof data.classification === 'string' ? { classification: data.classification } : {}),
+                ...(finiteNumber(data.confidence) !== null ? { confidence: finiteNumber(data.confidence) } : {}),
+                ...(finiteNumber(data.pmv) !== null ? { pmv: finiteNumber(data.pmv) } : {}),
+                last_seen: data.timestamp,
+                _receivedAt: receivedAt,
+                source_timestamp: getSourceTimestamp(data.timestamp, receivedAt),
+                provenance: data.provenance || data.source || 'LIVE_HARDWARE',
+                freshness: isDevOffline ? 'offline' : 'live',
+                ...(data.label !== undefined ? { label: data.label } : {}),
+                ...(data.rated !== undefined ? { rated: data.rated } : {}),
+              },
+            }));
+            if (finiteNumber(data.pmv) !== null) setPmvScore(finiteNumber(data.pmv));
+            if (isRecord(data.relay)) setRelayStates((prev) => ({ ...prev, [data.device_id]: data.relay }));
+          }
           break;
 
         // Real PZEM electrical telemetry (voltage / current / power factor)
@@ -406,6 +413,30 @@ function Dashboard() {
         case 'SAFETY_EVENT': {
           if (!data.device_id) break;
           const isCutoff = /OFFLINE|FAULT|CUTOFF|LOCKED|OVERCURRENT|ARC_FAULT/i.test(data.message || '');
+          const isOfflineMsg = /OFFLINE/i.test(data.message || '');
+          const isOnlineMsg = /ONLINE/i.test(data.message || '');
+          if (isOfflineMsg) {
+            setDevices((prev) => prev[data.device_id] ? ({
+              ...prev,
+              [data.device_id]: {
+                ...prev[data.device_id],
+                power: 0,
+                state: 'OFFLINE',
+                freshness: 'offline',
+                _receivedAt: receivedAt,
+              },
+            }) : prev);
+          } else if (isOnlineMsg) {
+            setDevices((prev) => prev[data.device_id] ? ({
+              ...prev,
+              [data.device_id]: {
+                ...prev[data.device_id],
+                state: 'ON',
+                freshness: 'live',
+                _receivedAt: receivedAt,
+              },
+            }) : prev);
+          }
           setRelayStates((prev) => ({
             ...prev,
             [data.device_id]: {
@@ -569,21 +600,25 @@ function Dashboard() {
     const freshnessTimer = setInterval(() => {
       const now = Date.now();
       setDevices((previous) => Object.entries(previous).reduce((next, [deviceId, device]) => {
+        if (device?.freshness === 'offline' || device?.state === 'OFFLINE') {
+          next[deviceId] = device;
+          return next;
+        }
         const age = now - (device?._receivedAt || 0);
-        if (age <= 15000 || device?.freshness === 'offline') {
+        if (age <= 3500) {
           next[deviceId] = device;
           return next;
         }
         next[deviceId] = {
           ...device,
           power: 0,
-          state: 'OFF',
-          freshness: 'stale',
-          provenance: 'STALE',
+          state: 'OFFLINE',
+          freshness: 'offline',
+          provenance: 'OFFLINE',
         };
         return next;
       }, {}));
-    }, 5000);
+    }, 1000);
     return () => clearInterval(freshnessTimer);
   }, []);
 

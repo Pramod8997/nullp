@@ -13,6 +13,10 @@ const AnalyticsPage = ({
   latencyStats,
   latencyHistory,
 }) => {
+  const activeChannels = Object.values(devices || {}).filter(
+    (dev) => dev?.state !== 'OFFLINE' && dev?.state !== 'OFF' && dev?.freshness !== 'offline' && dev?.freshness !== 'stale'
+  ).length;
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -41,8 +45,12 @@ const AnalyticsPage = ({
                 Real-Time Power Monitor
               </h2>
             </div>
-            <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-              {Object.keys(devices).length} Channels
+            <span className={`text-xs font-mono font-bold px-2.5 py-0.5 rounded-full border ${
+              activeChannels > 0
+                ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border-blue-200 dark:border-blue-800'
+                : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 border-gray-200 dark:border-gray-700'
+            }`}>
+              {activeChannels} Channels
             </span>
           </div>
           <RealTimeChart data={powerHistory} devices={devices} />

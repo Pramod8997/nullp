@@ -101,7 +101,13 @@ const DigitalTwinVisualization = ({ devices = {} }) => {
 
   // Calculate total power
   const totalPower = deviceList.reduce((acc, [, dev]) => acc + (dev?.power || 0), 0);
-  const activeCount = deviceList.filter(([, dev]) => (dev?.power || 0) > 10 || dev?.state === 'ON').length;
+  const activeCount = deviceList.filter(([, dev]) => 
+    dev?.state !== 'OFFLINE' && 
+    dev?.state !== 'OFF' && 
+    dev?.freshness !== 'offline' && 
+    dev?.freshness !== 'stale' && 
+    ((dev?.power || 0) > 0 || dev?.state === 'ON' || dev?.state === 'ONLINE' || dev?.freshness === 'live')
+  ).length;
 
   return (
     <div className="w-full bg-white/70 dark:bg-gray-900/70 backdrop-blur-xl border border-gray-200/80 dark:border-gray-800/80 rounded-3xl p-5 md:p-7 shadow-sm transition-all duration-300">
@@ -123,8 +129,12 @@ const DigitalTwinVisualization = ({ devices = {} }) => {
 
         {/* Global Summary Badge */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-400 text-xs font-semibold">
-            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-ping" />
+          <div className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold ${
+            activeCount > 0
+              ? 'bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-400'
+              : 'bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400'
+          }`}>
+            <span className={`h-2 w-2 rounded-full ${activeCount > 0 ? 'bg-emerald-500 animate-ping' : 'bg-gray-400'}`} />
             <span>{activeCount} Active Nodes</span>
           </div>
           <div className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800/60 text-blue-700 dark:text-blue-400 text-xs font-bold font-mono">
