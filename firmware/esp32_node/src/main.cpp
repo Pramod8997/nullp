@@ -434,10 +434,6 @@ void setup() {
     // Initialize PZEM Hardware Serial2 (9600 baud, 8N1, RX=16, TX=17)
     PZEM_SERIAL.begin(PZEM_UART_BAUD, SERIAL_8N1, PZEM_RX_PIN, PZEM_TX_PIN);
 
-    // Initialize 5-second hardware task watchdog
-    esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
-    esp_task_wdt_add(NULL);
-
 #if EMS_BENCH_MODE
     Serial.println("[BENCH] DRY MODE: mains and relay contacts must be disconnected");
     Serial.println("[BENCH] Commands: DRY_ON, DRY_OFF, STATUS");
@@ -464,11 +460,31 @@ void setup() {
     }
 
     // Connect WiFi with timeout
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+
+    esp_task_wdt_reset();
+    Serial.printf("[WiFi] Scanning for '%s'...\n", ssid);
+    int scanCount = WiFi.scanNetworks();
+    esp_task_wdt_reset();
+    Serial.printf("[WiFi] Found %d APs:\n", scanCount);
+    const char* matchedSsid = ssid;
+    for (int i = 0; i < scanCount; i++) {
+        String found = WiFi.SSID(i);
+        Serial.printf("  - '%s' (RSSI: %d, Ch: %d)\n", found.c_str(), WiFi.RSSI(i), WiFi.channel(i));
+        if (found.indexOf("Pramodsharma") >= 0 && found.indexOf("iPhone") >= 0) {
+            matchedSsid = strdup(found.c_str());
+            Serial.printf("  ==> Auto-matched iPhone AP: '%s'\n", matchedSsid);
+        }
+    }
+
     WiFi.setAutoReconnect(true);
-    WiFi.begin(ssid, password);
+    WiFi.begin(matchedSsid, password);
     Serial.print("[WiFi] Connecting");
     unsigned long wifiStart = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - wifiStart < 30000)) {
+        esp_task_wdt_reset();
         delay(500);
         Serial.print(".");
     }
@@ -502,6 +518,13 @@ void setup() {
     client.setKeepAlive(15);
 
     Serial.println("[INIT] Core 1: MQTT + Telemetry initialized");
+
+    // Initialize 5-second hardware task watchdog for steady-state runtime
+    esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
+    esp_task_wdt_add(NULL);
+    if (safetyTaskHandle != nullptr) {
+        esp_task_wdt_add(safetyTaskHandle);
+    }
 }
 
 // ═══════════════════════════════════════════════════════
