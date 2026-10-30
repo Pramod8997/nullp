@@ -32,14 +32,14 @@ const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analyti
       {/* ── Middle Bento Row: Telemetry & Historical Charts ── */}
       <section className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Real-time 1Hz Power Monitor Bento Box */}
-        <div className="lg:col-span-7 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-3xl p-5 md:p-6 shadow-sm flex flex-col justify-between">
-          <div className="flex items-center justify-between pb-4 border-b border-gray-200/60 dark:border-gray-700/60">
+        <div className="lg:col-span-7 bg-white/90 dark:bg-[#0c1424]/90 backdrop-blur-xl border border-gray-200/80 dark:border-[#172338] rounded-3xl p-5 md:p-6 shadow-sm flex flex-col justify-between">
+          <div className="flex items-center justify-between pb-4 border-b border-gray-200/60 dark:border-[#172338]/60">
             <div className="flex items-center gap-2.5">
-              <div className="p-2 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
-                <Zap size={18} />
+              <div className="p-2 rounded-xl bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 border border-blue-500/20">
+                <Zap size={17} />
               </div>
               <div>
-                <h2 className="text-base font-bold text-gray-900 dark:text-white">
+                <h2 className="text-sm font-bold text-gray-900 dark:text-white uppercase tracking-wider">
                   Real-Time Power Monitor
                 </h2>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -76,7 +76,7 @@ const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analyti
         <DigitalTwinVisualization devices={devices} />
 
         {/* Device Fleet Cards */}
-        <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-3xl p-6 shadow-sm">
+        <div className="bg-white/90 dark:bg-[#0c1424]/90 backdrop-blur-xl border border-gray-200/80 dark:border-[#172338] rounded-3xl p-6 shadow-sm">
           <DeviceCards devices={devices} telemetry={telemetry} />
         </div>
       </section>

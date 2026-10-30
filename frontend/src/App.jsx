@@ -678,7 +678,7 @@ function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100 transition-colors duration-300 flex overflow-hidden font-sans antialiased selection:bg-blue-500 selection:text-white">
+    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-[#060a12] dark:text-gray-100 transition-colors duration-300 flex overflow-hidden font-sans antialiased selection:bg-blue-500 selection:text-white">
       {/* ── Sidebar Navigation ── */}
       <Sidebar
         activeTab={activeTab}
@@ -691,7 +691,7 @@ function Dashboard() {
       {/* ── Main Content Area ── */}
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
         {/* Header Bar */}
-        <header className="sticky top-0 z-20 flex items-center justify-between px-6 py-4 bg-white/80 dark:bg-gray-900/80 backdrop-blur-xl border-b border-gray-200/80 dark:border-gray-800/80 h-20 shrink-0">
+        <header className="sticky top-0 z-20 flex items-center justify-between px-6 py-4 bg-white/90 dark:bg-[#070c16]/90 backdrop-blur-xl border-b border-gray-200/80 dark:border-[#172338] h-20 shrink-0">
           <div>
             <h1 className="text-lg font-bold tracking-tight text-gray-900 dark:text-white capitalize">
               {getTabTitle(activeTab)}
@@ -734,7 +734,7 @@ function Dashboard() {
             <button
               onClick={toggleTheme}
               title={`Switch to ${isDark ? 'Light' : 'Dark'} mode`}
-              className="p-2.5 rounded-xl bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors border border-gray-200 dark:border-gray-700 cursor-pointer"
+              className="p-2.5 rounded-full bg-gray-100 dark:bg-[#101826] text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-[#182338] transition-colors border border-gray-200 dark:border-[#1e2c44] cursor-pointer shadow-sm"
             >
               {isDark ? <Sun size={17} className="text-amber-400" /> : <Moon size={17} className="text-indigo-600" />}
             </button>
@@ -742,7 +742,7 @@ function Dashboard() {
         </header>
 
         {/* Scrollable Viewport */}
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-gray-50/50 dark:bg-gray-950/50">
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-gray-50/50 dark:bg-[#060a12]">
           <div className="max-w-7xl mx-auto pb-12">
             {renderPage()}
           </div>
