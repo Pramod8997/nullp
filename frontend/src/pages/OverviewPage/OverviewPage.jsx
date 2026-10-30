@@ -4,9 +4,10 @@ import DeviceCards from '../../components/DeviceCards';
 import RealTimeChart from '../../components/RealTimeChart';
 import EnergyChart from '../../components/EnergyChart/EnergyChart';
 import DigitalTwinVisualization from '../../components/DigitalTwinVisualization/DigitalTwinVisualization';
+import RelayControlPanel from '../../components/RelayControlPanel';
 import { Zap } from 'lucide-react';
 
-const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analytics = {} }) => {
+const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analytics = {}, relayStates = {} }) => {
   const activeChannels = Object.values(devices || {}).filter(
     (dev) => dev?.state !== 'OFFLINE' && dev?.state !== 'OFF' && dev?.freshness !== 'offline' && dev?.freshness !== 'stale'
   ).length;
@@ -16,6 +17,16 @@ const OverviewPage = ({ devices = {}, powerHistory = [], telemetry = {}, analyti
       {/* ── Top Row: Summary KPI Widgets ── */}
       <section>
         <SummaryCards devices={devices} analytics={analytics} />
+      </section>
+
+      {/* ── Manual Relay Cutoff Console (IN1 / IN2 / Emergency) ── */}
+      <section>
+        <RelayControlPanel
+          deviceId="node_bench_agg"
+          devices={devices}
+          telemetry={telemetry}
+          relayStates={relayStates}
+        />
       </section>
 
       {/* ── Middle Bento Row: Telemetry & Historical Charts ── */}

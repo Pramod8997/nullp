@@ -57,7 +57,12 @@ MAX_DEVICE_ID_LENGTH = 64
 MAX_POWER_WATTS = 50_000.0
 MAX_TRACKED_DEVICES = 200
 DEVICE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
-VALID_RELAY_COMMANDS = {"ON", "OFF", "WARNING"}
+VALID_RELAY_COMMANDS = {
+    "ON", "OFF", "WARNING",
+    "IN1_ON", "IN1_OFF", "IN2_ON", "IN2_OFF",
+    "CH1_ON", "CH1_OFF", "CH2_ON", "CH2_OFF",
+    "RESET_SAFETY",
+}
 
 
 def _finite_number(value: Any, *, minimum: float, maximum: float, field_name: str) -> float:
@@ -700,7 +705,7 @@ async def mqtt_listener_task():
                     elif "/ack" in topic:
                         device_id = topic.split("/")[-2]
                         match = re.fullmatch(
-                            r"(ON_CONFIRMED|OFF_CONFIRMED|LOCKOUT_NACK|STALE_COMMAND)(?:\|([1-9][0-9]{0,19}))?",
+                            r"((?:CH[12]_|IN[12]_)?(?:ON_CONFIRMED|OFF_CONFIRMED)|LOCKOUT_NACK|STALE_COMMAND|SAFETY_RESET_CONFIRMED)(?:\|([1-9][0-9]{0,19}))?",
                             payload,
                         )
                         if match is None:
@@ -710,8 +715,8 @@ async def mqtt_listener_task():
                         command_id_text = match.group(2)
                         command_id = int(command_id_text) if command_id_text else None
                         relay_state = (
-                            "ON" if ack == "ON_CONFIRMED" else
-                            "OFF" if ack == "OFF_CONFIRMED" else
+                            "ON" if "ON_CONFIRMED" in ack else
+                            "OFF" if "OFF_CONFIRMED" in ack else
                             "LOCKED" if ack == "LOCKOUT_NACK" else
                             "STALE"
                         )
@@ -723,14 +728,30 @@ async def mqtt_listener_task():
                         }
                         if command_id is not None:
                             dev_update["command_id"] = command_id
+
+                        # Track individual channel states
+                        cur_relays = list(system_state["devices"][device_id].get("relays", [0, 0]))
+                        if len(cur_relays) < 2:
+                            cur_relays = [0, 0]
+                        if ack.startswith("CH1_") or ack.startswith("IN1_"):
+                            cur_relays[0] = 1 if "ON" in ack else 0
+                        elif ack.startswith("CH2_") or ack.startswith("IN2_"):
+                            cur_relays[1] = 1 if "ON" in ack else 0
+                        elif ack == "ON_CONFIRMED":
+                            cur_relays = [1, 1]
+                        elif ack == "OFF_CONFIRMED":
+                            cur_relays = [0, 0]
+                        dev_update["relays"] = cur_relays
                         system_state["devices"][device_id].update(dev_update)
+
                         ack_event = {
                             "type": "HARDWARE_ACK",
                             "device_id": device_id,
                             "ack": ack,
                             "message": f"Hardware confirmed: {ack}",
                             "relay_state": relay_state,
-                            "accepted": ack in {"ON_CONFIRMED", "OFF_CONFIRMED"},
+                            "relays": cur_relays,
+                            "accepted": "CONFIRMED" in ack,
                         }
                         if command_id is not None:
                             ack_event["command_id"] = command_id
@@ -740,7 +761,7 @@ async def mqtt_listener_task():
                     elif "/command" in topic:
                         device_id = topic.split("/")[-2]
                         match = re.fullmatch(
-                            r"(ON|OFF|WARNING)(?:\|([1-9][0-9]{0,19}))?", payload
+                            r"(ON|OFF|WARNING|IN1_ON|IN1_OFF|IN2_ON|IN2_OFF|CH1_ON|CH1_OFF|CH2_ON|CH2_OFF|reset_safety)(?:\|([1-9][0-9]{0,19}))?", payload
                         )
                         if match is None:
                             logger.warning("Dropping invalid relay command on %s: %s", topic, payload)
@@ -765,6 +786,7 @@ async def mqtt_listener_task():
                             i_val = float(t_data.get("i", t_data.get("current_rms", 0.0)))
                             w_val = float(t_data.get("w", t_data.get("active_power_w", 0.0)))
                             pf_val = float(t_data.get("pf", t_data.get("power_factor", 1.0)))
+                            relays_val = t_data.get("relays", [0, 0])
                             t_event = {
                                 "type": "TELEMETRY",
                                 "device_id": device_id,
@@ -772,6 +794,7 @@ async def mqtt_listener_task():
                                 "i": i_val,
                                 "w": w_val,
                                 "pf": pf_val,
+                                "relays": relays_val,
                                 "timestamp": time.time(),
                             }
                             system_state.setdefault("telemetry", {})[device_id] = {
@@ -779,7 +802,9 @@ async def mqtt_listener_task():
                                 "i": i_val,
                                 "w": w_val,
                                 "pf": pf_val,
+                                "relays": relays_val,
                             }
+                            system_state["devices"].setdefault(device_id, {})["relays"] = relays_val
                             _api_device_last_seen[device_id] = time.time()
                             await manager.broadcast(t_event)
                         except Exception as exc:
@@ -1162,6 +1187,96 @@ class LabelSubmission(BaseModel):
                     "a real appliance power window, not an embedding"
                 )
         return v
+
+
+class RelayCommandPayload(BaseModel):
+    device_id: str = "node_bench_agg"
+    command: str
+    channel: Optional[int] = None
+
+
+async def optional_api_key(x_api_key: Optional[str] = Header(None)):
+    expected = os.environ.get("EMS_API_KEY")
+    if expected:
+        if not x_api_key or not hmac.compare_digest(x_api_key.encode("utf-8"), expected.encode("utf-8")):
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+@app.post("/api/relay/command")
+async def post_relay_command(req: RelayCommandPayload, _: None = Depends(optional_api_key)):
+    """Send manual relay switch command (ON/OFF/IN1_ON/IN1_OFF/IN2_ON/IN2_OFF)."""
+    try:
+        device_id = _validate_device_id(req.device_id)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    raw_cmd = req.command.strip().upper()
+
+    if req.channel == 1:
+        if raw_cmd == "ON":
+            resolved_cmd = "IN1_ON"
+        elif raw_cmd == "OFF":
+            resolved_cmd = "IN1_OFF"
+        else:
+            resolved_cmd = raw_cmd
+    elif req.channel == 2:
+        if raw_cmd == "ON":
+            resolved_cmd = "IN2_ON"
+        elif raw_cmd == "OFF":
+            resolved_cmd = "IN2_OFF"
+        else:
+            resolved_cmd = raw_cmd
+    else:
+        resolved_cmd = raw_cmd
+
+    if resolved_cmd not in VALID_RELAY_COMMANDS:
+        raise HTTPException(status_code=400, detail=f"Invalid relay command: {resolved_cmd}")
+
+    broker_cfg = _mqtt_connect_kwargs()
+    broker_host = broker_cfg.get("hostname", "127.0.0.1")
+    if broker_host in ("0.0.0.0", ""):
+        broker_host = "127.0.0.1"
+    broker_port = broker_cfg.get("port", 1883)
+    username = broker_cfg.get("username")
+    password = broker_cfg.get("password")
+    auth = {"username": username, "password": password} if username else None
+
+    import paho.mqtt.publish as pub
+    topic = f"home/plug/{device_id}/command"
+    try:
+        await asyncio.to_thread(
+            pub.single,
+            topic,
+            payload=resolved_cmd,
+            hostname=broker_host,
+            port=broker_port,
+            auth=auth,
+        )
+    except Exception as exc:
+        logger.error("Failed to publish relay command: %s", exc)
+        raise HTTPException(status_code=502, detail=f"MQTT publish failed: {exc}")
+
+    audit_logger.info(json.dumps({
+        "event": "RELAY_COMMAND_ISSUED",
+        "device_id": device_id,
+        "command": resolved_cmd,
+        "channel": req.channel,
+        "timestamp": time.time(),
+    }))
+
+    await manager.broadcast({
+        "type": "RELAY_COMMAND",
+        "device_id": device_id,
+        "command": resolved_cmd,
+        "channel": req.channel,
+    })
+
+    return {
+        "status": "published",
+        "device_id": device_id,
+        "command": resolved_cmd,
+        "channel": req.channel,
+        "topic": topic,
+    }
 
 
 # Issue #7: Require API key for write endpoints

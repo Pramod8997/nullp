@@ -403,6 +403,35 @@ class ESP32FirmwareNode:
                 return
             self.set_relay(True)
             self._pending_ack = "ON_CONFIRMED"
+            return
+
+        if command in ("IN1_OFF", "CH1_OFF"):
+            self.set_relay(1, False)
+            self._pending_ack = "CH1_OFF_CONFIRMED"
+            return
+
+        if command in ("IN1_ON", "CH1_ON"):
+            if (not measurement_valid or self.relay_locked
+                    or self._safety_inhibit):
+                self._pending_ack = "LOCKOUT_NACK"
+                return
+            self.set_relay(1, True)
+            self._pending_ack = "CH1_ON_CONFIRMED"
+            return
+
+        if command in ("IN2_OFF", "CH2_OFF"):
+            self.set_relay(2, False)
+            self._pending_ack = "CH2_OFF_CONFIRMED"
+            return
+
+        if command in ("IN2_ON", "CH2_ON"):
+            if (not measurement_valid or self.relay_locked
+                    or self._safety_inhibit):
+                self._pending_ack = "LOCKOUT_NACK"
+                return
+            self.set_relay(2, True)
+            self._pending_ack = "CH2_ON_CONFIRMED"
+            return
 
     # ═════════════════════════════════════════════════════════════════════
     # CORE 1: Standard Priority Arduino Loop (MQTT + Telemetry)
@@ -430,7 +459,7 @@ class ESP32FirmwareNode:
             )
             return
 
-        if command in ("ON", "OFF"):
+        if command in ("ON", "OFF", "IN1_ON", "IN1_OFF", "IN2_ON", "IN2_OFF", "CH1_ON", "CH1_OFF", "CH2_ON", "CH2_OFF"):
             # The real callback only queues this request; the following safety
             # step models the Core-0 scheduler turn so the simulator's public
             # async API remains deterministic.  No relay write occurs here.
@@ -446,6 +475,10 @@ class ESP32FirmwareNode:
                 logger.warning(f"[{self.device_id}] ON rejected: safety gate (NACK sent)")
             elif ack == "OFF_CONFIRMED":
                 logger.info(f"[{self.device_id}] Relay turned OFF (ACK: OFF_CONFIRMED)")
+            elif "ON_CONFIRMED" in ack:
+                logger.info(f"[{self.device_id}] Channel relay turned ON (ACK: {ack})")
+            elif "OFF_CONFIRMED" in ack:
+                logger.info(f"[{self.device_id}] Channel relay turned OFF (ACK: {ack})")
 
         elif command == "WARNING":
             # Log-only branch (WARNING in callback())

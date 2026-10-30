@@ -667,7 +667,7 @@ function Dashboard() {
         return <SettingsPage />;
 
       default:
-         return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} analytics={analytics} />;
+         return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} analytics={analytics} relayStates={relayStates} />;
     }
   };
 

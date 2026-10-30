@@ -136,6 +136,27 @@ const DeviceCards = ({ devices = {}, telemetry = {} }) => {
                       {telemetry[id].pf != null && `PF ${telemetry[id].pf.toFixed(2)}`}
                     </div>
                   )}
+
+                  {/* Sub-channel relay indicator if present */}
+                  {(telemetry[id]?.relays || dev?.relays) && (
+                    <div className="flex items-center gap-2 mt-2 pt-2 border-t border-gray-100/60 dark:border-gray-700/40 text-[10px] font-mono">
+                      <span className="text-gray-400">Coils:</span>
+                      <span className={`px-1.5 py-0.5 rounded font-bold ${
+                        (telemetry[id]?.relays || dev?.relays)[0]
+                          ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
+                          : 'bg-gray-100 text-gray-400 dark:bg-gray-700/60 dark:text-gray-500'
+                      }`}>
+                        IN1 {(telemetry[id]?.relays || dev?.relays)[0] ? 'ON' : 'OFF'}
+                      </span>
+                      <span className={`px-1.5 py-0.5 rounded font-bold ${
+                        (telemetry[id]?.relays || dev?.relays)[1]
+                          ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'
+                          : 'bg-gray-100 text-gray-400 dark:bg-gray-700/60 dark:text-gray-500'
+                      }`}>
+                        IN2 {(telemetry[id]?.relays || dev?.relays)[1] ? 'ON' : 'OFF'}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Meta row: State badge & NILM Classification */}

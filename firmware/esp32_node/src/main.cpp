@@ -126,8 +126,12 @@ volatile bool  safetyTripped         = false;
 // Command queues and gates
 volatile bool  pendingRelayOn        = false;
 volatile bool  pendingRelayOff       = false;
+volatile bool  pendingCh1On          = false;
+volatile bool  pendingCh1Off         = false;
+volatile bool  pendingCh2On          = false;
+volatile bool  pendingCh2Off         = false;
 volatile bool  pendingAck            = false;
-volatile uint8_t pendingAckType      = 0; // 0=none, 1=ON_CONFIRMED, 2=OFF_CONFIRMED, 3=LOCKOUT_NACK
+volatile uint8_t pendingAckType      = 0; // 0=none, 1=ON_CONFIRMED, 2=OFF_CONFIRMED, 3=LOCKOUT_NACK, 4=CH1_OFF, 5=CH1_ON, 6=CH2_OFF, 7=CH2_ON
 volatile bool  safetyInhibit         = false;
 volatile bool  measurementFresh      = false;
 volatile unsigned long lastSuccessfulPzemReadMs = 0;
@@ -172,6 +176,8 @@ void setRelay(uint8_t channel, bool on) {
     relayClosed = on;
     if (!relay1Closed && !relay2Closed) {
         relayClosed = false;
+    } else {
+        relayClosed = true;
     }
 }
 
@@ -436,6 +442,10 @@ void SafetySamplingTask(void* pvParameters) {
         taskENTER_CRITICAL(&sharedMux);
         if (pendingRelayOff) {
             pendingRelayOff = false;
+            pendingCh1On = false;
+            pendingCh2On = false;
+            pendingCh1Off = false;
+            pendingCh2Off = false;
             setRelay(false);
             allRelaysOff();
             pendingAck = true;
@@ -449,6 +459,39 @@ void SafetySamplingTask(void* pvParameters) {
             } else {
                 pendingAck = true;
                 pendingAckType = 3; // LOCKOUT_NACK
+            }
+        } else {
+            if (pendingCh1Off) {
+                pendingCh1Off = false;
+                setRelay(1, false);
+                pendingAck = true;
+                pendingAckType = 4; // CH1_OFF_CONFIRMED
+            } else if (pendingCh1On) {
+                pendingCh1On = false;
+                if (safetyTaskRunning && !safetyInhibit && measurementFresh && !relayLocked) {
+                    setRelay(1, true);
+                    pendingAck = true;
+                    pendingAckType = 5; // CH1_ON_CONFIRMED
+                } else {
+                    pendingAck = true;
+                    pendingAckType = 3; // LOCKOUT_NACK
+                }
+            }
+            if (pendingCh2Off) {
+                pendingCh2Off = false;
+                setRelay(2, false);
+                pendingAck = true;
+                pendingAckType = 6; // CH2_OFF_CONFIRMED
+            } else if (pendingCh2On) {
+                pendingCh2On = false;
+                if (safetyTaskRunning && !safetyInhibit && measurementFresh && !relayLocked) {
+                    setRelay(2, true);
+                    pendingAck = true;
+                    pendingAckType = 7; // CH2_ON_CONFIRMED
+                } else {
+                    pendingAck = true;
+                    pendingAckType = 3; // LOCKOUT_NACK
+                }
             }
         }
         taskEXIT_CRITICAL(&sharedMux);
@@ -482,6 +525,26 @@ void callback(char* topic, byte* payload, unsigned int length) {
             taskENTER_CRITICAL(&sharedMux);
             pendingRelayOff = true;
             pendingRelayOn = false;
+            taskEXIT_CRITICAL(&sharedMux);
+        } else if (message == "IN1_ON" || message == "CH1_ON") {
+            taskENTER_CRITICAL(&sharedMux);
+            pendingCh1On = true;
+            pendingCh1Off = false;
+            taskEXIT_CRITICAL(&sharedMux);
+        } else if (message == "IN1_OFF" || message == "CH1_OFF") {
+            taskENTER_CRITICAL(&sharedMux);
+            pendingCh1Off = true;
+            pendingCh1On = false;
+            taskEXIT_CRITICAL(&sharedMux);
+        } else if (message == "IN2_ON" || message == "CH2_ON") {
+            taskENTER_CRITICAL(&sharedMux);
+            pendingCh2On = true;
+            pendingCh2Off = false;
+            taskEXIT_CRITICAL(&sharedMux);
+        } else if (message == "IN2_OFF" || message == "CH2_OFF") {
+            taskENTER_CRITICAL(&sharedMux);
+            pendingCh2Off = true;
+            pendingCh2On = false;
             taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "reset_safety") {
             taskENTER_CRITICAL(&sharedMux);
@@ -839,6 +902,10 @@ void loop() {
     if (ackReady && client.connected()) {
         const char* ackPayload = (ackType == 1) ? "ON_CONFIRMED"
                               : (ackType == 2) ? "OFF_CONFIRMED"
+                              : (ackType == 4) ? "CH1_OFF_CONFIRMED"
+                              : (ackType == 5) ? "CH1_ON_CONFIRMED"
+                              : (ackType == 6) ? "CH2_OFF_CONFIRMED"
+                              : (ackType == 7) ? "CH2_ON_CONFIRMED"
                                                : "LOCKOUT_NACK";
         client.publish(topicAck, ackPayload);
     }
