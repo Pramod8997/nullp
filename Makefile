@@ -41,9 +41,10 @@ FIRMWARE_TEST_BIN := $(FIRMWARE_TEST_BUILD)/run_host_tests
 endif
 
 .PHONY: help install install-backend install-frontend \
-        run dev demo production prod dev-backend dev-frontend \
+        run dev live hardware demo production prod dev-backend dev-frontend \
         dev-pipeline dev-pipeline-demo dev-pipeline-hardware \
-        dev-sim dev-sim-demo \
+        broker dev-sim dev-sim-demo \
+        relay-on relay-off relay-in1-on relay-in1-off relay-in2-on relay-in2-off \
         hil-test stress-test sim-test test-firmware-sim test-firmware-host \
         generate_data train_all train_synthetic train_demo enroll_demo \
         test test-all test-backend test-frontend test-safety test-e2e \
@@ -63,18 +64,22 @@ help:
 	@echo "    make install-backend   - Install Python dependencies only"
 	@echo "    make install-frontend  - Install locked Frontend npm dependencies"
 	@echo ""
-	@echo "  Development & Run:"
-	@echo "    make run / make dev    - Start full stack (Mosquitto, Pipeline, API, Frontend, Sim)"
-	@echo "    make demo              - Start software demo with the demo profile and virtual fleet"
-	@echo "    make production        - Build and start the authenticated Docker Compose stack"
-	@echo "    make hil-test          - Run 10-scenario Hardware-In-The-Loop test suite"
+	@echo "  Live Hardware & Development:"
+	@echo "    make run / make dev    - Start full live stack connected to ESP32 (Broker, Pipeline, Server, Frontend)"
+	@echo "    make live / hardware   - Alias to start the physical ESP32 rig stack"
+	@echo "    make demo              - Start software demo with virtual fleet simulator"
+	@echo "    make broker            - Start standalone MQTT broker on 0.0.0.0:1883"
 	@echo "    make dev-backend       - Start FastAPI backend (Port 8000)"
 	@echo "    make dev-frontend      - Start Vite Tailwind frontend (Port 5173)"
-	@echo "    make dev-pipeline      - Start real-time NILM ingestion pipeline"
-	@echo "    make dev-pipeline-demo - Start pipeline with config/config.demo.yaml"
-	@echo "    make dev-pipeline-hardware - Start pipeline with the physical profile"
-	@echo "    make dev-sim           - Start ESP32 telemetry simulator"
-	@echo "    make dev-sim-demo      - Start consumer-electronics simulator fleet"
+	@echo "    make dev-pipeline-hardware - Start hardware pipeline (config.hardware.yaml)"
+	@echo ""
+	@echo "  Hardware Relay Controls:"
+	@echo "    make relay-off         - Emergency Cutoff: cuts BOTH IN1 & IN2 relays"
+	@echo "    make relay-on          - Master ON: energizes BOTH IN1 & IN2 relays"
+	@echo "    make relay-in1-off     - Cut Relay 1 (IN1: Laptop Charger, GPIO 26)"
+	@echo "    make relay-in1-on      - Turn ON Relay 1 (IN1: Laptop Charger, GPIO 26)"
+	@echo "    make relay-in2-off     - Cut Relay 2 (IN2: Phone Charger, GPIO 27)"
+	@echo "    make relay-in2-on      - Turn ON Relay 2 (IN2: Phone Charger, GPIO 27)"
 	@echo ""
 	@echo "  Data & Model Training:"
 	@echo "    make generate_data     - Generate synthetic & mock UK-DALE data"
@@ -120,23 +125,14 @@ install-frontend:
 run: dev
 
 dev:
-	@echo "⚡ Starting Confidence-Aware Digital Twin EMS..."
-	@bash -c 'trap "kill 0" SIGINT SIGTERM EXIT; \
-	if ss -tlnp 2>/dev/null | grep -q ":1883 "; then \
-		echo "✅ Mosquitto broker already running on port 1883"; \
-	elif command -v mosquitto >/dev/null 2>&1; then \
-		mosquitto -c mosquitto/config/mosquitto-host.conf -d; \
-		echo "✅ Mosquitto broker started"; \
-	else \
-		echo "⚠️  mosquitto not found — start via Docker or sudo apt-get install -y mosquitto"; \
-	fi; \
-	sleep 1; \
-	$(PYTHON) scripts/run_pipeline.py & \
-	$(PYTHON) -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 & \
-	(cd frontend && $(NPM) run dev) & \
-	sleep 2; \
-	$(PYTHON) backend/scripts/simulate_esp32.py --all & \
-	wait'
+	$(PYTHON) scripts/run_hardware_system.py
+
+live: dev
+
+hardware: dev
+
+broker:
+	$(PYTHON) scripts/start_broker.py 0.0.0.0
 
 dev-backend:
 	$(PYTHON) -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
@@ -152,6 +148,25 @@ dev-pipeline-demo:
 
 dev-pipeline-hardware:
 	$(PYTHON) scripts/run_pipeline.py --config config/config.hardware.yaml
+
+# ── Direct Relay Controls via MQTT ──────────────────────────────────────────
+relay-on:
+	$(PYTHON) -c "import paho.mqtt.publish as pub; pub.single('home/plug/node_bench_agg/command', 'ON', hostname='127.0.0.1')"
+
+relay-off:
+	$(PYTHON) -c "import paho.mqtt.publish as pub; pub.single('home/plug/node_bench_agg/command', 'OFF', hostname='127.0.0.1')"
+
+relay-in1-on:
+	$(PYTHON) -c "import paho.mqtt.publish as pub; pub.single('home/plug/node_bench_agg/command', 'IN1_ON', hostname='127.0.0.1')"
+
+relay-in1-off:
+	$(PYTHON) -c "import paho.mqtt.publish as pub; pub.single('home/plug/node_bench_agg/command', 'IN1_OFF', hostname='127.0.0.1')"
+
+relay-in2-on:
+	$(PYTHON) -c "import paho.mqtt.publish as pub; pub.single('home/plug/node_bench_agg/command', 'IN2_ON', hostname='127.0.0.1')"
+
+relay-in2-off:
+	$(PYTHON) -c "import paho.mqtt.publish as pub; pub.single('home/plug/node_bench_agg/command', 'IN2_OFF', hostname='127.0.0.1')"
 
 demo:
 	$(PYTHON) scripts/demo_full_system.py --demo
