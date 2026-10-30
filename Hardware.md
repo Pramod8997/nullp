@@ -1,8 +1,8 @@
 # Hardware Pinout & Wiring Specification
 
-> **Rig:** Single-node, **single-socket** prototype — laptop + phone charger, ≤250 W, India 230 V 50 Hz.
-> **Current board:** 38-pin ESP32-WROOM-32 DevKit. The 38-pin low-voltage guide is [`docs/archive/claude_debug/WIRING_STEP_BY_STEP.md`](./docs/archive/docs/archive/claude_debug/WIRING_STEP_BY_STEP.md); older 30-pin references are not mechanically compatible.
-> **Authoritative current build:** [`docs/ems_hardware/ACTUAL_100A_CT_WIRING.md`](./docs/ems_hardware/ACTUAL_100A_CT_WIRING.md). The older 10 A shunt specification is historical and must not be mixed with the available CT meter.
+> **Rig:** Single-node prototype — laptop charger (Relay 1) + phone charger (Relay 2), ≤250 W, India 230 V 50 Hz.
+> **Current board:** ESP32 DevKit V1 (30-pin). Boot strap pin GPIO 12 is strictly avoided; GPIO 16/17 are reserved exclusively for PZEM UART2.
+> **Authoritative current build:** [`docs/ems_hardware/ACTUAL_100A_CT_WIRING.md`](./docs/ems_hardware/ACTUAL_100A_CT_WIRING.md).
 >
 > **Build class:** zero soldering, integrated modules only, ≤₹3,000. Production
 > pins are already assigned; the repository also provides a separate compiled
@@ -10,25 +10,30 @@
 
 * **PZEM-004T v4.0 (100A) External-CT Digital Meter:**
   * **TTL Header (Low Voltage)**:
-    * 5V -> External 5V Rail (ESP32 VIN)
+    * 3V3 / VCC -> ESP32 3V3 pin (3.3 V logic)
     * GND -> Common DC GND
-    * TX -> 1kΩ / 2kΩ voltage divider (or 5V-to-3.3V level shifter) -> ESP32 GPIO 16 (UART2 RX)
-    * RX -> ESP32 GPIO 17 (UART2 TX)
+    * TX -> ESP32 GPIO 16 (UART2 RX, wired to PZEM TX)
+    * RX -> ESP32 GPIO 17 (UART2 TX, wired to PZEM RX)
+    * Default address: `0xF8`, 9600 baud, 8N1, Modbus-RTU
   * **High-Voltage Screw Terminals (PZEM-004T v4.0)**:
     * Terminal 1 (L): 230V AC Live (via 1A fast-blow inline fuse)
     * Terminal 2 (N): 230V AC Neutral
     * Terminal 3 (CT+): 100A Split-Core CT Red wire
     * Terminal 4 (CT-): 100A Split-Core CT Black wire
     * *Safety Note*: Screw terminals 3 & 4 tightly BEFORE clamping the CT around the single insulated Live (L) wire. Note that the PZEM-004T AC side must be powered by 230V AC for the onboard metering ASIC to respond to UART polls.
-  * MCU must be **ESP32-WROOM-32**, **38-pin DevKit** (or 30-pin DevKit V1). **Not WROVER** — WROVER uses GPIO 16/17 for PSRAM.
-* **4-Channel Active-LOW Opto-Isolated Relay Module**:
-  * VCC -> 5V Rail (>= 2A external supply recommended; or JD-VCC = 5V and VCC = 3.3V with jumper removed for full optical isolation)
-  * GND -> Common DC GND
-  * IN1 -> GPIO 26
-  * IN2 -> GPIO 27
-  * IN3 -> GPIO 14
-  * IN4 -> GPIO 32 (CRITICAL FIX: Moved off strapping pin GPIO 12 / MTDI, which would pull flash voltage to 1.8V at boot and brick the ESP32)
-  * **Logic Polarity**: **ACTIVE-LOW** (RELAY_ON = LOW, RELAY_OFF = HIGH). Pins are pre-initialized to HIGH (RELAY_OFF) in firmware setup before pin direction configuration to prevent boot-up relay chatter. Fail-safe autonomous trip instantly trips all channels HIGH.
+  * MCU must be **ESP32 DevKit V1 (30-pin)**. **Not WROVER** — WROVER uses GPIO 16/17 for PSRAM.
+* **2-Channel Active-LOW Opto-Isolated Relay Module**:
+  * **VCC (Opto-isolator LED source)** -> ESP32 GPIO 25 (driven HIGH in setup() as 3.3V source for opto LEDs; feeds only a few mA).
+  * **JD-VCC (Relay Coil Supply)** -> Dedicated 5V External Supply / VIN (jumper removed between VCC and JD-VCC).
+  * **GND** -> Common DC GND.
+  * **IN1** -> GPIO 26 (Relay 1: Laptop Charger)
+  * **IN2** -> GPIO 27 (Relay 2: Phone Charger)
+  * **Boot strap pin caution**: GPIO 12 (MTDI) is strictly avoided. GPIO 16/17 are not used for anything else.
+  * **Logic Polarity**: **ACTIVE-LOW** (`RELAY_ON = LOW`, `RELAY_OFF = HIGH`). Relays are held OFF through boot and reset:
+    1. IN1 (GPIO26) and IN2 (GPIO27) are set to OUTPUT and written HIGH (RELAY_OFF).
+    2. THEN RELAY_VCC_PIN (GPIO25) is set to OUTPUT and written HIGH.
+    3. Delay ~100 ms, then initialize PZEM on Serial2 (GPIO16/17).
+  * Safe-state function `allRelaysOff()` writes HIGH to GPIO26/27 on any fatal error, watchdog trip, comms loss, or restart.
   * RC snubber (100 Ω 2 W flameproof + 0.1 µF 275 VAC Class-X2 across COM–NO): **optional** for this load set — no inductive load remains in scope. Reinstate for any motor/fan/pump/transformer load.
 
 * **Wiring interface:**

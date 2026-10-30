@@ -43,7 +43,7 @@ logger = logging.getLogger("ESP32_FIRMWARE_SIM")
 # nuisance trips on transient CRC failures; lower it to shorten the blind window.
 # Do not raise it far — the whole point is that the load must not stay energised
 # while protection is unmeasured.
-PZEM_FAIL_TRIP_COUNT = 30
+PZEM_FAIL_TRIP_COUNT = 5
 
 
 class VirtualPZEM004T:
@@ -77,7 +77,7 @@ class ESP32FirmwareNode:
         # 250 W prototype envelope; 125% cutoff trips at 312 W, 3.7x under
         # the 5 A fuse).
         rated_watts: float = 250.0,
-        relay_active_low: bool = False,
+        relay_active_low: bool = True,
         mqtt_publish_fn: Optional[Callable[[str, str], Any]] = None,
     ):
         # relay_active_low mirrors the RELAY_ACTIVE_LOW constant in main.cpp,
@@ -91,8 +91,17 @@ class ESP32FirmwareNode:
         self.relay_active_low = relay_active_low
         self.mqtt_publish = mqtt_publish_fn
 
-        # Hardware Pins & State
-        self.gpio18_relay_state = False   # False = OFF, True = ON
+        # Hardware Pins & State (ESP32 DevKit V1 30-pin, 2-Ch Active-LOW Relay Module)
+        # Relay 1 (Laptop) = GPIO 26, Relay 2 (Phone) = GPIO 27, Opto VCC = GPIO 25
+        # PZEM UART2: RX = GPIO 16, TX = GPIO 17
+        self.relay_vcc_pin = 25
+        self.relay1_pin = 26
+        self.relay2_pin = 27
+        self.pzem_rx_pin = 16
+        self.pzem_tx_pin = 17
+        self.gpio25_vcc_state = True      # HIGH (3.3V source for opto LEDs)
+        self.gpio26_relay_state = False   # False = OFF, True = ON (Relay 1, Laptop)
+        self.gpio27_relay_state = False   # False = OFF, True = ON (Relay 2, Phone)
         self.relay_locked = False
         self.lock_start_time = 0.0
         self.safety_lockout_seconds = 300.0  # 5-minute lockout
@@ -166,25 +175,58 @@ class ESP32FirmwareNode:
         self.topic_status = f"home/sensor/{device_id}/status"
         self.topic_ack = f"home/plug/{device_id}/ack"
 
-    def set_relay(self, on: bool):
-        """Actuate physical relay GPIO pin."""
-        self.gpio18_relay_state = on
-        if not on:
-            self.pzem.set_load(0.0)
+    @property
+    def gpio18_relay_state(self) -> bool:
+        """Compatibility property for legacy test suites referencing primary relay."""
+        return self.gpio26_relay_state
+
+    @gpio18_relay_state.setter
+    def gpio18_relay_state(self, val: bool):
+        self.gpio26_relay_state = bool(val)
+
+    def set_relay(self, ch_or_on, on: Optional[bool] = None):
+        """Actuate physical relay GPIO pin(s) applying active-LOW mapping.
+        Supports set_relay(channel, on) and set_relay(on).
+        """
+        if on is None:
+            val = bool(ch_or_on)
+            self.gpio26_relay_state = val
+            self.gpio27_relay_state = val
+            if not val:
+                self.pzem.set_load(0.0)
+        else:
+            channel = int(ch_or_on)
+            val = bool(on)
+            if channel == 1:
+                self.gpio26_relay_state = val
+            elif channel == 2:
+                self.gpio27_relay_state = val
+            if not self.gpio26_relay_state and not self.gpio27_relay_state:
+                self.pzem.set_load(0.0)
+
+    def all_relays_off(self):
+        """Safe-state function: de-energize all relays (drive HIGH on GPIO 26/27)."""
+        self.set_relay(1, False)
+        self.set_relay(2, False)
+
+    @property
+    def gpio26_level(self) -> bool:
+        """Electrical level driven onto GPIO 26 (True = HIGH, False = LOW). Active-LOW."""
+        if self.relay_active_low:
+            return not self.gpio26_relay_state
+        return self.gpio26_relay_state
+
+    @property
+    def gpio27_level(self) -> bool:
+        """Electrical level driven onto GPIO 27 (True = HIGH, False = LOW). Active-LOW."""
+        if self.relay_active_low:
+            return not self.gpio27_relay_state
+        return self.gpio27_relay_state
 
     @property
     def gpio18_level(self) -> bool:
-        """Electrical level driven onto GPIO 18 (True = HIGH, False = LOW).
-
-        Mirrors setRelay() in main.cpp. `gpio18_relay_state` is the *logical*
-        relay state (True = load energised); this is the pin level that produces
-        it, so a reintroduced polarity inversion (B-7) becomes observable in the
-        twin instead of being invisible as it was while relay_active_low was
-        stored and never read.
-        """
-        if self.relay_active_low:
-            return not self.gpio18_relay_state
-        return self.gpio18_relay_state
+        """Compatibility property for tests checking primary relay electrical level."""
+        return self.gpio26_level
 
     # ═════════════════════════════════════════════════════════════════════
     # CORE 0: High-Priority Safety Loop (Runs every 100ms)

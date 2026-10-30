@@ -82,20 +82,20 @@ def test_active_low_logic_correctness(node):
     (the RELAY_ACTIVE_LOW constant in main.cpp): HIGH closes the relay, LOW
     opens it, Hi-Z opens it.
     """
-    # Default build (spec-correct, active-HIGH): level follows the logical state.
-    assert node.relay_active_low is False
+    # Default build (spec-correct, active-LOW): pin level inverts the logical state.
+    assert node.relay_active_low is True
     node.set_relay(True)
-    assert node.gpio18_relay_state is True and node.gpio18_level is True
+    assert node.gpio18_relay_state is True and node.gpio18_level is False
     node.set_relay(False)
-    assert node.gpio18_relay_state is False and node.gpio18_level is False
+    assert node.gpio18_relay_state is False and node.gpio18_level is True
 
-    # Active-LOW wiring (the D5 purchase-contingency fallback) inverts the pin.
-    inverted = ESP32FirmwareNode(device_id=DEVICE_ID, rated_watts=RATED_WATTS,
-                                 relay_active_low=True)
-    inverted.set_relay(True)
-    assert inverted.gpio18_relay_state is True and inverted.gpio18_level is False
-    inverted.set_relay(False)
-    assert inverted.gpio18_relay_state is False and inverted.gpio18_level is True
+    # Active-HIGH wiring follows the pin level.
+    active_high = ESP32FirmwareNode(device_id=DEVICE_ID, rated_watts=RATED_WATTS,
+                                    relay_active_low=False)
+    active_high.set_relay(True)
+    assert active_high.gpio18_relay_state is True and active_high.gpio18_level is True
+    active_high.set_relay(False)
+    assert active_high.gpio18_relay_state is False and active_high.gpio18_level is False
 
 
 def test_default_polarity_matches_locked_firmware_constant():
@@ -159,7 +159,7 @@ def test_overcurrent_is_unconditional_during_cold_baseline(node):
     node.pzem.set_load(280.0)                     # 140% of 200W rated
     node.core0_safety_step(sim_dt=0.1)
     assert node.gpio18_relay_state is False, "overcurrent must not be gated by inrush suppression"
-    assert node.gpio18_level is False, "pin must be driven to the de-energising level"
+    assert node.gpio18_level is True, "pin must be driven to the de-energising level (HIGH for active-LOW)"
     # Core 0 opens the relay immediately; the core-1 loop takes the lockout
     # when it consumes the overcurrent latch (the core-0 cutoff + core-1
     # lockout blocks in main.cpp).
@@ -722,7 +722,7 @@ def test_pzem_watchdog_trips_at_exactly_the_trip_count():
         f"did not trip on blind sample {PZEM_FAIL_TRIP_COUNT} — the socket "
         "stays energised with overcurrent AND arc-fault blind"
     )
-    assert node.gpio18_level is False, "pin must be driven to the de-energising level"
+    assert node.gpio18_level is True, "pin must be driven to the de-energising level (HIGH for active-LOW)"
     assert node.shared_pzem_fault is True
     assert node.relay_locked is False, "the lockout belongs to the core-1 tick"
 
@@ -862,7 +862,7 @@ async def test_bringup_gate7_dry_relay_close_stays_closed():
             await node.core1_telemetry_tick()
 
     assert node.gpio18_relay_state is False
-    assert node.gpio18_level is False, "active-HIGH net: an inhibited relay is LOW"
+    assert node.gpio18_level is True, "active-LOW net: an inhibited relay is HIGH"
     assert node.relay_locked is False
     assert "PZEM_FAULT" not in _statuses(published, node)
 
@@ -946,4 +946,4 @@ async def test_brief_overcurrent_spike_still_takes_lockout_and_nacks_on():
     assert "LOCKOUT_NACK" in acks, "the ON after a cut-off spike was not NACKed"
     assert "ON_CONFIRMED" not in acks, "the relay re-closed into a faulted circuit"
     assert node.gpio18_relay_state is False
-    assert node.gpio18_level is False, "pin must stay at the de-energising level"
+    assert node.gpio18_level is True, "pin must stay at the de-energising level (HIGH for active-LOW)"

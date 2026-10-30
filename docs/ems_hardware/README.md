@@ -23,13 +23,14 @@ prototype. No hardware is assembled and mains authorization is **blocked**.
 ## Current scope
 
 - Low-voltage bench bring-up only until the physical safety gates pass.
-- 38-pin ESP32-WROOM-32 DevKit; not a 30-pin shield or WROVER board.
-- GPIO16/17 are the PZEM UART; GPIO 26, 27, 14, 32 are the 4-channel active-LOW relay inputs (CH4 remapped off strapping pin GPIO12 to GPIO32).
+- ESP32 DevKit V1 (30-pin); boot strap pin GPIO 12 strictly avoided; GPIO 16/17 reserved exclusively for PZEM UART2.
+- GPIO 16/17 are the PZEM UART (9600 baud, 3.3V logic); GPIO 26 (Relay 1: Laptop charger) and GPIO 27 (Relay 2: Phone charger) are the 2-channel active-LOW relay inputs.
+- GPIO 25 is configured as an output driven HIGH to power the relay optocoupler LEDs (3.3V source, few mA), eliminating boot chatter.
 - The physically available PZEM is the 100 A CT variant; use
   [`ACTUAL_100A_CT_WIRING.md`](./ACTUAL_100A_CT_WIRING.md), not the retired
   10 A shunt topology.
 - The physical socket envelope is the documented laptop + phone-charger,
-  single-socket, 250 W prototype. Projector recognition remains a software
+  250 W prototype. Projector recognition remains a software
   scope item and is not physical authorization for this socket.
 
 ## Removed from the active build set

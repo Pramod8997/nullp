@@ -1,13 +1,13 @@
-# Actual Hardware Wiring — 38-pin ESP32 + PZEM-004T-100A CT
+# Actual Hardware Wiring — ESP32 DevKit V1 (30-pin) + PZEM-004T-100A CT
 
 ![Actual 100A CT wiring diagram](./actual_100a_ct_wiring.svg)
 
 ![Annotated low-voltage connection photo](./actual_low_voltage_pin_photo.svg)
 
-**Applies to:** the hardware shown for this bench: 38-pin ESP32-WROOM-32,
-PZEM-004T-100A(V4.0)-type meter with external CT, and the available relay
-module. The relay board may have four channels; this design uses channel 1
-only. A verified two-channel H/L equivalent is also acceptable.
+**Applies to:** the hardware shown for this bench: ESP32 DevKit V1 (30-pin),
+PZEM-004T-100A(V4.0) meter with external CT, and 2-channel active-LOW opto-isolated relay module.
+- Relay 1 (laptop charger): IN1 = GPIO 26
+- Relay 2 (phone charger): IN2 = GPIO 27
 
 **Status:** the low-voltage pin map below is the wiring target. Mains wiring is
 still blocked until the relay labels/trigger mode, CT polarity, enclosure,
@@ -18,68 +18,62 @@ protective earth, RCD/RCBO, fuse holder, and isolation are physically checked.
 
 ## 1. Exact low-voltage pin-to-pin map
 
-Use the labels printed on the boards. Do not substitute `TX0/RX0`, GPIO 5, or a
-30-pin pinout.
+Use the labels printed on the boards. Do not use GPIO 12 (MTDI strapping pin). Do not use GPIO 16/17 for anything else.
 
-| ESP32 38-pin label | Connect to | Wire / condition |
+| ESP32 DevKit V1 Pin | Connect to | Wire / condition |
 |---|---|---|
-| `VIN` / `5V` | Relay module low-voltage `VCC` or `+5V` | 5 V supply; only after the relay board label is verified |
-| `VIN` / `5V` | PZEM TTL `5V` | 5 V supply |
+| `3V3` | PZEM TTL `3V3` / `VCC` | 3.3 V logic power |
+| `VIN` / `5V` | Relay `JD-VCC` | 5 V coil supply (jumper removed between VCC and JD-VCC) |
 | `GND` | Relay module `GND` | Shared low-voltage ground |
 | `GND` | PZEM TTL `GND` | Shared low-voltage ground |
-| `GPIO18` / `D18` | Relay `IN1` | Direct signal for the approved H-trigger configuration |
-| `GPIO17` / `TX2` | PZEM TTL `RX` | UART transmit, crossed |
-| `GPIO16` / `RX2` | PZEM TTL `TX` | **Only after the TX voltage check in Section 3** |
-| Relay `IN1` | Any shared `GND` | `100 kΩ` pull-down resistor; mandatory |
+| `GPIO25` | Relay `VCC` | 3.3 V source for opto LEDs (driven HIGH in setup, feeds a few mA) |
+| `GPIO26` | Relay `IN1` | Active-LOW control for Relay 1 (Laptop Charger) |
+| `GPIO27` | Relay `IN2` | Active-LOW control for Relay 2 (Phone Charger) |
+| `GPIO17` / `TX2` | PZEM TTL `RX` | UART2 transmit from ESP32 to PZEM RX (9600 baud, 8N1) |
+| `GPIO16` / `RX2` | PZEM TTL `TX` | UART2 receive from PZEM TX to ESP32 RX |
 
 ```text
                          LOW-VOLTAGE BENCH ONLY
 
- ESP32 5V/VIN  ───────────────┬──────── Relay +5V/VCC
-                               └──────── PZEM TTL 5V
+ ESP32 3V3     ──────────────────────── PZEM TTL 3V3
+ ESP32 5V/VIN  ──────────────────────── Relay JD-VCC (jumper removed)
 
  ESP32 GND     ───────────────┬──────── Relay GND
                                └──────── PZEM TTL GND
 
- ESP32 GPIO18 / D18 ─────────────────── Relay IN1
-                         │
-                         └──[ 100 kΩ ]── ESP32 GND
+ ESP32 GPIO25  ──────────────────────── Relay VCC (opto LED source)
+ ESP32 GPIO26  ──────────────────────── Relay IN1 (laptop charger)
+ ESP32 GPIO27  ──────────────────────── Relay IN2 (phone charger)
 
  ESP32 GPIO17 / TX2 ─────────────────── PZEM RX
- ESP32 GPIO16 / RX2 ◄──── PZEM TX  (direct or divider, Section 3)
+ ESP32 GPIO16 / RX2 ◄────────────────── PZEM TX
 
  PZEM AC/CT screw terminals: DISCONNECTED during this bench stage.
  Relay COM/NO/NC contacts:   DISCONNECTED during this bench stage.
 ```
 
-### Relay-board identity gate
+### Relay-board identity & active-LOW operation
 
-The relay photograph does not make the channel count and all terminal labels
-reliably readable. Before connecting `5V`, `GND`, or `GPIO18`, confirm on the
-actual board or its exact manual:
+The 2-channel relay module uses **ACTIVE-LOW** logic:
+- `LOW` = relay ON (energised)
+- `HIGH` = relay OFF (de-energised)
 
-1. `IN1`, `GND`, and the 5 V input labels.
-2. The H/L selector position and which position is **H/high-trigger**.
-3. Whether the board has `VCC` and `JD-VCC`, and whether its jumper joins them.
-4. Channel-1 contact labels `COM`, `NO`, and `NC`.
+Relay module opto-LED VCC is powered from `GPIO25` as a 3.3 V source.
+Relay coil supply (`JD-VCC`) is connected to external 5 V (`VIN`), with the board jumper removed between `VCC` and `JD-VCC`.
 
-For the approved target configuration, set the selector to **H**, keep the
-documented 5 V arrangement, connect only `IN1` for channel 1, and leave channels
-2–4 (or any channels beyond it) unused. If the actual module has no verifiable H
-mode or its labels differ, stop; do not infer the wiring from the relay-coil
-marking alone.
+**Strict startup order in firmware:**
+1. Configure `RELAY1_PIN` (GPIO 26) and `RELAY2_PIN` (GPIO 27) as outputs and write `RELAY_OFF` (`HIGH`).
+2. THEN configure `RELAY_VCC_PIN` (GPIO 25) as output and write `HIGH`.
+3. Delay ~100 ms, then initialize PZEM on `Serial2` (GPIO 16/17, 9600 baud).
+4. Relays stay OFF through boot and reset.
 
-The separate four-channel logic-level shifter is **not** in the approved path.
-Leave it disconnected. A generic bidirectional shifter is not automatically a
-safe relay driver or PZEM TX protector.
+All relay switching goes through `setRelay(channel, bool on)` applying the active-LOW mapping. Safe-state function `allRelaysOff()` writes HIGH to GPIO 26 and 27 on any fatal error, watchdog trip, comms loss, or restart.
 
-With the approved H-trigger arrangement and `RELAY_ACTIVE_LOW = false`:
-
-| GPIO18 state | Relay result |
-|---|---|
-| LOW | Channel 1 open |
-| HIGH (3.3 V) | Channel 1 closed |
-| Hi-Z during reset/boot | 100 kΩ holds `IN1` low; channel 1 must be open |
+| Firmware call | Pin Level | Relay result |
+|---|---|---|
+| `setRelay(ch, false)` | `HIGH` (3.3 V) | Channel open (OFF) |
+| `setRelay(ch, true)` | `LOW` (0 V) | Channel closed (ON) |
+| Reset / boot sequence | Initialized `HIGH` before `GPIO25` VCC driven `HIGH` | Relays remain open (OFF) |
 
 Do not connect any relay contact terminal to the breadboard or to mains for the
 first test. Verify `COM–NO` with a continuity meter while toggling the relay.
@@ -92,12 +86,13 @@ PZEM-004T-100A(V4.0)-type board header is:
 | PZEM TTL header position | Function | ESP32 connection |
 |---:|---|---|
 | 1 | `GND` | Any ESP32 `GND` |
-| 2 | `TX` | ESP32 `GPIO16/RX2`, after Section 3 |
+| 2 | `TX` | ESP32 `GPIO16/RX2` |
 | 3 | `RX` | ESP32 `GPIO17/TX2` |
-| 4 | `5V` | ESP32 `VIN/5V` |
+| 4 | `3V3` / `VCC` | ESP32 `3V3` |
 
 The UART is crossed intentionally: PZEM `TX → ESP32 RX`, and ESP32 `TX → PZEM
 RX`. Do not use ESP32 `TX0/RX0`; those pins are reserved for USB flashing and
+serial logging. Do not use GPIO 12 (strapping pin). Do not use GPIO 16/17 for anything else.
 serial logging.
 
 ## 3. Mandatory PZEM-TX voltage check

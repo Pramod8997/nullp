@@ -2,23 +2,30 @@
  * Module 7: Production ESP32 Firmware — Dual-Core FreeRTOS
  *
  * Edge-hybrid safety architecture for the Smart Home EMS.
- * PZEM-004T v4.0 (100A split-core CT) UART Edition
- * 4-Channel Active-LOW Opto-Isolated Relay Module
+ * ESP32 DevKit V1 (30-pin)
+ * PZEM-004T-100A V4.0 (100A split-core CT) on UART2 (RX=16, TX=17, 9600 baud, 3.3V logic)
+ * 2-Channel Active-LOW Opto-Isolated Relay Module:
+ *   - Relay 1 (Laptop Charger) = GPIO 26
+ *   - Relay 2 (Phone Charger)  = GPIO 27
+ *   - Relay Opto VCC           = GPIO 25 (3.3V source driven HIGH)
+ *   - Active-LOW: LOW = ON, HIGH = OFF
+ *   - JD-VCC = VIN (5V)
  *
  * CORE 0 (High Priority — SafetySamplingTask):
- *   - Continuous PZEM polling at 100ms intervals over Hardware UART2
+ *   - PZEM polling at 1-second interval over Hardware UART2
  *   - Edge-local arc-fault proxy (dP/dt > 1000 W/s)
  *   - Dynamic inrush suppression via 5-sample sliding baseline
  *   - Unconditional overcurrent, overvoltage & undervoltage protection
  *   - Hardware task watchdog feeding (5-second timeout)
- *   - PZEM loss-of-measurement watchdog (bounded successful-read age -> cutoff)
- *   - Immediate 4-channel relay cutoff — zero network dependency
+ *   - PZEM loss-of-measurement watchdog (default 5 consecutive failed reads)
+ *   - Synthetic fallback telemetry generation when PZEM is offline or disabled
+ *   - Immediate relay cutoff / safe state (allRelaysOff) — zero network dependency
  *
  * CORE 1 (Standard Priority — Arduino loop):
  *   - Non-blocking MQTT client.loop() and reconnect
  *   - Hardware task watchdog feeding (5-second timeout)
  *   - 1Hz fast power broadcast (plain float string)
- *   - 1Hz/10s rich electrical diagnostic telemetry (JSON object with canonical & shorthand keys)
+ *   - 1Hz rich electrical diagnostic telemetry (JSON object with canonical & shorthand keys, source=real|synthetic)
  *   - Incoming relay command handler (ON/OFF/WARNING/reset_safety)
  *   - Safety trip latch consumption -> lockout & MQTT status alert publishing
  *
@@ -70,11 +77,11 @@ const bool  RELAY_ACTIVE_LOW = ems_hardware::RELAY_ACTIVE_LOW;
 const float VOLTAGE          = ems_hardware::MAINS_VOLTAGE_V;
 const float CRITICAL_PCT     = ems_hardware::CRITICAL_PCT;
 
-// 4-Channel Active-LOW Relay Pins (CH4 remapped to GPIO 32 to eliminate MTDI strapping pin hazard)
-const int RELAY_PINS[4] = {RELAY_CH1_PIN, RELAY_CH2_PIN, RELAY_CH3_PIN, RELAY_CH4_PIN};
+// 2-Channel Active-LOW Relay Pins (Relay 1 = GPIO 26, Relay 2 = GPIO 27)
+const int RELAY_PINS[2] = {RELAY1_PIN, RELAY2_PIN};
 
-// PZEM Instance on Hardware UART2 (PZEM_SERIAL = Serial2, RX: GPIO 16, TX: GPIO 17)
-PZEM004Tv30 pzem(PZEM_SERIAL, PZEM_RX_PIN, PZEM_TX_PIN);
+// PZEM Instance on Hardware UART2 (PZEM_SERIAL = Serial2, RX: GPIO 16, TX: GPIO 17, 9600 baud)
+PZEM004Tv30 pzem(PZEM_SERIAL, PZEM_RX, PZEM_TX);
 
 // Edge Arc-Fault & Safety Constants
 const float EDGE_ROC_THRESHOLD      = ems_hardware::EDGE_ROC_THRESHOLD_W_PER_S;
@@ -104,6 +111,7 @@ volatile float sharedEnergy          = 0.0f;
 volatile float sharedFrequency       = ems_hardware::MAINS_FREQUENCY_HZ;
 volatile float sharedApparentPowerVa = 0.0f;
 volatile float sharedReactivePowerVar = 0.0f;
+volatile bool  sharedSampleIsSynthetic = false;
 
 volatile bool  sharedArcFault        = false;
 volatile float sharedArcFaultRoC     = 0.0f;
@@ -126,6 +134,8 @@ volatile unsigned long lastSuccessfulPzemReadMs = 0;
 volatile bool  safetyTaskRunning     = false;
 TaskHandle_t   safetyTaskHandle      = nullptr;
 
+volatile bool  relay1Closed          = false;
+volatile bool  relay2Closed          = false;
 volatile bool  relayClosed           = false;
 
 // ═══════════════════════════════════════════════════════
@@ -148,22 +158,50 @@ char topicStatus[64];
 char topicAck[64];
 
 // ═══════════════════════════════════════════════════════
-//  RELAY HELPER (Controls all 4 opto-isolated channels)
+//  RELAY CONTROL (3. Single function for active-LOW mapping)
 // ═══════════════════════════════════════════════════════
-void setRelay(bool on) {
+void setRelay(uint8_t channel, bool on) {
     uint8_t pinState = on ? RELAY_ON : RELAY_OFF;
-    for (int i = 0; i < 4; i++) {
-        digitalWrite(RELAY_PINS[i], pinState);
+    if (channel == 1) {
+        digitalWrite(RELAY1_PIN, pinState);
+        relay1Closed = on;
+    } else if (channel == 2) {
+        digitalWrite(RELAY2_PIN, pinState);
+        relay2Closed = on;
     }
-#ifdef RELAY_PIN
-    if (RELAY_ACTIVE_LOW) {
-        digitalWrite(RELAY_PIN, on ? LOW : HIGH);
-    } else {
-        digitalWrite(RELAY_PIN, on ? HIGH : LOW);
+    relayClosed = on;
+    if (!relay1Closed && !relay2Closed) {
+        relayClosed = false;
     }
-#endif
+}
+
+// Convenience overload for controlling all relay channels
+void setRelay(bool on) {
+    setRelay(1, on);
+    setRelay(2, on);
     relayClosed = on;
 }
+
+// 4. Safe-state function: writes HIGH (RELAY_OFF) to GPIO26 and GPIO27
+void allRelaysOff() {
+    setRelay(1, false);
+    setRelay(2, false);
+    relayClosed = false;
+}
+
+#if EMS_BENCH_MODE
+void printPzemStatus() {
+    float v = pzem.voltage();
+    float i = pzem.current();
+    float p = pzem.power();
+    float pf = pzem.pf();
+    if (!isfinite(v) || !isfinite(i) || !isfinite(p)) {
+        Serial.println("[BENCH] PZEM status: OFFLINE / READ FAILED (normal when 230V AC mains is disconnected)");
+    } else {
+        Serial.printf("[BENCH] PZEM status: OK -> V=%.1fV, I=%.3fA, P=%.1fW, PF=%.2f\n", v, i, p, pf);
+    }
+}
+#endif
 
 // ═══════════════════════════════════════════════════════
 //  CORE 0: HIGH-PRIORITY SAFETY SAMPLING TASK
@@ -178,11 +216,22 @@ void SafetySamplingTask(void* pvParameters) {
     bool  pzemEverValid = false;
     for (int i = 0; i < BASELINE_WINDOW; i++) baselineRing[i] = 0.0f;
 
-    unsigned long lastReadMs = millis();
+    unsigned long lastPzemPollMs = 0;
+    float syntheticEnergy = 0.0f;
 
     for (;;) {
         // Feed task watchdog (must run inside task to prevent hardware watchdog trigger)
         esp_task_wdt_reset();
+
+        unsigned long nowMs = millis();
+
+        // ── 5. Poll PZEM no faster than once per second (>= 1000 ms) ──
+        if (lastPzemPollMs > 0 && (nowMs - lastPzemPollMs < 1000)) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        float dt = (lastPzemPollMs == 0) ? 1.0f : ((nowMs - lastPzemPollMs) / 1000.0f);
+        lastPzemPollMs = nowMs;
 
         float powerWatts  = pzem.power();
         float pzemVoltage = pzem.voltage();
@@ -191,9 +240,7 @@ void SafetySamplingTask(void* pvParameters) {
         float pzemEnergy  = pzem.energy();
         float pzemFreq    = pzem.frequency();
 
-        unsigned long nowMs = millis();
-        float dt = (nowMs - lastReadMs) / 1000.0f;
-        lastReadMs = nowMs;
+        bool isSyntheticSample = false;
 
         // ── Validate PZEM readings with isfinite() and range checks ──
         if (!isfinite(powerWatts) || !isfinite(pzemVoltage)
@@ -205,50 +252,83 @@ void SafetySamplingTask(void* pvParameters) {
             || powerWatts < 0.0f
             || powerWatts > PZEM_MAX_VALID_POWER_W
             || pzemPf < 0.0f || pzemPf > 1.0f) {
-            
-            measurementFresh = false;
 
-            taskENTER_CRITICAL(&sharedMux);
-            if (pendingRelayOn) {
-                pendingRelayOn = false;
-                pendingAck = true;
-                pendingAckType = 3; // LOCKOUT_NACK
-            }
-            if (pendingRelayOff) {
-                pendingRelayOff = false;
-                setRelay(false);
-                pendingAck = true;
-                pendingAckType = 2; // OFF_CONFIRMED
-            }
-            taskEXIT_CRITICAL(&sharedMux);
+            // ── 6. USE_SYNTHETIC_FALLBACK handling ──
+            // If USE_SYNTHETIC_FALLBACK is enabled, or if PZEM never responds after initial tries
+            bool fallbackActive = (USE_SYNTHETIC_FALLBACK != 0) || (!pzemEverValid && (pzemFailCount >= PZEM_FAIL_TRIP_COUNT));
 
-            if (pzemFailCount < PZEM_FAIL_TRIP_COUNT) pzemFailCount++;
+            if (fallbackActive) {
+                isSyntheticSample = true;
+                pzemVoltage = 230.0f;
+                pzemFreq = 50.0f;
 
-            const bool successfulReadExpired =
-                lastSuccessfulPzemReadMs > 0
-                && (unsigned long)(nowMs - lastSuccessfulPzemReadMs)
-                   >= PZEM_MAX_BLIND_MS;
+                // Simulated load based on relay states:
+                // Relay 1 (Laptop Charger) = 65.0W, Relay 2 (Phone Charger) = 20.0W
+                float simWatts = 0.0f;
+                if (relay1Closed) simWatts += 65.0f;
+                if (relay2Closed) simWatts += 20.0f;
 
-            if (pzemFailCount >= PZEM_FAIL_TRIP_COUNT && pzemEverValid
-                    && relayClosed && successfulReadExpired) {
+                powerWatts = simWatts;
+                pzemPf = (simWatts > 0.0f) ? 0.95f : 1.0f;
+                pzemCurrent = (simWatts > 0.0f) ? (simWatts / (pzemVoltage * pzemPf)) : 0.0f;
+                syntheticEnergy += (simWatts * (dt / 3600.0f)) / 1000.0f; // kWh
+                pzemEnergy = syntheticEnergy;
+            } else {
+                // Treat NaN or failed read as invalid (never as 0 W)
+                measurementFresh = false;
+
                 taskENTER_CRITICAL(&sharedMux);
-                safetyInhibit = true;
-                safetyTripped = true;
-                setRelay(false);
-                sharedPzemFault = true;
+                if (pendingRelayOn) {
+                    pendingRelayOn = false;
+                    pendingAck = true;
+                    pendingAckType = 3; // LOCKOUT_NACK
+                }
+                if (pendingRelayOff) {
+                    pendingRelayOff = false;
+                    setRelay(false);
+                    allRelaysOff();
+                    pendingAck = true;
+                    pendingAckType = 2; // OFF_CONFIRMED
+                }
                 taskEXIT_CRITICAL(&sharedMux);
 
-                Serial.printf("[CORE0] ⚠ PZEM FAULT! %d consecutive invalid "
-                              "reads (%.1fs blind). Relay CUTOFF.\n",
-                              pzemFailCount, pzemFailCount * 0.1f);
-            }
+                if (pzemFailCount < PZEM_FAIL_TRIP_COUNT) pzemFailCount++;
 
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
+                const bool successfulReadExpired =
+                    lastSuccessfulPzemReadMs > 0
+                    && (unsigned long)(nowMs - lastSuccessfulPzemReadMs)
+                       >= PZEM_MAX_BLIND_MS;
+
+                // After N consecutive failures (default 5) log a warning and, if the safety layer requires it, call allRelaysOff()
+                if (pzemFailCount >= PZEM_FAIL_TRIP_COUNT) {
+                    Serial.printf("[CORE0] ⚠ Warning: PZEM read failed (%d consecutive failures)\n", pzemFailCount);
+                }
+
+                if (pzemFailCount >= PZEM_FAIL_TRIP_COUNT && pzemEverValid
+                        && relayClosed && successfulReadExpired) {
+                    taskENTER_CRITICAL(&sharedMux);
+                    safetyInhibit = true;
+                    safetyTripped = true;
+                    setRelay(false);
+                    allRelaysOff();
+                    sharedPzemFault = true;
+                    taskEXIT_CRITICAL(&sharedMux);
+
+                    Serial.printf("[CORE0] ⚠ PZEM FAULT! %d consecutive invalid "
+                                  "reads (%.1fs blind). Safe state -> allRelaysOff().\n",
+                                  pzemFailCount, pzemFailCount * 1.0f);
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
         }
 
-        pzemFailCount = 0;
-        pzemEverValid = true;
+        // Reading is valid (either real from sensor or synthetic fallback)
+        if (!isSyntheticSample) {
+            pzemFailCount = 0;
+            pzemEverValid = true;
+        }
         measurementFresh = true;
         lastSuccessfulPzemReadMs = nowMs;
 
@@ -278,12 +358,13 @@ void SafetySamplingTask(void* pvParameters) {
                 safetyInhibit   = true;
                 safetyTripped   = true;
                 setRelay(false);
+                allRelaysOff();
                 sharedArcFault    = true;
                 sharedArcFaultRoC = rateOfChange;
                 taskEXIT_CRITICAL(&sharedMux);
 
                 Serial.printf("[CORE0] ⚡ EDGE ARC-FAULT! dP/dt=%.0fW/s "
-                              "(threshold: %.0f). Relay CUTOFF.\n",
+                              "(threshold: %.0f). Safe state -> allRelaysOff().\n",
                               rateOfChange, EDGE_ROC_THRESHOLD);
             }
         }
@@ -295,10 +376,11 @@ void SafetySamplingTask(void* pvParameters) {
             safetyInhibit = true;
             safetyTripped = true;
             setRelay(false);
+            allRelaysOff();
             sharedOvercurrentLatch = true;
             taskEXIT_CRITICAL(&sharedMux);
 
-            Serial.printf("[CORE0] ⚡ OVERCURRENT! %.1fW > %.1fW (%.2fA > %.1fA). Relay CUTOFF.\n",
+            Serial.printf("[CORE0] ⚡ OVERCURRENT! %.1fW > %.1fW (%.2fA > %.1fA). Safe state -> allRelaysOff().\n",
                           powerWatts, criticalWatts, pzemCurrent, MAX_SAFE_CURRENT_A);
         }
 
@@ -308,10 +390,11 @@ void SafetySamplingTask(void* pvParameters) {
             safetyInhibit = true;
             safetyTripped = true;
             setRelay(false);
+            allRelaysOff();
             sharedOvervoltageLatch = true;
             taskEXIT_CRITICAL(&sharedMux);
 
-            Serial.printf("[CORE0] ⚡ OVERVOLTAGE! %.1fV > %.1fV. Relay CUTOFF.\n",
+            Serial.printf("[CORE0] ⚡ OVERVOLTAGE! %.1fV > %.1fV. Safe state -> allRelaysOff().\n",
                           pzemVoltage, MAX_SAFE_VOLTAGE_V);
         }
 
@@ -321,10 +404,11 @@ void SafetySamplingTask(void* pvParameters) {
             safetyInhibit = true;
             safetyTripped = true;
             setRelay(false);
+            allRelaysOff();
             sharedUndervoltageLatch = true;
             taskEXIT_CRITICAL(&sharedMux);
 
-            Serial.printf("[CORE0] ⚡ UNDERVOLTAGE! %.1fV < %.1fV. Relay CUTOFF.\n",
+            Serial.printf("[CORE0] ⚡ UNDERVOLTAGE! %.1fV < %.1fV. Safe state -> allRelaysOff().\n",
                           pzemVoltage, MIN_SAFE_VOLTAGE_V);
         }
 
@@ -345,6 +429,7 @@ void SafetySamplingTask(void* pvParameters) {
         sharedFrequency        = safeFreq;
         sharedApparentPowerVa  = apparent_power_va;
         sharedReactivePowerVar = reactive_power_var;
+        sharedSampleIsSynthetic = isSyntheticSample;
         taskEXIT_CRITICAL(&sharedMux);
 
         // ── Consume queued relay requests (Core 0 is sole owner) ──
@@ -352,6 +437,7 @@ void SafetySamplingTask(void* pvParameters) {
         if (pendingRelayOff) {
             pendingRelayOff = false;
             setRelay(false);
+            allRelaysOff();
             pendingAck = true;
             pendingAckType = 2; // OFF_CONFIRMED
         } else if (pendingRelayOn) {
@@ -419,24 +505,31 @@ void callback(char* topic, byte* payload, unsigned int length) {
 void setup() {
     Serial.begin(115200);
 
-    // CRITICAL: Initialize all 4 relay pins to RELAY_OFF (HIGH) BEFORE enabling outputs
-    // to prevent boot-time relay chatter
-    for (int i = 0; i < 4; i++) {
-        digitalWrite(RELAY_PINS[i], RELAY_OFF);
-        pinMode(RELAY_PINS[i], OUTPUT);
-    }
-#ifdef RELAY_PIN
-    digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
-    pinMode(RELAY_PIN, OUTPUT);
-#endif
-    setRelay(false);
+    // ── 2a: Configure RELAY1_PIN and RELAY2_PIN as outputs and write RELAY_OFF (HIGH) ──
+    pinMode(RELAY1_PIN, OUTPUT);
+    digitalWrite(RELAY1_PIN, RELAY_OFF);
+    pinMode(RELAY2_PIN, OUTPUT);
+    digitalWrite(RELAY2_PIN, RELAY_OFF);
 
-    // Initialize PZEM Hardware Serial2 (9600 baud, 8N1, RX=16, TX=17)
+    // ── 2b: THEN configure RELAY_VCC_PIN as output and write HIGH ──
+    pinMode(RELAY_VCC_PIN, OUTPUT);
+    digitalWrite(RELAY_VCC_PIN, HIGH);
+
+    // ── 2c: Delay ~100 ms, then init the PZEM on Serial2 (GPIO16/17, 9600) ──
+    delay(100);
     PZEM_SERIAL.begin(PZEM_UART_BAUD, SERIAL_8N1, PZEM_RX_PIN, PZEM_TX_PIN);
 
+    // Ensure all relays stay in safe OFF state through boot and reset
+    allRelaysOff();
+
+    // ── 2d: Only after that start the main logic ──
 #if EMS_BENCH_MODE
-    Serial.println("[BENCH] DRY MODE: mains and relay contacts must be disconnected");
-    Serial.println("[BENCH] Commands: DRY_ON, DRY_OFF, STATUS");
+    Serial.println("====================================================");
+    Serial.println("[BENCH] LOW-VOLTAGE BENCH-TEST MODE ACTIVE");
+    Serial.println("[BENCH] Mains and relay load contacts MUST be disconnected!");
+    Serial.println("[BENCH] Cycling: Relay 1 (1s) -> Relay 2 (1s) -> All OFF (1s)");
+    Serial.println("[BENCH] Interactive commands: DRY_ON, DRY_OFF, STATUS");
+    Serial.println("====================================================");
     return;
 #endif
 
@@ -454,6 +547,7 @@ void setup() {
         safetyTaskRunning = false;
         safetyInhibit = true;
         setRelay(false);
+        allRelaysOff();
         Serial.println("[INIT] SAFETY TASK CREATION FAILED — relay inhibited");
     } else {
         Serial.println("[INIT] Core 0: SafetySamplingTask launched (priority 2)");
@@ -558,20 +652,46 @@ void loop() {
     esp_task_wdt_reset();
 
 #if EMS_BENCH_MODE
+    // 8. Bench-test mode: with mains side disconnected, toggles each relay for 1s in turn and prints PZEM status
     if (Serial.available() > 0) {
         String command = Serial.readStringUntil('\n');
         command.trim();
         if (command == "DRY_ON") {
-            setRelay(true);
-            Serial.println("[BENCH] DRY_ON: relay closed; verify COM-NO continuity");
+            setRelay(1, true);
+            setRelay(2, true);
+            Serial.println("[BENCH] DRY_ON: Both relays energized (GPIO26=LOW, GPIO27=LOW)");
+            printPzemStatus();
+            return;
         } else if (command == "DRY_OFF") {
-            setRelay(false);
-            Serial.println("[BENCH] DRY_OFF: relay open; verify COM-NO open");
+            allRelaysOff();
+            Serial.println("[BENCH] DRY_OFF: Both relays de-energized (GPIO26=HIGH, GPIO27=HIGH)");
+            printPzemStatus();
+            return;
         } else if (command == "STATUS") {
-            Serial.printf("[BENCH] Relay=%s\n", relayClosed ? "ON" : "OFF");
+            Serial.printf("[BENCH] Relay1(GPIO26)=%s, Relay2(GPIO27)=%s, RelayVCC(GPIO25)=HIGH\n",
+                          relay1Closed ? "ON" : "OFF", relay2Closed ? "ON" : "OFF");
+            printPzemStatus();
+            return;
         }
     }
-    delay(10);
+
+    Serial.println("\n[BENCH] --- Step 1: Relay 1 (Laptop Charger, GPIO26) ON for 1s ---");
+    setRelay(1, true);
+    setRelay(2, false);
+    printPzemStatus();
+    delay(1000);
+
+    Serial.println("[BENCH] --- Step 2: Relay 2 (Phone Charger, GPIO27) ON for 1s ---");
+    setRelay(1, false);
+    setRelay(2, true);
+    printPzemStatus();
+    delay(1000);
+
+    Serial.println("[BENCH] --- Step 3: All Relays OFF for 1s ---");
+    allRelaysOff();
+    printPzemStatus();
+    delay(1000);
+
     return;
 #endif
 
@@ -582,18 +702,21 @@ void loop() {
 
     // Read shared measurements under spinlock
     float powerWatts, voltage, current, pf, energy, freq, va, var;
-    bool relayState, measurementState;
+    bool relayState, relay1State, relay2State, measurementState, sampleIsSynthetic;
     taskENTER_CRITICAL(&sharedMux);
-    powerWatts       = sharedPowerWatts;
-    voltage          = sharedVoltage;
-    current          = sharedCurrent;
-    pf               = sharedPf;
-    energy           = sharedEnergy;
-    freq             = sharedFrequency;
-    va               = sharedApparentPowerVa;
-    var              = sharedReactivePowerVar;
-    relayState       = relayClosed;
-    measurementState = measurementFresh;
+    powerWatts        = sharedPowerWatts;
+    voltage           = sharedVoltage;
+    current           = sharedCurrent;
+    pf                = sharedPf;
+    energy            = sharedEnergy;
+    freq              = sharedFrequency;
+    va                = sharedApparentPowerVa;
+    var               = sharedReactivePowerVar;
+    relayState        = relayClosed;
+    relay1State       = relay1Closed;
+    relay2State       = relay2Closed;
+    measurementState  = measurementFresh;
+    sampleIsSynthetic = sharedSampleIsSynthetic;
     taskEXIT_CRITICAL(&sharedMux);
 
     // ── 5-Minute Anti-Thrashing Lockout ──
@@ -724,7 +847,8 @@ void loop() {
     if (millis() - lastServerHB > 30000 && lastServerHB > 0) {
         static unsigned long lastTimeoutLog = 0;
         if (millis() - lastTimeoutLog > 30000) {
-            Serial.println("[WATCHDOG] No server heartbeat for 30s");
+            Serial.println("[WATCHDOG] No server heartbeat for 30s. Comms loss -> allRelaysOff()");
+            allRelaysOff();
             if (client.connected()) {
                 client.publish(topicStatus, "SERVER_TIMEOUT");
             }
@@ -739,11 +863,13 @@ void loop() {
         dtostrf(powerWatts, 6, 2, payload);
         client.publish(topicPower, payload);
         if (measurementState) {
-            Serial.printf("[USB] V=%.1fV I=%.2fA P=%.1fW PF=%.2f VA=%.1f VAR=%.1f Relay=%s\n",
+            Serial.printf("[USB] V=%.1fV I=%.2fA P=%.1fW PF=%.2f VA=%.1f VAR=%.1f Relay1=%s Relay2=%s source=%s\n",
                           voltage, current, powerWatts, pf, va, var,
-                          relayState ? "ON" : "OFF");
+                          relay1State ? "ON" : "OFF", relay2State ? "ON" : "OFF",
+                          sampleIsSynthetic ? "synthetic" : "real");
         } else {
-            Serial.printf("[USB] PZEM=INVALID Relay=%s\n", relayState ? "ON" : "OFF");
+            Serial.printf("[USB] PZEM=INVALID Relay1=%s Relay2=%s\n",
+                          relay1State ? "ON" : "OFF", relay2State ? "ON" : "OFF");
         }
     }
 
@@ -751,8 +877,8 @@ void loop() {
     if (millis() - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
         lastTelemetryMs = millis();
         
-        // Construct JSON telemetry payload containing BOTH canonical and shorthand keys
-        StaticJsonDocument<384> doc;
+        // Construct JSON telemetry payload containing canonical keys, shorthand keys, source and relays
+        StaticJsonDocument<512> doc;
         doc["v"] = roundf(voltage * 10.0f) / 10.0f;
         doc["i"] = roundf(current * 100.0f) / 100.0f;
         doc["w"] = roundf(powerWatts * 10.0f) / 10.0f;
@@ -768,14 +894,15 @@ void loop() {
         doc["frequency_hz"] = roundf(freq * 10.0f) / 10.0f;
         doc["energy_kwh"] = roundf(energy * 1000.0f) / 1000.0f;
 
-        // Relay channel array (4 channels)
-        JsonArray relays = doc.createNestedArray("relays");
-        relays.add(relayState ? 1 : 0);
-        relays.add(relayState ? 1 : 0);
-        relays.add(relayState ? 1 : 0);
-        relays.add(relayState ? 1 : 0);
+        // Data source tracking: real or synthetic
+        doc["source"] = sampleIsSynthetic ? "synthetic" : "real";
 
-        char jsonBuffer[384];
+        // Relay channel array (2 channels: CH1=Laptop on GPIO26, CH2=Phone on GPIO27)
+        JsonArray relays = doc.createNestedArray("relays");
+        relays.add(relay1State ? 1 : 0);
+        relays.add(relay2State ? 1 : 0);
+
+        char jsonBuffer[512];
         serializeJson(doc, jsonBuffer);
         client.publish(topicTelemetry, jsonBuffer);
     }

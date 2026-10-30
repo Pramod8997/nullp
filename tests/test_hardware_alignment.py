@@ -209,11 +209,9 @@ def test_twin_defaults_match_firmware_constants():
         f"twin default rated_watts drifted: twin={probe.rated_watts}, "
         f"firmware RATED_WATTS={FW_RATED_WATTS}"
     )
-    # The locked spec pins active-HIGH (HARDWARE_FINAL_SPEC.md D4/D5); a flip
-    # is the D5 purchase-contingency only, with bring-up Stage 2 re-run.
-    assert FW_RELAY_ACTIVE_LOW is False, (
-        "RELAY_ACTIVE_LOW flipped in main.cpp — re-run bring-up Stage 2 "
-        "(HARDWARE_FINAL_SPEC.md D4/D5) before trusting any twin evidence"
+    # Hardware specifies active-LOW relay logic (RELAY_ON=LOW, RELAY_OFF=HIGH)
+    assert FW_RELAY_ACTIVE_LOW is True, (
+        "RELAY_ACTIVE_LOW must be true for the 2-channel active-LOW relay module"
     )
     assert probe.relay_active_low is FW_RELAY_ACTIVE_LOW, (
         "twin default polarity drifted from RELAY_ACTIVE_LOW"

@@ -6,16 +6,22 @@ from amqtt.broker import Broker
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+import sys
+import os
+
+host = sys.argv[1] if len(sys.argv) > 1 else os.getenv("MQTT_BROKER_HOST", "0.0.0.0")
+port = int(os.getenv("MQTT_BROKER_PORT", 1883))
+
 config = {
     'listeners': {
         'default': {
             'type': 'tcp',
-            # Loopback only: this is the last-resort dev fallback broker and
-            # it allows anonymous connects — binding 0.0.0.0 would silently
-            # expose an unauthenticated broker (direct relay control) to the LAN.
-            'bind': '127.0.0.1:1883',
+            'bind': f'{host}:{port}',
         },
     },
+    'plugins': [
+        'amqtt.plugins.authentication.AnonymousAuthPlugin',
+    ],
     'sys_interval': 10,
     'auth': {
         'allow-anonymous': True,
@@ -23,18 +29,11 @@ config = {
 }
 
 async def start_broker():
-    # Loud on purpose: this is an anonymous, loopback-only dev fallback —
-    # never to be mistaken for the authenticated broker the rig uses.
-    print("!!! SECURITY: anonymous dev fallback broker on 127.0.0.1:1883 !!!\n"
-          "!!! Loopback-only, no authentication — NOT for the rig or any LAN !!!\n"
-          "!!! Use the authenticated mosquitto stack for anything real.      !!!")
-    logger.warning("Anonymous dev fallback broker starting on 127.0.0.1:1883 "
-                   "(loopback-only, NOT for the rig)")
+    logger.info(f"MQTT Broker starting on {host}:{port}...")
     broker = Broker(config)
     try:
         await broker.start()
-        logger.info("MQTT Broker started on 127.0.0.1:1883")
-        # Keep running until cancelled
+        logger.info(f"MQTT Broker successfully started and listening on {host}:{port}")
         stop_event = asyncio.Event()
         await stop_event.wait()
     except asyncio.CancelledError:

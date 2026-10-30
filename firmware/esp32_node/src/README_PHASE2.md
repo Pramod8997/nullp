@@ -5,11 +5,10 @@ The ESP32 firmware at `main.cpp` is a reference implementation for the physical 
 
 ## Phase 2: Hardware Deployment
 
-> **Current bench build:** 38-pin ESP32-WROOM-32 DevKit. The older 30-pin,
-> MOSFET-relay and 600 W instructions that remain in historical documents do
-> not apply to this build. Use `claude_debug/WIRING_STEP_BY_STEP.md` for the
-> current low-voltage pinout and `config/config.hardware.yaml` for the 250 W
-> hardware profile.
+> **Current bench build:** ESP32 DevKit V1 (30-pin). Boot strap pin GPIO 12 is
+> strictly avoided; GPIO 16/17 are reserved exclusively for PZEM UART2.
+> Use `docs/ems_hardware/ACTUAL_100A_CT_WIRING.md` for the current low-voltage
+> pinout and `config/config.hardware.yaml` for the 250 W hardware profile.
 
 ### Architecture
 - **Tier-0 Safety Relay**: Runs independently on ESP32 Core 0 (`SafetySamplingTask`, 100 ms). NO ML inference on device — the ESP32 publishes power readings via MQTT and trips the relay locally.
@@ -29,9 +28,15 @@ The ESP32 firmware at `main.cpp` is a reference implementation for the physical 
 - WiFi reconnection with exponential backoff
 
 ### Replacing the Simulator
-1. Flash `main.cpp` to the 38-pin ESP32 DevKit — **WROOM-32, not WROVER** (WROVER uses GPIO 16/17 for PSRAM, which are the PZEM UART pins)
-2. Wire the PZEM UART: GPIO 16 (RX2) ← PZEM TX, GPIO 17 (TX2) → PZEM RX. **Measure PZEM TX idle voltage first** — 5 V push-pull variants exceed the ESP32's 3.6 V absolute maximum (issue B-4)
-3. Set the relay module jumper to **H/high-trigger**. Wire GPIO 18 **directly** to relay IN1, with a **100 kΩ IN1→GND pull-down**. Do not insert the superseded BSS138/MOSFET path. Net polarity at the GPIO is **active-HIGH**, so `RELAY_ACTIVE_LOW = false`
+1. Flash `main.cpp` to the **ESP32 DevKit V1 (30-pin)** — **WROOM-32, not WROVER** (WROVER uses GPIO 16/17 for PSRAM, which are the PZEM UART pins)
+2. Wire the PZEM UART: GPIO 16 (RX2) ← PZEM TX, GPIO 17 (TX2) → PZEM RX (3.3V logic supply to PZEM 3V3 pin, 9600 baud, 8N1)
+3. Wire the 2-channel active-LOW relay module:
+   - IN1 (Relay 1, Laptop Charger) ← GPIO 26
+   - IN2 (Relay 2, Phone Charger) ← GPIO 27
+   - Opto VCC ← GPIO 25 (driven HIGH in setup() as 3.3V source for opto LEDs, few mA)
+   - Coil JD-VCC ← External 5V / VIN (jumper removed between VCC and JD-VCC)
+   - GND ← Common DC GND
+   - Polarity is **ACTIVE-LOW** (`RELAY_ON = LOW`, `RELAY_OFF = HIGH`). Startup order guarantees relays stay OFF through boot and reset.
 4. Set `DEVICE_ID`, `RATED_WATTS`, WiFi credentials and MQTT broker IP in firmware
 5. Remove `simulate_esp32.py` from the `Makefile` run target
 6. Run the pipeline with `--config config/config.hardware.yaml` (250 W ceiling). Do not use `config.demo.yaml` for the physical rig; the 600 W ceiling would make the hardware cutoff unreachable.

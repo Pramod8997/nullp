@@ -13,30 +13,29 @@
 # 38-pin/250 W physical scope below. The older 10 A shunt design is historical.
 
 hardware:
-  board: "ESP32-WROOM-32-38-pin"
+  board: "ESP32-DevKit-V1-30-pin"
   mains_voltage_v: 230.0
   mains_frequency_hz: 50.0
   pzem:
     model: "PZEM-004T v4.0 (100A)"
     topology: "external_ct"
-    ttl_header: [GND, TX, RX, 5V]
+    ttl_header: [GND, TX, RX, 3V3]
     uart_baud: 9600
     pzem_rx_pin: 16
     pzem_tx_pin: 17
-    tx_to_gpio16: "1k_2k_voltage_divider_to_3.3V"
+    tx_to_gpio16: "direct_3.3V_logic"
     ac_terminals: "1:Live, 2:Neutral, 3:CT+, 4:CT-"
     max_safe_current_a: 32.0
     max_safe_voltage_v: 260.0
     min_safe_voltage_v: 180.0
     physical_validation: "pending"
   relay:
-    available_channels: 4
-    channels: [26, 27, 14, 32]
+    available_channels: 2
+    channels: [26, 27]
     channel_pins:
       ch1: 26
       ch2: 27
-      ch3: 14
-      ch4: 32
+    vcc_pin: 25
     trigger_target: "active-low opto-isolated"
     active_low: true
     boot_state: "HIGH/OFF"

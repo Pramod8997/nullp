@@ -30,12 +30,16 @@ static int _unity_fails = 0;
 #endif
 
 // ═══════════════════════════════════════════════════════
-// Mock Hardware & Firmware Definitions
+// Mock Hardware & Firmware Definitions (ESP32 DevKit V1 30-pin)
 // ═══════════════════════════════════════════════════════
-#define RELAY_CH1_PIN 26
-#define RELAY_CH2_PIN 27
-#define RELAY_CH3_PIN 14
-#define RELAY_CH4_PIN 32   // Remapped from GPIO 12 (MTDI strapping pin hazard)
+#define PZEM_RX        16
+#define PZEM_TX        17
+#define PZEM_BAUD      9600
+#define RELAY_VCC_PIN  25
+#define RELAY1_PIN     26   // IN1 (Laptop Charger)
+#define RELAY2_PIN     27   // IN2 (Phone Charger)
+#define RELAY_CH1_PIN  26
+#define RELAY_CH2_PIN  27
 
 #define RELAY_ON  0        // Active-LOW relay logic: 0 = LOW (energised)
 #define RELAY_OFF 1        // Active-LOW relay logic: 1 = HIGH (de-energised)
@@ -44,7 +48,7 @@ static int _unity_fails = 0;
 #define MAX_SAFE_VOLTAGE_V 260.0f
 #define MIN_SAFE_VOLTAGE_V 180.0f
 
-int relay_channels[4] = {RELAY_OFF, RELAY_OFF, RELAY_OFF, RELAY_OFF};
+int relay_channels[2] = {RELAY_OFF, RELAY_OFF};
 bool safety_tripped = false;
 uint32_t last_heartbeat_ms = 0;
 int mqtt_publish_call_count = 0;
@@ -58,9 +62,15 @@ uint32_t millis(void) {
     return current_time_ms;
 }
 
-// Actuate all 4 relay channels with active-LOW logic
+// Set relay channel applying active-LOW logic
+void set_relay_channel(int ch, int state) {
+    if (ch == 1) relay_channels[0] = state;
+    else if (ch == 2) relay_channels[1] = state;
+}
+
+// Actuate all relay channels with active-LOW logic
 void set_all_relays(int state, const char* device) {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 2; i++) {
         relay_channels[i] = state;
     }
     mqtt_publish_call_count++;
@@ -71,6 +81,10 @@ void set_all_relays(int state, const char* device) {
         snprintf(last_mqtt_topic, sizeof(last_mqtt_topic), "home/plug/%s/ack", device);
         snprintf(last_mqtt_payload, sizeof(last_mqtt_payload), "ON_CONFIRMED");
     }
+}
+
+void all_relays_off(void) {
+    set_all_relays(RELAY_OFF, "test_device");
 }
 
 // ═══════════════════════════════════════════════════════
@@ -152,7 +166,7 @@ uint32_t get_next_reconnect_interval(void) {
 }
 
 void setUp(void) {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 2; i++) {
         relay_channels[i] = RELAY_ON;
     }
     safety_tripped = false;
@@ -194,13 +208,14 @@ void test_pzem_nan_handling_does_not_crash(void) {
     TEST_ASSERT_TRUE(validate_pzem_reading(230.0f, 1.5f, 345.0f, 1.0f));
 }
 
-/* TEST 3: GPIO 32 Pin Mapping Hazard Elimination (MTDI GPIO 12 avoided) */
-void test_gpio32_pin_mapping_avoids_strapping_hazard(void) {
-    TEST_ASSERT_EQUAL_INT(26, RELAY_CH1_PIN);
-    TEST_ASSERT_EQUAL_INT(27, RELAY_CH2_PIN);
-    TEST_ASSERT_EQUAL_INT(14, RELAY_CH3_PIN);
-    TEST_ASSERT_EQUAL_INT(32, RELAY_CH4_PIN);
-    TEST_ASSERT(RELAY_CH4_PIN != 12); // Must NOT be GPIO 12 MTDI strapping pin
+/* TEST 3: Hardware Pin Mapping Hazard Elimination (MTDI GPIO 12 avoided) */
+void test_hardware_pin_mapping_avoids_strapping_hazard(void) {
+    TEST_ASSERT_EQUAL_INT(26, RELAY1_PIN);
+    TEST_ASSERT_EQUAL_INT(27, RELAY2_PIN);
+    TEST_ASSERT_EQUAL_INT(25, RELAY_VCC_PIN);
+    TEST_ASSERT_EQUAL_INT(16, PZEM_RX);
+    TEST_ASSERT_EQUAL_INT(17, PZEM_TX);
+    TEST_ASSERT(RELAY1_PIN != 12 && RELAY2_PIN != 12 && RELAY_VCC_PIN != 12); // Must NOT be GPIO 12 MTDI strapping pin
 }
 
 /* TEST 4: Active-LOW Relay Polarity Macros */
@@ -216,7 +231,7 @@ void test_safety_trip_overcurrent(void) {
     TEST_ASSERT_TRUE(tripped);
     TEST_ASSERT_TRUE(safety_tripped);
     TEST_ASSERT_EQUAL_INT(RELAY_OFF, relay_channels[0]);
-    TEST_ASSERT_EQUAL_INT(RELAY_OFF, relay_channels[3]);
+    TEST_ASSERT_EQUAL_INT(RELAY_OFF, relay_channels[1]);
 }
 
 /* TEST 6: Autonomous Overvoltage & Undervoltage Protection Trip */
@@ -286,7 +301,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_pzem_metrics_calculation);
     RUN_TEST(test_pzem_nan_handling_does_not_crash);
-    RUN_TEST(test_gpio32_pin_mapping_avoids_strapping_hazard);
+    RUN_TEST(test_hardware_pin_mapping_avoids_strapping_hazard);
     RUN_TEST(test_active_low_relay_polarity);
     RUN_TEST(test_safety_trip_overcurrent);
     RUN_TEST(test_safety_trip_voltage_extremes);

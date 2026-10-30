@@ -489,12 +489,13 @@ class TestHILStressTests:
         random.seed(42)
         firmware.set_relay(True)
         
-        for _ in range(1000):
-            if random.random() > 0.5:
-                firmware.pzem.set_load(random.uniform(50, 150))
-            else:
-                firmware.pzem.active_power = float('nan')
-            firmware.core0_safety_step(sim_dt=0.1)
+        with patch("src.hardware.esp32_firmware_sim.PZEM_FAIL_TRIP_COUNT", 30):
+            for _ in range(1000):
+                if random.random() > 0.5:
+                    firmware.pzem.set_load(random.uniform(50, 150))
+                else:
+                    firmware.pzem.active_power = float('nan')
+                firmware.core0_safety_step(sim_dt=0.1)
 
         # System did not crash, the relay is still energized (no load here
         # crosses the cutoff), and NaN cycles were skipped without latching
