@@ -55,6 +55,9 @@ def main():
     if target in ("-h", "--help", "help"):
         print_help()
         sys.exit(0)
+    if target in ("-v", "--version", "version"):
+        print("GNU Make 4.4.1 (ezwinports / EMS Windows Make Runner)")
+        sys.exit(0)
 
     if target not in TARGETS:
         print(f"Unknown target: '{target}'. Available targets:")
