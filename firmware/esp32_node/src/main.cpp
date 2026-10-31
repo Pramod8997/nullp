@@ -1,51 +1,43 @@
 /**
- * Module 7: Production ESP32 Firmware — Dual-Core FreeRTOS
+ * Module 7: Production ESP32 Firmware — Dual-Core FreeRTOS (Hybrid Node)
  *
  * Edge-hybrid safety architecture for the Smart Home EMS.
- * ESP32 DevKit V1 (30-pin)
- * PZEM-004T-100A V4.0 (100A split-core CT) on UART2 (RX=16, TX=17, 9600 baud, 3.3V logic)
+ * ESP32 DevKit V1 (30-pin / 38-pin)
  * 2-Channel Active-LOW Opto-Isolated Relay Module:
- *   - Relay 1 (Laptop Charger) = GPIO 26
- *   - Relay 2 (Phone Charger)  = GPIO 27
- *   - Relay Opto VCC           = GPIO 25 (3.3V source driven HIGH)
+ *   - Relay 1 (Laptop Charger, ~65W) = GPIO 26 (High Priority)
+ *   - Relay 2 (Phone Charger,  ~25W) = GPIO 27 (Low Priority, Auto-Shed)
+ *   - Relay Opto VCC                 = GPIO 25 (3.3V source driven HIGH)
  *   - Active-LOW: LOW = ON, HIGH = OFF
  *   - JD-VCC = VIN (5V)
  *
- * CORE 0 (High Priority — SafetySamplingTask):
- *   - PZEM polling at 1-second interval over Hardware UART2
- *   - Edge-local arc-fault proxy (dP/dt > 1000 W/s)
- *   - Dynamic inrush suppression via 5-sample sliding baseline
- *   - Unconditional overcurrent, overvoltage & undervoltage protection
- *   - Hardware task watchdog feeding (5-second timeout)
- *   - PZEM loss-of-measurement watchdog (default 5 consecutive failed reads)
- *   - Synthetic fallback telemetry generation when PZEM is offline or disabled
- *   - Immediate relay cutoff / safe state (allRelaysOff) — zero network dependency
+ * SIMULATED TELEMETRY (PZEM Disconnected):
+ *   - Realistic mains AC: ~230V AC fluctuating (228.5V - 231.5V), ~50.0 Hz
+ *   - Active Power: 0W (both OFF), ~65W (Relay 1), ~25W (Relay 2), ~90W (Both)
+ *   - Current: Calculated dynamically as P / (V * PF)
+ *   - Power Factor: 0.00 (OFF), ~0.95 (Relay 1), ~0.88 (Relay 2), ~0.92 (Both)
+ *   - Energy (kWh): Real-time numeric integration
  *
- * CORE 1 (Standard Priority — Arduino loop):
- *   - Non-blocking MQTT client.loop() and reconnect
- *   - Hardware task watchdog feeding (5-second timeout)
- *   - 1Hz fast power broadcast (plain float string)
- *   - 1Hz rich electrical diagnostic telemetry (JSON object with canonical & shorthand keys, source=real|synthetic)
- *   - Incoming relay command handler (ON/OFF/WARNING/reset_safety)
- *   - Safety trip latch consumption -> lockout & MQTT status alert publishing
+ * LOAD SHEDDING PROTECTION (80W Ceiling):
+ *   - If total power exceeds 80W (both relays ON ~90W), 3-second grace countdown triggers.
+ *   - After 3 continuous seconds, Relay 2 (Phone Charger) is automatically shed.
+ *   - Relay 1 (Laptop Charger) is kept safely ON.
  *
- * MQTT Topics (must match pipeline config.yaml):
- *   Publish:   home/sensor/{DEVICE_ID}/power       (plain float string)
- *   Publish:   home/sensor/{DEVICE_ID}/telemetry   (rich JSON diagnostics)
- *   Subscribe: home/plug/{DEVICE_ID}/command       (ON/OFF/WARNING/reset_safety)
- *   Publish:   home/sensor/{DEVICE_ID}/status      (alerts and lifecycle)
- *   Publish:   home/plug/{DEVICE_ID}/ack           (relay confirmations)
+ * COMMUNICATIONS:
+ *   - Dual-Mode WiFi: Connects to local WiFi or falls back to SoftAP "Smart_EMS_Demo"
+ *   - Web Dashboard on Port 80: Modern dark-mode HTML/JS UI with live /status AJAX
+ *   - MQTT: Subscribes to home/plug/{DEVICE_ID}/command (IN1_ON, IN1_OFF, IN2_ON, IN2_OFF, ON, OFF)
+ *           Publishes to home/sensor/{DEVICE_ID}/power and telemetry
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WebServer.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <math.h>
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <PZEM004Tv30.h>
 
 #if !__has_include("secrets.h")
 #error "Missing firmware/esp32_node/include/secrets.h - copy secrets.h.example to secrets.h and fill in credentials."
@@ -54,7 +46,7 @@
 #include "hardware_config.h"
 
 // ═══════════════════════════════════════════════════════
-//  CONFIGURATION — set these in include/secrets.h
+//  CONFIGURATION
 // ═══════════════════════════════════════════════════════
 const char* DEVICE_ID      = EMS_DEVICE_ID;
 const char* ssid           = EMS_WIFI_SSID;
@@ -64,96 +56,85 @@ const int   mqtt_port      = EMS_MQTT_PORT;
 const char* mqtt_user      = EMS_MQTT_USER;
 const char* mqtt_password  = EMS_MQTT_PASSWORD;
 
-const float RATED_WATTS    = ems_hardware::RATED_WATTS;
-const float POWER_FACTOR   = ems_hardware::POWER_FACTOR;
+// Fallback SoftAP Hotspot
+const char* AP_SSID        = "Smart_EMS_Demo";
+const char* AP_PASSWORD    = "12345678";
 
-// ═══════════════════════════════════════════════════════
-//  HARDWARE PINS & CONSTANTS
-// ═══════════════════════════════════════════════════════
-const int   RELAY_PIN        = ems_hardware::RELAY_PIN;
-const bool  RELAY_ACTIVE_LOW = ems_hardware::RELAY_ACTIVE_LOW;
-// const int   PZEM_RX_PIN      = 16;
-// const int   PZEM_TX_PIN      = 17;
-const float VOLTAGE          = ems_hardware::MAINS_VOLTAGE_V;
-const float CRITICAL_PCT     = ems_hardware::CRITICAL_PCT;
+// Hardware Pins
+const int PIN_RELAY_1      = RELAY1_PIN;     // GPIO 26
+const int PIN_RELAY_2      = RELAY2_PIN;     // GPIO 27
+const int PIN_OPTO_VCC     = RELAY_VCC_PIN; // GPIO 25
 
-// 2-Channel Active-LOW Relay Pins (Relay 1 = GPIO 26, Relay 2 = GPIO 27)
-const int RELAY_PINS[2] = {RELAY1_PIN, RELAY2_PIN};
+// Relay logic levels (Active-LOW opto-isolated relay: LOW = ON / Closed, HIGH = OFF / Cutoff)
+#define RELAY_ON  LOW
+#define RELAY_OFF HIGH
 
-// PZEM Instance on Hardware UART2 (PZEM_SERIAL = Serial2, RX: GPIO 16, TX: GPIO 17, 9600 baud)
-PZEM004Tv30 pzem(PZEM_SERIAL, PZEM_RX, PZEM_TX);
-
-// Edge Arc-Fault & Safety Constants
-const float EDGE_ROC_THRESHOLD      = ems_hardware::EDGE_ROC_THRESHOLD_W_PER_S;
-const int   BASELINE_WINDOW         = ems_hardware::BASELINE_WINDOW;
-const float BASELINE_INRUSH_CEIL    = ems_hardware::BASELINE_INRUSH_CEIL_W;
-const float INRUSH_HEADROOM         = ems_hardware::INRUSH_HEADROOM_W;
-const unsigned long SAFETY_LOCKOUT_MS = ems_hardware::SAFETY_LOCKOUT_MS;
-
-// PZEM Loss-of-Measurement Watchdog
-const int PZEM_FAIL_TRIP_COUNT      = ems_hardware::PZEM_FAIL_TRIP_COUNT;
-const unsigned long PZEM_MAX_BLIND_MS = ems_hardware::PZEM_MAX_BLIND_MS;
-const float PZEM_MIN_VALID_VOLTAGE_V  = ems_hardware::PZEM_MIN_VALID_VOLTAGE_V;
-const float PZEM_MAX_VALID_VOLTAGE_V  = ems_hardware::PZEM_MAX_VALID_VOLTAGE_V;
-const float PZEM_MAX_VALID_CURRENT_A  = ems_hardware::PZEM_MAX_VALID_CURRENT_A;
-const float PZEM_MAX_VALID_POWER_W    = ems_hardware::PZEM_MAX_VALID_POWER_W;
+// Overload Protection Thresholds
+const float OVERLOAD_POWER_THRESHOLD = 80.0f; // Watts
+const unsigned long OVERLOAD_TIME_MS = 3000;   // 3 Seconds
 
 // ═══════════════════════════════════════════════════════
 //  SHARED STATE (Core 0 <-> Core 1)
 // ═══════════════════════════════════════════════════════
-portMUX_TYPE sharedMux = portMUX_INITIALIZER_UNLOCKED;
+SemaphoreHandle_t stateMutex = nullptr;
 
-volatile float sharedPowerWatts      = 0.0f;
-volatile float sharedVoltage         = ems_hardware::MAINS_VOLTAGE_V;
-volatile float sharedCurrent         = 0.0f;
-volatile float sharedPf              = ems_hardware::POWER_FACTOR;
-volatile float sharedEnergy          = 0.0f;
-volatile float sharedFrequency       = ems_hardware::MAINS_FREQUENCY_HZ;
-volatile float sharedApparentPowerVa = 0.0f;
+inline void acquireStateLock() {
+    if (stateMutex != nullptr) {
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+    }
+}
+
+inline void releaseStateLock() {
+    if (stateMutex != nullptr) {
+        xSemaphoreGive(stateMutex);
+    }
+}
+
+volatile float sharedPowerWatts       = 0.0f;
+volatile float sharedVoltage          = 230.0f;
+volatile float sharedCurrent          = 0.0f;
+volatile float sharedPf               = 0.00f;
+volatile float sharedEnergy           = 0.0f;
+volatile float sharedFrequency        = 50.0f;
+volatile float sharedApparentPowerVa  = 0.0f;
 volatile float sharedReactivePowerVar = 0.0f;
-volatile bool  sharedSampleIsSynthetic = false;
 
-volatile bool  sharedArcFault        = false;
-volatile float sharedArcFaultRoC     = 0.0f;
-volatile bool  sharedOvercurrentLatch = false;
-volatile bool  sharedOvervoltageLatch = false;
-volatile bool  sharedUndervoltageLatch = false;
-volatile bool  sharedPzemFault       = false;
+volatile bool  relay1Closed           = false;
+volatile bool  relay2Closed           = false;
+volatile bool  relayClosed            = false;
+volatile bool  autoOverloadEnabled    = true;
 
-// Autonomous safety trip latch (must be cleared explicitly by reset_safety command or lockout)
-volatile bool  safetyTripped         = false;
+volatile bool  overloadTimingActive   = false;
+volatile unsigned long overloadStartMs = 0;
+volatile float overloadCountdownSec   = 0.0f;
+volatile unsigned int overloadTripCount = 0;
+volatile bool  overloadShedEvent      = false;
 
-// Command queues and gates
-volatile bool  pendingRelayOn        = false;
-volatile bool  pendingRelayOff       = false;
-volatile bool  pendingCh1On          = false;
-volatile bool  pendingCh1Off         = false;
-volatile bool  pendingCh2On          = false;
-volatile bool  pendingCh2Off         = false;
-volatile bool  pendingAck            = false;
-volatile uint8_t pendingAckType      = 0; // 0=none, 1=ON_CONFIRMED, 2=OFF_CONFIRMED, 3=LOCKOUT_NACK, 4=CH1_OFF, 5=CH1_ON, 6=CH2_OFF, 7=CH2_ON
-volatile bool  safetyInhibit         = false;
-volatile bool  measurementFresh      = false;
-volatile unsigned long lastSuccessfulPzemReadMs = 0;
-volatile bool  safetyTaskRunning     = false;
-TaskHandle_t   safetyTaskHandle      = nullptr;
+// Command queues from Core 1 / MQTT to Core 0
+volatile bool  pendingRelayOn         = false;
+volatile bool  pendingRelayOff        = false;
+volatile bool  pendingCh1On           = false;
+volatile bool  pendingCh1Off          = false;
+volatile bool  pendingCh2On           = false;
+volatile bool  pendingCh2Off          = false;
+volatile bool  pendingAck             = false;
+volatile uint8_t pendingAckType       = 0; // 1=ON, 2=OFF, 4=CH1_OFF, 5=CH1_ON, 6=CH2_OFF, 7=CH2_ON
 
-volatile bool  relay1Closed          = false;
-volatile bool  relay2Closed          = false;
-volatile bool  relayClosed           = false;
+TaskHandle_t   safetyTaskHandle       = nullptr;
+String         sharedAlertMessage     = "System Initialized. Circuits Nominal.";
 
 // ═══════════════════════════════════════════════════════
-//  CORE 1 STATE (Arduino loop — not shared)
+//  CORE 1 STATE (Network, WebServer, MQTT)
 // ═══════════════════════════════════════════════════════
 WiFiClient espClient;
 PubSubClient client(espClient);
+WebServer server(80);
 
 char activeDeviceId[32]    = "node_bench_agg";
-bool relayLocked           = false;
-unsigned long lockStartMs  = 0;
 unsigned long lastMsgMs    = 0;
 unsigned long lastTelemetryMs = 0;
 unsigned long lastServerHB = 0;
+unsigned long lastReconnectAttempt = 0;
 
 char topicPower[64];
 char topicTelemetry[64];
@@ -162,442 +143,788 @@ char topicStatus[64];
 char topicAck[64];
 
 // ═══════════════════════════════════════════════════════
-//  RELAY CONTROL (3. Single function for active-LOW mapping)
+//  HARDWARE RELAY CONTROL
 // ═══════════════════════════════════════════════════════
-void setRelay(uint8_t channel, bool on) {
+void applyRelayHardware(uint8_t channel, bool on) {
     uint8_t pinState = on ? RELAY_ON : RELAY_OFF;
     if (channel == 1) {
-        digitalWrite(RELAY1_PIN, pinState);
+        digitalWrite(PIN_RELAY_1, pinState);
         relay1Closed = on;
     } else if (channel == 2) {
-        digitalWrite(RELAY2_PIN, pinState);
+        digitalWrite(PIN_RELAY_2, pinState);
         relay2Closed = on;
     }
-    relayClosed = on;
-    if (!relay1Closed && !relay2Closed) {
-        relayClosed = false;
-    } else {
-        relayClosed = true;
-    }
+    relayClosed = (relay1Closed || relay2Closed);
+    Serial.printf("[RELAY] Channel %d -> %s (GPIO %d: %s)\n", channel, on ? "ON (Current Flowing)" : "OFF (Cutoff)", channel == 1 ? PIN_RELAY_1 : PIN_RELAY_2, on ? "HIGH 3.3V" : "LOW 0V");
 }
 
-// Convenience overload for controlling all relay channels
-void setRelay(bool on) {
-    setRelay(1, on);
-    setRelay(2, on);
-    relayClosed = on;
-}
-
-// 4. Safe-state function: writes HIGH (RELAY_OFF) to GPIO26 and GPIO27
 void allRelaysOff() {
-    setRelay(1, false);
-    setRelay(2, false);
+    applyRelayHardware(1, false);
+    applyRelayHardware(2, false);
     relayClosed = false;
 }
 
-#if EMS_BENCH_MODE
-void printPzemStatus() {
-    float v = pzem.voltage();
-    float i = pzem.current();
-    float p = pzem.power();
-    float pf = pzem.pf();
-    if (!isfinite(v) || !isfinite(i) || !isfinite(p)) {
-        Serial.println("[BENCH] PZEM status: OFFLINE / READ FAILED (normal when 230V AC mains is disconnected)");
-    } else {
-        Serial.printf("[BENCH] PZEM status: OK -> V=%.1fV, I=%.3fA, P=%.1fW, PF=%.2f\n", v, i, p, pf);
+// ═══════════════════════════════════════════════════════
+//  EMBEDDED WEB DASHBOARD HTML (Stored in PROGMEM)
+// ═══════════════════════════════════════════════════════
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Home EMS | ESP32 Node</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(22, 30, 49, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --primary: #38bdf8;
+      --primary-glow: rgba(56, 189, 248, 0.25);
+      --accent-green: #10b981;
+      --accent-green-glow: rgba(16, 185, 129, 0.35);
+      --accent-amber: #f59e0b;
+      --accent-red: #ef4444;
+      --accent-red-glow: rgba(239, 68, 68, 0.45);
     }
-}
-#endif
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+    body {
+      background: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b0f19 75%);
+      color: var(--text-main);
+      min-height: 100vh;
+      padding: 20px 14px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container { width: 100%; max-width: 900px; }
+    header {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      border-radius: 16px;
+      padding: 20px 24px;
+      margin-bottom: 18px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+    .header-titles h1 {
+      font-size: 1.45rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: linear-gradient(135deg, #fff 30%, #38bdf8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .header-titles p { font-size: 0.85rem; color: var(--text-muted); margin-top: 4px; }
+    .badge-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      padding: 5px 10px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+      color: #cbd5e1;
+    }
+    .badge-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+    .badge-dot.pulse { animation: pulseAnim 1.5s infinite; }
+    @keyframes pulseAnim { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.3); } }
+
+    #alertBanner {
+      display: none;
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid var(--accent-red);
+      border-radius: 14px;
+      padding: 14px 18px;
+      margin-bottom: 18px;
+      box-shadow: 0 0 20px var(--accent-red-glow);
+    }
+    #alertBanner.warning-state {
+      background: rgba(245, 158, 11, 0.15);
+      border-color: var(--accent-amber);
+      box-shadow: 0 0 20px rgba(245, 158, 11, 0.35);
+    }
+    .alert-content { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .alert-text { font-size: 0.9rem; font-weight: 600; line-height: 1.4; color: #fee2e2; }
+    .alert-btn {
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #fff;
+      padding: 6px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.78rem;
+    }
+    .countdown-bar-wrap {
+      width: 100%;
+      height: 6px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 10px;
+    }
+    .countdown-bar {
+      height: 100%;
+      width: 100%;
+      background: linear-gradient(90deg, #f59e0b, #ef4444);
+      transition: width 0.2s linear;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    .metric-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      border-radius: 16px;
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+    }
+    .metric-title { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .metric-val { font-size: 1.95rem; font-weight: 800; color: #fff; letter-spacing: -0.03em; }
+    .metric-unit { font-size: 0.95rem; font-weight: 500; color: var(--primary); margin-left: 2px; }
+    .metric-sub { font-size: 0.75rem; color: var(--text-muted); margin-top: 6px; display: flex; align-items: center; justify-content: space-between; }
+    .power-progress-wrap {
+      height: 8px;
+      width: 100%;
+      background: rgba(255,255,255,0.06);
+      border-radius: 6px;
+      overflow: hidden;
+      margin-top: 10px;
+    }
+    .power-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #10b981, #38bdf8);
+      border-radius: 6px;
+      transition: width 0.4s ease;
+    }
+    .power-progress-bar.warning { background: linear-gradient(90deg, #38bdf8, #f59e0b); }
+    .power-progress-bar.danger { background: linear-gradient(90deg, #f59e0b, #ef4444); box-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }
+
+    .section-title {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      margin: 10px 0 14px 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .relays-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    .relay-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      border-radius: 18px;
+      padding: 22px;
+      transition: all 0.25s ease;
+    }
+    .relay-card.is-on {
+      border-color: rgba(16, 185, 129, 0.4);
+      box-shadow: 0 8px 24px rgba(16, 185, 129, 0.12);
+    }
+    .relay-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; }
+    .relay-name-box h3 { font-size: 1.15rem; font-weight: 700; color: #fff; }
+    .relay-pin-tag { font-size: 0.72rem; color: #94a3b8; font-weight: 600; text-transform: uppercase; margin-top: 3px; }
+    .relay-status-pill {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: rgba(148, 163, 184, 0.15);
+      color: #94a3b8;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+    .relay-status-pill.on {
+      background: rgba(16, 185, 129, 0.2);
+      color: #34d399;
+      border-color: rgba(16, 185, 129, 0.4);
+      box-shadow: 0 0 12px rgba(16, 185, 129, 0.3);
+    }
+    .relay-desc { font-size: 0.83rem; color: var(--text-muted); line-height: 1.45; margin-bottom: 20px; }
+    .relay-footer { display: flex; justify-content: space-between; align-items: center; }
+    .priority-tag { font-size: 0.72rem; font-weight: 600; padding: 4px 8px; border-radius: 6px; }
+    .priority-high { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.25); }
+    .priority-low { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.25); }
+
+    .switch { position: relative; display: inline-block; width: 58px; height: 32px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #334155; transition: .3s; border-radius: 34px; border: 1px solid rgba(255,255,255,0.1);
+    }
+    .slider:before {
+      position: absolute; content: ""; height: 24px; width: 24px; left: 4px; bottom: 3px;
+      background-color: #f1f5f9; transition: .3s; border-radius: 50%;
+    }
+    input:checked + .slider { background-color: var(--accent-green); box-shadow: 0 0 16px var(--accent-green-glow); }
+    input:checked + .slider:before { transform: translateX(24px); }
+
+    .protect-card {
+      background: var(--card-bg); border: 1px solid var(--card-border); backdrop-filter: blur(12px);
+      border-radius: 16px; padding: 18px 22px; margin-bottom: 18px; display: flex; flex-wrap: wrap;
+      justify-content: space-between; align-items: center; gap: 16px;
+    }
+    .protect-info h4 { font-size: 1rem; font-weight: 700; color: #f1f5f9; }
+    .protect-info p { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; max-width: 620px; }
+
+    footer { text-align: center; font-size: 0.76rem; color: #64748b; margin-top: 10px; padding: 10px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-titles">
+        <h1>⚡ Smart Home EMS Node</h1>
+        <p>ESP32 Dual-Core Hybrid Controller (MQTT + Embedded Web Dashboard)</p>
+      </div>
+      <div class="badge-bar">
+        <div class="badge"><div class="badge-dot pulse"></div><span id="wifiMode">Connecting...</span></div>
+        <div class="badge">🌐 <span id="ipAddr">--</span></div>
+        <div class="badge">📡 MQTT: <span id="mqttStatus">Connecting...</span></div>
+      </div>
+    </header>
+
+    <div id="alertBanner">
+      <div class="alert-content">
+        <div class="alert-text" id="alertText">⚠️ System Alert Active</div>
+        <button class="alert-btn" onclick="clearAlert()">Dismiss</button>
+      </div>
+      <div class="countdown-bar-wrap" id="countdownWrap">
+        <div class="countdown-bar" id="countdownBar"></div>
+      </div>
+    </div>
+
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-title"><span>Active Power</span><span style="font-size:0.7rem; color: #38bdf8;">Limit: 80W</span></div>
+        <div><span class="metric-val" id="valPower">0.0</span><span class="metric-unit">W</span></div>
+        <div class="power-progress-wrap"><div class="power-progress-bar" id="powerBar"></div></div>
+        <div class="metric-sub"><span>Target ~90W max</span><span id="powerStatus">Idle (0W)</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title"><span>Mains Voltage</span><span>Grid</span></div>
+        <div><span class="metric-val" id="valVoltage">230.0</span><span class="metric-unit">V</span></div>
+        <div class="metric-sub"><span>Freq: <b id="valFreq" style="color:#e2e8f0;">50.0</b> Hz</span><span style="color:#10b981;">Nominal</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title"><span>AC Current</span><span>Calculated</span></div>
+        <div><span class="metric-val" id="valCurrent">0.000</span><span class="metric-unit">A</span></div>
+        <div class="metric-sub"><span>PF: <b id="valPF" style="color:#e2e8f0;">0.00</b></span><span>Active</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title"><span>Cumulative Energy</span><span>kWh</span></div>
+        <div><span class="metric-val" id="valEnergy">0.0000</span><span class="metric-unit">kWh</span></div>
+        <div class="metric-sub"><span>Real-time integrate</span><span style="color:#a855f7;">Active</span></div>
+      </div>
+    </div>
+
+    <div class="section-title"><span>🔌 Physical Relay Sockets</span><span style="font-size: 0.78rem; font-weight: 500; color: #94a3b8;">(Active-LOW: 0V=ON, 3.3V=OFF)</span></div>
+    <div class="relays-grid">
+      <div class="relay-card" id="relay1Card">
+        <div class="relay-header">
+          <div class="relay-name-box">
+            <h3>Socket 1: Laptop Charger</h3>
+            <div class="relay-pin-tag">ESP32: GPIO 26 • ~65W</div>
+          </div>
+          <div class="relay-status-pill" id="relay1Pill">STANDBY</div>
+        </div>
+        <div class="relay-desc">Primary essential load. Protected from load shedding. Controlled via Web Dashboard & MQTT.</div>
+        <div class="relay-footer">
+          <span class="priority-tag priority-high">★ HIGH PRIORITY</span>
+          <label class="switch"><input type="checkbox" id="relay1Toggle" onchange="toggleRelay(1, this.checked)"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="relay-card" id="relay2Card">
+        <div class="relay-header">
+          <div class="relay-name-box">
+            <h3>Socket 2: Phone Charger</h3>
+            <div class="relay-pin-tag">ESP32: GPIO 27 • ~25W</div>
+          </div>
+          <div class="relay-status-pill" id="relay2Pill">STANDBY</div>
+        </div>
+        <div class="relay-desc">Secondary load. Automatically shed after 3s if total circuit power exceeds 80W.</div>
+        <div class="relay-footer">
+          <span class="priority-tag priority-low">⚡ LOW PRIORITY (SHED)</span>
+          <label class="switch"><input type="checkbox" id="relay2Toggle" onchange="toggleRelay(2, this.checked)"><span class="slider"></span></label>
+        </div>
+      </div>
+    </div>
+
+    <div class="protect-card">
+      <div class="protect-info">
+        <h4>🛡️ Auto Overload Protection (80W Ceiling)</h4>
+        <p>When both sockets are ON (~90W), triggers a 3-second grace countdown and automatically turns OFF Socket 2.</p>
+        <div style="font-size: 0.75rem; color:#f59e0b; margin-top: 6px;">Total Shed Events: <b id="tripCounter">0</b></div>
+      </div>
+      <label class="switch"><input type="checkbox" id="autoOverloadToggle" onchange="toggleAutoOverload(this.checked)"><span class="slider"></span></label>
+    </div>
+
+    <footer>Smart Home Energy Management System &bull; ESP32 Edge Node &bull; Dual-Core FreeRTOS</footer>
+  </div>
+
+  <script>
+    let isRequesting = false;
+    async function fetchStatus() {
+      if (isRequesting) return;
+      isRequesting = true;
+      try {
+        const res = await fetch('/status');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        updateUI(data);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        isRequesting = false;
+      }
+    }
+
+    function updateUI(data) {
+      document.getElementById('wifiMode').textContent = data.wifi_mode;
+      document.getElementById('ipAddr').textContent = data.ip;
+      document.getElementById('mqttStatus').textContent = data.mqtt_connected ? 'ONLINE' : 'CONNECTING...';
+      document.getElementById('valPower').textContent = data.power.toFixed(1);
+      document.getElementById('valVoltage').textContent = data.voltage.toFixed(1);
+      document.getElementById('valFreq').textContent = data.frequency.toFixed(1);
+      document.getElementById('valCurrent').textContent = data.current.toFixed(3);
+      document.getElementById('valPF').textContent = data.pf.toFixed(2);
+      document.getElementById('valEnergy').textContent = data.energy.toFixed(5);
+      document.getElementById('tripCounter').textContent = data.trip_count;
+
+      const powerPct = Math.min((data.power / 100) * 100, 100);
+      const pBar = document.getElementById('powerBar');
+      pBar.style.width = powerPct + '%';
+      pBar.className = 'power-progress-bar';
+      const pStatus = document.getElementById('powerStatus');
+      if (data.power > 80.0) {
+        pBar.classList.add('danger');
+        pStatus.textContent = 'OVERLOAD (>80W)';
+        pStatus.style.color = '#ef4444';
+      } else if (data.power > 60.0) {
+        pBar.classList.add('warning');
+        pStatus.textContent = 'High Load';
+        pStatus.style.color = '#f59e0b';
+      } else if (data.power > 0) {
+        pStatus.textContent = 'Normal Load';
+        pStatus.style.color = '#10b981';
+      } else {
+        pStatus.textContent = 'Idle (0W)';
+        pStatus.style.color = '#94a3b8';
+      }
+
+      const r1Toggle = document.getElementById('relay1Toggle');
+      if (document.activeElement !== r1Toggle) r1Toggle.checked = data.relay1;
+      const r1Card = document.getElementById('relay1Card');
+      const r1Pill = document.getElementById('relay1Pill');
+      if (data.relay1) {
+        r1Card.classList.add('is-on');
+        r1Pill.textContent = 'LIVE ON (~65W)';
+        r1Pill.classList.add('on');
+      } else {
+        r1Card.classList.remove('is-on');
+        r1Pill.textContent = 'STANDBY (0W)';
+        r1Pill.classList.remove('on');
+      }
+
+      const r2Toggle = document.getElementById('relay2Toggle');
+      if (document.activeElement !== r2Toggle) r2Toggle.checked = data.relay2;
+      const r2Card = document.getElementById('relay2Card');
+      const r2Pill = document.getElementById('relay2Pill');
+      if (data.relay2) {
+        r2Card.classList.add('is-on');
+        r2Pill.textContent = 'LIVE ON (~25W)';
+        r2Pill.classList.add('on');
+      } else {
+        r2Card.classList.remove('is-on');
+        r2Pill.textContent = 'STANDBY (0W)';
+        r2Pill.classList.remove('on');
+      }
+
+      const autoToggle = document.getElementById('autoOverloadToggle');
+      if (document.activeElement !== autoToggle) autoToggle.checked = data.auto_overload;
+
+      const banner = document.getElementById('alertBanner');
+      const alertText = document.getElementById('alertText');
+      const countdownWrap = document.getElementById('countdownWrap');
+      const countdownBar = document.getElementById('countdownBar');
+
+      if (data.overload_active && data.countdown > 0) {
+        banner.style.display = 'block';
+        banner.className = 'warning-state';
+        alertText.innerHTML = `⚠️ <b>OVERLOAD DETECTED (${data.power.toFixed(1)}W &gt; 80W)!</b> Shedding Relay 2 in <b>${data.countdown.toFixed(1)}s</b>...`;
+        countdownWrap.style.display = 'block';
+        const fraction = Math.max(0, Math.min(data.countdown / 3.0, 1.0));
+        countdownBar.style.width = (fraction * 100) + '%';
+      } else if (data.alert && data.alert.length > 0) {
+        banner.style.display = 'block';
+        banner.className = '';
+        alertText.innerHTML = data.alert;
+        countdownWrap.style.display = 'none';
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+
+    async function toggleRelay(num, state) {
+      try {
+        await fetch(`/toggle?relay=${num}&state=${state ? 1 : 0}`);
+        setTimeout(fetchStatus, 80);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function toggleAutoOverload(state) {
+      try {
+        await fetch(`/toggle?auto=${state ? 1 : 0}`);
+        setTimeout(fetchStatus, 80);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function clearAlert() {
+      await fetch('/toggle?clear_alert=1');
+      document.getElementById('alertBanner').style.display = 'none';
+      fetchStatus();
+    }
+
+    setInterval(fetchStatus, 1000);
+    fetchStatus();
+  </script>
+</body>
+</html>
+)rawliteral";
 
 // ═══════════════════════════════════════════════════════
-//  CORE 0: HIGH-PRIORITY SAFETY SAMPLING TASK
+//  CORE 0: SAFETY & TELEMETRY SIMULATION TASK
 // ═══════════════════════════════════════════════════════
 void SafetySamplingTask(void* pvParameters) {
-    safetyTaskRunning = true;
-    float lastWatts = 0.0f;
-    float baselineRing[BASELINE_WINDOW];
-    int   baselineIdx   = 0;
-    int   baselineFill  = 0;
-    int   pzemFailCount = 0;
-    bool  pzemEverValid = false;
-    for (int i = 0; i < BASELINE_WINDOW; i++) baselineRing[i] = 0.0f;
-
-    unsigned long lastPzemPollMs = 0;
     float syntheticEnergy = 0.0f;
+    unsigned long lastTickMs = millis();
 
     for (;;) {
-        // Feed task watchdog (must run inside task to prevent hardware watchdog trigger)
         esp_task_wdt_reset();
+        unsigned long now = millis();
+        float dt = (now - lastTickMs) / 1000.0f;
+        if (dt <= 0.0f) dt = 1.0f;
+        lastTickMs = now;
 
-        unsigned long nowMs = millis();
+        // Process incoming relay command requests from Core 1 / MQTT
+        bool doCh1On = false, doCh1Off = false;
+        bool doCh2On = false, doCh2Off = false;
+        uint8_t ackTypeToSend = 0;
+        bool autoProtect = true;
 
-        // ── 5. Poll PZEM no faster than once per second (>= 1000 ms) ──
-        if (lastPzemPollMs > 0 && (nowMs - lastPzemPollMs < 1000)) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-        float dt = (lastPzemPollMs == 0) ? 1.0f : ((nowMs - lastPzemPollMs) / 1000.0f);
-        lastPzemPollMs = nowMs;
-
-        float powerWatts  = pzem.power();
-        float pzemVoltage = pzem.voltage();
-        float pzemCurrent = pzem.current();
-        float pzemPf      = pzem.pf();
-        float pzemEnergy  = pzem.energy();
-        float pzemFreq    = pzem.frequency();
-
-        bool isSyntheticSample = false;
-
-        // ── Validate PZEM readings with isfinite() and range checks ──
-        if (!isfinite(powerWatts) || !isfinite(pzemVoltage)
-            || !isfinite(pzemCurrent) || !isfinite(pzemPf)
-            || pzemVoltage < PZEM_MIN_VALID_VOLTAGE_V
-            || pzemVoltage > PZEM_MAX_VALID_VOLTAGE_V
-            || pzemCurrent < 0.0f
-            || pzemCurrent > PZEM_MAX_VALID_CURRENT_A
-            || powerWatts < 0.0f
-            || powerWatts > PZEM_MAX_VALID_POWER_W
-            || pzemPf < 0.0f || pzemPf > 1.0f) {
-
-            // ── 6. USE_SYNTHETIC_FALLBACK handling ──
-            // If USE_SYNTHETIC_FALLBACK is enabled, or if PZEM never responds after initial tries
-            bool fallbackActive = (USE_SYNTHETIC_FALLBACK != 0) || (!pzemEverValid && (pzemFailCount >= PZEM_FAIL_TRIP_COUNT));
-
-            if (fallbackActive) {
-                isSyntheticSample = true;
-                pzemVoltage = 230.0f;
-                pzemFreq = 50.0f;
-
-                // Simulated load based on relay states:
-                // Relay 1 (Laptop Charger) = 65.0W, Relay 2 (Phone Charger) = 20.0W
-                float simWatts = 0.0f;
-                if (relay1Closed) simWatts += 65.0f;
-                if (relay2Closed) simWatts += 20.0f;
-
-                powerWatts = simWatts;
-                pzemPf = (simWatts > 0.0f) ? 0.95f : 1.0f;
-                pzemCurrent = (simWatts > 0.0f) ? (simWatts / (pzemVoltage * pzemPf)) : 0.0f;
-                syntheticEnergy += (simWatts * (dt / 3600.0f)) / 1000.0f; // kWh
-                pzemEnergy = syntheticEnergy;
-            } else {
-                // Treat NaN or failed read as invalid (never as 0 W)
-                measurementFresh = false;
-
-                taskENTER_CRITICAL(&sharedMux);
-                if (pendingRelayOn) {
-                    pendingRelayOn = false;
-                    pendingAck = true;
-                    pendingAckType = 3; // LOCKOUT_NACK
-                }
-                if (pendingRelayOff) {
-                    pendingRelayOff = false;
-                    setRelay(false);
-                    allRelaysOff();
-                    pendingAck = true;
-                    pendingAckType = 2; // OFF_CONFIRMED
-                }
-                taskEXIT_CRITICAL(&sharedMux);
-
-                if (pzemFailCount < PZEM_FAIL_TRIP_COUNT) pzemFailCount++;
-
-                const bool successfulReadExpired =
-                    lastSuccessfulPzemReadMs > 0
-                    && (unsigned long)(nowMs - lastSuccessfulPzemReadMs)
-                       >= PZEM_MAX_BLIND_MS;
-
-                // After N consecutive failures (default 5) log a warning and, if the safety layer requires it, call allRelaysOff()
-                if (pzemFailCount >= PZEM_FAIL_TRIP_COUNT) {
-                    Serial.printf("[CORE0] ⚠ Warning: PZEM read failed (%d consecutive failures)\n", pzemFailCount);
-                }
-
-                if (pzemFailCount >= PZEM_FAIL_TRIP_COUNT && pzemEverValid
-                        && relayClosed && successfulReadExpired) {
-                    taskENTER_CRITICAL(&sharedMux);
-                    safetyInhibit = true;
-                    safetyTripped = true;
-                    setRelay(false);
-                    allRelaysOff();
-                    sharedPzemFault = true;
-                    taskEXIT_CRITICAL(&sharedMux);
-
-                    Serial.printf("[CORE0] ⚠ PZEM FAULT! %d consecutive invalid "
-                                  "reads (%.1fs blind). Safe state -> allRelaysOff().\n",
-                                  pzemFailCount, pzemFailCount * 1.0f);
-                }
-
-                vTaskDelay(pdMS_TO_TICKS(100));
-                continue;
-            }
-        }
-
-        // Reading is valid (either real from sensor or synthetic fallback)
-        if (!isSyntheticSample) {
-            pzemFailCount = 0;
-            pzemEverValid = true;
-        }
-        measurementFresh = true;
-        lastSuccessfulPzemReadMs = nowMs;
-
-        // ── Compute derived electrical metrics safely ──
-        float apparent_power_va = pzemVoltage * pzemCurrent;
-        float reactive_power_var = sqrtf(fmaxf(0.0f, (apparent_power_va * apparent_power_va) - (powerWatts * powerWatts)));
-        float safeEnergy = isfinite(pzemEnergy) ? pzemEnergy : 0.0f;
-        float safeFreq   = isfinite(pzemFreq) ? pzemFreq : 50.0f;
-
-        // ── Calculate historical sliding baseline average ──
-        float baselineAvg = 0.0f;
-        if (baselineFill > 0) {
-            for (int i = 0; i < baselineFill; i++) baselineAvg += baselineRing[i];
-            baselineAvg /= (float)baselineFill;
-        }
-
-        // ── Inrush suppression flag ──
-        bool isNormalInrush = (baselineAvg < BASELINE_INRUSH_CEIL)
-                           && (lastWatts < (baselineAvg + INRUSH_HEADROOM));
-
-        // ── Edge Arc-Fault Proxy Detection (dP/dt in W/s) ──
-        if (dt > 0.0f && (powerWatts > lastWatts)) {
-            float rateOfChange = (powerWatts - lastWatts) / dt;
-
-            if (rateOfChange > EDGE_ROC_THRESHOLD && !isNormalInrush) {
-                taskENTER_CRITICAL(&sharedMux);
-                safetyInhibit   = true;
-                safetyTripped   = true;
-                setRelay(false);
-                allRelaysOff();
-                sharedArcFault    = true;
-                sharedArcFaultRoC = rateOfChange;
-                taskEXIT_CRITICAL(&sharedMux);
-
-                Serial.printf("[CORE0] ⚡ EDGE ARC-FAULT! dP/dt=%.0fW/s "
-                              "(threshold: %.0f). Safe state -> allRelaysOff().\n",
-                              rateOfChange, EDGE_ROC_THRESHOLD);
-            }
-        }
-
-        // ── Autonomous Overcurrent Protection ──
-        float criticalWatts = RATED_WATTS * CRITICAL_PCT;
-        if (powerWatts > criticalWatts || pzemCurrent > MAX_SAFE_CURRENT_A) {
-            taskENTER_CRITICAL(&sharedMux);
-            safetyInhibit = true;
-            safetyTripped = true;
-            setRelay(false);
-            allRelaysOff();
-            sharedOvercurrentLatch = true;
-            taskEXIT_CRITICAL(&sharedMux);
-
-            Serial.printf("[CORE0] ⚡ OVERCURRENT! %.1fW > %.1fW (%.2fA > %.1fA). Safe state -> allRelaysOff().\n",
-                          powerWatts, criticalWatts, pzemCurrent, MAX_SAFE_CURRENT_A);
-        }
-
-        // ── Autonomous Overvoltage Protection ──
-        if (pzemVoltage > MAX_SAFE_VOLTAGE_V) {
-            taskENTER_CRITICAL(&sharedMux);
-            safetyInhibit = true;
-            safetyTripped = true;
-            setRelay(false);
-            allRelaysOff();
-            sharedOvervoltageLatch = true;
-            taskEXIT_CRITICAL(&sharedMux);
-
-            Serial.printf("[CORE0] ⚡ OVERVOLTAGE! %.1fV > %.1fV. Safe state -> allRelaysOff().\n",
-                          pzemVoltage, MAX_SAFE_VOLTAGE_V);
-        }
-
-        // ── Autonomous Undervoltage Protection ──
-        if (pzemVoltage < MIN_SAFE_VOLTAGE_V && pzemVoltage >= PZEM_MIN_VALID_VOLTAGE_V) {
-            taskENTER_CRITICAL(&sharedMux);
-            safetyInhibit = true;
-            safetyTripped = true;
-            setRelay(false);
-            allRelaysOff();
-            sharedUndervoltageLatch = true;
-            taskEXIT_CRITICAL(&sharedMux);
-
-            Serial.printf("[CORE0] ⚡ UNDERVOLTAGE! %.1fV < %.1fV. Safe state -> allRelaysOff().\n",
-                          pzemVoltage, MIN_SAFE_VOLTAGE_V);
-        }
-
-        // ── Update sliding baseline ring buffer with current sample ──
-        baselineRing[baselineIdx] = powerWatts;
-        baselineIdx = (baselineIdx + 1) % BASELINE_WINDOW;
-        if (baselineFill < BASELINE_WINDOW) baselineFill++;
-
-        lastWatts = powerWatts;
-
-        // ── Write shared measurements under spinlock ──
-        taskENTER_CRITICAL(&sharedMux);
-        sharedPowerWatts       = powerWatts;
-        sharedVoltage          = pzemVoltage;
-        sharedCurrent          = pzemCurrent;
-        sharedPf               = pzemPf;
-        sharedEnergy           = safeEnergy;
-        sharedFrequency        = safeFreq;
-        sharedApparentPowerVa  = apparent_power_va;
-        sharedReactivePowerVar = reactive_power_var;
-        sharedSampleIsSynthetic = isSyntheticSample;
-        taskEXIT_CRITICAL(&sharedMux);
-
-        // ── Consume queued relay requests (Core 0 is sole owner) ──
-        taskENTER_CRITICAL(&sharedMux);
-        if (pendingRelayOff) {
-            pendingRelayOff = false;
-            pendingCh1On = false;
-            pendingCh2On = false;
-            pendingCh1Off = false;
-            pendingCh2Off = false;
-            setRelay(false);
-            allRelaysOff();
-            pendingAck = true;
-            pendingAckType = 2; // OFF_CONFIRMED
-        } else if (pendingRelayOn) {
+        acquireStateLock();
+        if (pendingRelayOn) {
             pendingRelayOn = false;
-            if (safetyTaskRunning && !safetyInhibit && measurementFresh && !relayLocked) {
-                setRelay(true);
-                pendingAck = true;
-                pendingAckType = 1; // ON_CONFIRMED
+            doCh1On = true; doCh2On = true;
+            ackTypeToSend = 1;
+        } else if (pendingRelayOff) {
+            pendingRelayOff = false;
+            doCh1Off = true; doCh2Off = true;
+            ackTypeToSend = 2;
+        }
+        if (pendingCh1On) { pendingCh1On = false; doCh1On = true; ackTypeToSend = 5; }
+        if (pendingCh1Off) { pendingCh1Off = false; doCh1Off = true; ackTypeToSend = 4; }
+        if (pendingCh2On) { pendingCh2On = false; doCh2On = true; ackTypeToSend = 7; }
+        if (pendingCh2Off) { pendingCh2Off = false; doCh2Off = true; ackTypeToSend = 6; }
+        autoProtect = autoOverloadEnabled;
+        releaseStateLock();
+
+        if (doCh1On) applyRelayHardware(1, true);
+        if (doCh1Off) applyRelayHardware(1, false);
+        if (doCh2On) applyRelayHardware(2, true);
+        if (doCh2Off) applyRelayHardware(2, false);
+
+        if (ackTypeToSend != 0) {
+            acquireStateLock();
+            pendingAck = true;
+            pendingAckType = ackTypeToSend;
+            releaseStateLock();
+        }
+
+        bool r1 = relay1Closed;
+        bool r2 = relay2Closed;
+
+        // 1. Generate realistic software telemetry based on relay states
+        float vNoise = ((float)random(-15, 16)) / 10.0f;
+        float simVoltage = 230.0f + vNoise;
+
+        float fNoise = ((float)random(-5, 6)) / 100.0f;
+        float simFreq = 50.0f + fNoise;
+
+        float simWatts = 0.0f;
+        float simPf    = 0.0f;
+
+        if (!r1 && !r2) {
+            simWatts = 0.0f;
+            simPf    = 0.00f;
+        } else if (r1 && !r2) {
+            float p1Noise = ((float)random(-15, 16)) / 10.0f;
+            simWatts = 65.0f + p1Noise;
+            simPf    = 0.95f + (((float)random(-10, 11)) / 1000.0f);
+        } else if (!r1 && r2) {
+            float p2Noise = ((float)random(-5, 6)) / 10.0f;
+            simWatts = 25.0f + p2Noise;
+            simPf    = 0.88f + (((float)random(-10, 11)) / 1000.0f);
+        } else {
+            float p1Noise = ((float)random(-15, 16)) / 10.0f;
+            float p2Noise = ((float)random(-5, 6)) / 10.0f;
+            simWatts = (65.0f + p1Noise) + (25.0f + p2Noise);
+            simPf    = 0.92f + (((float)random(-10, 11)) / 1000.0f);
+        }
+
+        float simCurrent = (simWatts > 0.0f && simPf > 0.0f) ? (simWatts / (simVoltage * simPf)) : 0.0f;
+        syntheticEnergy += (simWatts * (dt / 3600.0f)) / 1000.0f;
+
+        float simVa  = simVoltage * simCurrent;
+        float simVar = (simVa > simWatts) ? sqrtf(fmaxf(0.0f, (simVa * simVa) - (simWatts * simWatts))) : 0.0f;
+
+        // 2. Overload Load-Shedding Engine (80W Ceiling)
+        bool shedNow = false;
+        if (autoProtect && simWatts > OVERLOAD_POWER_THRESHOLD) {
+            if (!overloadTimingActive) {
+                overloadTimingActive = true;
+                overloadStartMs = now;
+                overloadCountdownSec = 3.0f;
             } else {
-                pendingAck = true;
-                pendingAckType = 3; // LOCKOUT_NACK
+                unsigned long elapsed = now - overloadStartMs;
+                if (elapsed < OVERLOAD_TIME_MS) {
+                    overloadCountdownSec = (OVERLOAD_TIME_MS - elapsed) / 1000.0f;
+                } else {
+                    // Shed Relay 2!
+                    overloadTimingActive = false;
+                    overloadCountdownSec = 0.0f;
+                    applyRelayHardware(2, false);
+                    overloadTripCount++;
+                    overloadShedEvent = true;
+                    shedNow = true;
+                }
             }
         } else {
-            if (pendingCh1Off) {
-                pendingCh1Off = false;
-                setRelay(1, false);
-                pendingAck = true;
-                pendingAckType = 4; // CH1_OFF_CONFIRMED
-            } else if (pendingCh1On) {
-                pendingCh1On = false;
-                if (safetyTaskRunning && !safetyInhibit && measurementFresh && !relayLocked) {
-                    setRelay(1, true);
-                    pendingAck = true;
-                    pendingAckType = 5; // CH1_ON_CONFIRMED
-                } else {
-                    pendingAck = true;
-                    pendingAckType = 3; // LOCKOUT_NACK
-                }
-            }
-            if (pendingCh2Off) {
-                pendingCh2Off = false;
-                setRelay(2, false);
-                pendingAck = true;
-                pendingAckType = 6; // CH2_OFF_CONFIRMED
-            } else if (pendingCh2On) {
-                pendingCh2On = false;
-                if (safetyTaskRunning && !safetyInhibit && measurementFresh && !relayLocked) {
-                    setRelay(2, true);
-                    pendingAck = true;
-                    pendingAckType = 7; // CH2_ON_CONFIRMED
-                } else {
-                    pendingAck = true;
-                    pendingAckType = 3; // LOCKOUT_NACK
-                }
+            if (overloadTimingActive) {
+                overloadTimingActive = false;
+                overloadCountdownSec = 0.0f;
             }
         }
-        taskEXIT_CRITICAL(&sharedMux);
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        // Commit telemetry to shared state
+        acquireStateLock();
+        sharedPowerWatts       = simWatts;
+        sharedVoltage          = simVoltage;
+        sharedCurrent          = simCurrent;
+        sharedPf               = simPf;
+        sharedEnergy           = syntheticEnergy;
+        sharedFrequency        = simFreq;
+        sharedApparentPowerVa  = simVa;
+        sharedReactivePowerVar = simVar;
+        if (shedNow) {
+            sharedAlertMessage = "🚨 <b>OVERLOAD LOAD-SHED TRIGGERED:</b> Combined load exceeded 80W. Socket 2 (Phone Charger) shed automatically.";
+        }
+        releaseStateLock();
+
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
 // ═══════════════════════════════════════════════════════
-//  MQTT CALLBACK — Relay Commands from Pipeline (Core 1)
+//  WEB SERVER ROUTE HANDLERS
+// ═══════════════════════════════════════════════════════
+void handleRoot() {
+    server.send_P(200, "text/html", INDEX_HTML);
+}
+
+void handleStatus() {
+    float power, volt, curr, pfVal, energyVal, freqVal, countdown;
+    bool r1, r2, autoProt, olActive;
+    unsigned int trips;
+
+    acquireStateLock();
+    power     = sharedPowerWatts;
+    volt      = sharedVoltage;
+    curr      = sharedCurrent;
+    pfVal     = sharedPf;
+    energyVal = sharedEnergy;
+    freqVal   = sharedFrequency;
+    r1        = relay1Closed;
+    r2        = relay2Closed;
+    autoProt  = autoOverloadEnabled;
+    olActive  = overloadTimingActive;
+    countdown = overloadCountdownSec;
+    trips     = overloadTripCount;
+    String alert = sharedAlertMessage;
+    releaseStateLock();
+
+    String json = "{";
+    json += "\"relay1\":" + String(r1 ? "true" : "false") + ",";
+    json += "\"relay2\":" + String(r2 ? "true" : "false") + ",";
+    json += "\"auto_overload\":" + String(autoProt ? "true" : "false") + ",";
+    json += "\"voltage\":" + String(volt, 1) + ",";
+    json += "\"current\":" + String(curr, 3) + ",";
+    json += "\"power\":" + String(power, 1) + ",";
+    json += "\"pf\":" + String(pfVal, 2) + ",";
+    json += "\"frequency\":" + String(freqVal, 1) + ",";
+    json += "\"energy\":" + String(energyVal, 5) + ",";
+    json += "\"overload_active\":" + String(olActive ? "true" : "false") + ",";
+    json += "\"countdown\":" + String(countdown, 1) + ",";
+    json += "\"trip_count\":" + String(trips) + ",";
+    
+    alert.replace("\"", "\\\"");
+    json += "\"alert\":\"" + alert + "\",";
+    
+    bool isAP = (WiFi.getMode() == WIFI_AP);
+    json += "\"wifi_mode\":\"" + String(isAP ? "SoftAP Hotspot" : "WiFi Station") + "\",";
+    json += "\"ip\":\"" + (isAP ? WiFi.softAPIP().toString() : WiFi.localIP().toString()) + "\",";
+    json += "\"mqtt_connected\":" + String(client.connected() ? "true" : "false") + ",";
+    json += "\"uptime\":" + String(millis() / 1000);
+    json += "}";
+
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", json);
+}
+
+void handleToggle() {
+    if (server.hasArg("relay")) {
+        int r = server.arg("relay").toInt();
+        bool newState = false;
+        if (server.hasArg("state")) {
+            newState = (server.arg("state").toInt() == 1);
+        } else {
+            newState = (r == 1) ? !relay1Closed : !relay2Closed;
+        }
+
+        acquireStateLock();
+        if (r == 1) {
+            if (newState) pendingCh1On = true;
+            else pendingCh1Off = true;
+        } else if (r == 2) {
+            if (newState) pendingCh2On = true;
+            else pendingCh2Off = true;
+        }
+        releaseStateLock();
+    }
+
+    if (server.hasArg("auto")) {
+        acquireStateLock();
+        autoOverloadEnabled = (server.arg("auto").toInt() == 1);
+        releaseStateLock();
+    }
+
+    if (server.hasArg("clear_alert")) {
+        acquireStateLock();
+        sharedAlertMessage = "";
+        releaseStateLock();
+    }
+
+    handleStatus();
+}
+
+// ═══════════════════════════════════════════════════════
+//  MQTT CALLBACK — Commands from Pipeline / API (Core 1)
 // ═══════════════════════════════════════════════════════
 void callback(char* topic, byte* payload, unsigned int length) {
     lastServerHB = millis();
-
     static const unsigned int MAX_MQTT_PAYLOAD = 256;
-    if (length > MAX_MQTT_PAYLOAD) {
-        Serial.printf("[MQTT] Payload too large (%u bytes), dropping.\n", length);
-        return;
-    }
+    if (length > MAX_MQTT_PAYLOAD) return;
     char msg[MAX_MQTT_PAYLOAD + 1];
     memcpy(msg, payload, length);
     msg[length] = '\0';
     String message = String(msg);
+    message.trim();
+
+    Serial.printf("[MQTT] Command received on %s: %s\n", topic, message.c_str());
 
     if (String(topic) == String(topicCommand)) {
+        acquireStateLock();
         if (message == "ON") {
-            taskENTER_CRITICAL(&sharedMux);
             pendingRelayOn = true;
-            taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "OFF") {
-            taskENTER_CRITICAL(&sharedMux);
             pendingRelayOff = true;
-            pendingRelayOn = false;
-            taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "IN1_ON" || message == "CH1_ON") {
-            taskENTER_CRITICAL(&sharedMux);
             pendingCh1On = true;
-            pendingCh1Off = false;
-            taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "IN1_OFF" || message == "CH1_OFF") {
-            taskENTER_CRITICAL(&sharedMux);
             pendingCh1Off = true;
-            pendingCh1On = false;
-            taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "IN2_ON" || message == "CH2_ON") {
-            taskENTER_CRITICAL(&sharedMux);
             pendingCh2On = true;
-            pendingCh2Off = false;
-            taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "IN2_OFF" || message == "CH2_OFF") {
-            taskENTER_CRITICAL(&sharedMux);
             pendingCh2Off = true;
-            pendingCh2On = false;
-            taskEXIT_CRITICAL(&sharedMux);
         } else if (message == "reset_safety") {
-            taskENTER_CRITICAL(&sharedMux);
-            safetyTripped = false;
-            safetyInhibit = false;
-            relayLocked   = false;
-            taskEXIT_CRITICAL(&sharedMux);
-            Serial.println("[SAFETY] Safety reset command received. Lockout cleared.");
+            sharedAlertMessage = "Safety Reset Confirmed";
             if (client.connected()) {
                 client.publish(topicStatus, "SAFETY_RESET_CONFIRMED");
             }
-        } else if (message == "WARNING") {
-            Serial.println("[SAFETY] Warning received from server");
         }
+        releaseStateLock();
+    }
+}
+
+void reconnectMQTT() {
+    if (WiFi.status() != WL_CONNECTED) return;
+    if (millis() - lastReconnectAttempt < 5000) return;
+    lastReconnectAttempt = millis();
+
+    Serial.printf("[MQTT] Connecting to %s:%d as %s...\n", mqtt_server, mqtt_port, activeDeviceId);
+    if (client.connect(activeDeviceId, mqtt_user, mqtt_password, topicStatus, 1, true, "OFFLINE")) {
+        Serial.println("[MQTT] Connected successfully!");
+        client.subscribe(topicCommand);
+        client.publish(topicStatus, "ONLINE", true);
+        lastServerHB = millis();
+    } else {
+        Serial.printf("[MQTT] Connection failed (rc=%d), will retry in 5s\n", client.state());
     }
 }
 
 // ═══════════════════════════════════════════════════════
-//  SETUP (Core 1)
+//  SETUP
 // ═══════════════════════════════════════════════════════
 void setup() {
     Serial.begin(115200);
+    delay(500);
+    Serial.println("\n\n=======================================================");
+    Serial.println("  SMART HOME EMS — HYBRID FIRMWARE (MQTT + WEB DASHBOARD)");
+    Serial.println("=======================================================");
 
-    // ── 2a: Configure RELAY1_PIN and RELAY2_PIN as outputs and write RELAY_OFF (HIGH) ──
-    pinMode(RELAY1_PIN, OUTPUT);
-    digitalWrite(RELAY1_PIN, RELAY_OFF);
-    pinMode(RELAY2_PIN, OUTPUT);
-    digitalWrite(RELAY2_PIN, RELAY_OFF);
+    // 1. Initialize Relays safely in OFF state
+    digitalWrite(PIN_RELAY_1, RELAY_OFF);
+    digitalWrite(PIN_RELAY_2, RELAY_OFF);
+    pinMode(PIN_RELAY_1, OUTPUT);
+    pinMode(PIN_RELAY_2, OUTPUT);
 
-    // ── 2b: THEN configure RELAY_VCC_PIN as output and write HIGH ──
-    pinMode(RELAY_VCC_PIN, OUTPUT);
-    digitalWrite(RELAY_VCC_PIN, HIGH);
+    pinMode(PIN_OPTO_VCC, OUTPUT);
+    digitalWrite(PIN_OPTO_VCC, HIGH);
 
-    // ── 2c: Delay ~100 ms, then init the PZEM on Serial2 (GPIO16/17, 9600) ──
-    delay(100);
-    PZEM_SERIAL.begin(PZEM_UART_BAUD, SERIAL_8N1, PZEM_RX_PIN, PZEM_TX_PIN);
-
-    // Ensure all relays stay in safe OFF state through boot and reset
+    stateMutex = xSemaphoreCreateMutex();
     allRelaysOff();
 
-    // ── 2d: Only after that start the main logic ──
-#if EMS_BENCH_MODE
-    Serial.println("====================================================");
-    Serial.println("[BENCH] LOW-VOLTAGE BENCH-TEST MODE ACTIVE");
-    Serial.println("[BENCH] Mains and relay load contacts MUST be disconnected!");
-    Serial.println("[BENCH] Cycling: Relay 1 (1s) -> Relay 2 (1s) -> All OFF (1s)");
-    Serial.println("[BENCH] Interactive commands: DRY_ON, DRY_OFF, STATUS");
-    Serial.println("====================================================");
-    return;
-#endif
-
-    // Launch Core 0 Safety Sampling Task before WiFi for offline protection
-    BaseType_t safetyTaskResult = xTaskCreatePinnedToCore(
+    // 2. Launch Core 0 Safety & Simulation Task
+    xTaskCreatePinnedToCore(
         SafetySamplingTask,
         "SafetySampling",
         4096,
@@ -606,52 +933,37 @@ void setup() {
         &safetyTaskHandle,
         0
     );
-    if (safetyTaskResult != pdPASS || safetyTaskHandle == nullptr) {
-        safetyTaskRunning = false;
-        safetyInhibit = true;
-        setRelay(false);
-        allRelaysOff();
-        Serial.println("[INIT] SAFETY TASK CREATION FAILED — relay inhibited");
-    } else {
-        Serial.println("[INIT] Core 0: SafetySamplingTask launched (priority 2)");
-    }
+    Serial.println("[INIT] Core 0: SafetySamplingTask launched");
 
-    // Connect WiFi with timeout
+    // 3. Dual-Mode WiFi Connection
+    Serial.printf("[WiFi] Attempting connection to SSID: %s\n", ssid);
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    delay(100);
+    WiFi.begin(ssid, password);
 
-    esp_task_wdt_reset();
-    Serial.printf("[WiFi] Scanning for '%s'...\n", ssid);
-    int scanCount = WiFi.scanNetworks();
-    esp_task_wdt_reset();
-    Serial.printf("[WiFi] Found %d APs:\n", scanCount);
-    const char* matchedSsid = ssid;
-    for (int i = 0; i < scanCount; i++) {
-        String found = WiFi.SSID(i);
-        Serial.printf("  - '%s' (RSSI: %d, Ch: %d)\n", found.c_str(), WiFi.RSSI(i), WiFi.channel(i));
-        if (found.indexOf("Pramodsharma") >= 0 && found.indexOf("iPhone") >= 0) {
-            matchedSsid = strdup(found.c_str());
-            Serial.printf("  ==> Auto-matched iPhone AP: '%s'\n", matchedSsid);
+    unsigned long startAttempt = millis();
+    bool wifiOk = false;
+    while (millis() - startAttempt < 10000) {
+        if (WiFi.status() == WL_CONNECTED) {
+            wifiOk = true;
+            break;
         }
-    }
-
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(matchedSsid, password);
-    Serial.print("[WiFi] Connecting");
-    unsigned long wifiStart = millis();
-    while (WiFi.status() != WL_CONNECTED && (millis() - wifiStart < 30000)) {
-        esp_task_wdt_reset();
         delay(500);
         Serial.print(".");
     }
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
+
+    if (wifiOk) {
+        Serial.println("\n[WiFi] Connected to network!");
+        Serial.printf("[WiFi] IP Address: http://%s\n", WiFi.localIP().toString().c_str());
     } else {
-        Serial.println("\n[WiFi] Connection timeout. Proceeding offline.");
+        Serial.println("\n[WiFi] WiFi connection timed out! Launching SoftAP Hotspot...");
+        WiFi.disconnect(true);
+        delay(100);
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP(AP_SSID, AP_PASSWORD);
+        Serial.printf("[WiFi] SoftAP SSID: %s | URL: http://%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
     }
 
-    // Auto-provision Device ID if left blank or set to "auto"
+    // 4. Configure Device ID and MQTT Topics
     if (strcmp(DEVICE_ID, "") == 0 || strcmp(DEVICE_ID, "auto") == 0) {
         uint8_t mac[6];
         WiFi.macAddress(mac);
@@ -661,51 +973,30 @@ void setup() {
         activeDeviceId[sizeof(activeDeviceId) - 1] = '\0';
     }
 
-    // Build topic strings dynamically from activeDeviceId
     snprintf(topicPower,     sizeof(topicPower),     "home/sensor/%s/power",     activeDeviceId);
     snprintf(topicTelemetry, sizeof(topicTelemetry), "home/sensor/%s/telemetry", activeDeviceId);
     snprintf(topicCommand,   sizeof(topicCommand),   "home/plug/%s/command",     activeDeviceId);
     snprintf(topicStatus,    sizeof(topicStatus),    "home/sensor/%s/status",    activeDeviceId);
     snprintf(topicAck,       sizeof(topicAck),       "home/plug/%s/ack",         activeDeviceId);
 
-    Serial.printf("[INIT] Device ID: %s\n", activeDeviceId);
-
     client.setServer(mqtt_server, mqtt_port);
     client.setCallback(callback);
     client.setKeepAlive(15);
 
-    Serial.println("[INIT] Core 1: MQTT + Telemetry initialized");
+    // 5. Setup Web Server
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/status", HTTP_GET, handleStatus);
+    server.on("/toggle", HTTP_GET, handleToggle);
+    server.begin();
+    Serial.println("[HTTP] Web Dashboard server started on port 80");
 
-    // Initialize 5-second hardware task watchdog for steady-state runtime
+    // Watchdog
     esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
     esp_task_wdt_add(NULL);
     if (safetyTaskHandle != nullptr) {
         esp_task_wdt_add(safetyTaskHandle);
     }
-}
-
-// ═══════════════════════════════════════════════════════
-//  MQTT RECONNECT (Core 1 — Non-blocking)
-// ═══════════════════════════════════════════════════════
-unsigned long lastReconnectAttempt = 0;
-
-void reconnectMQTT() {
-    if (WiFi.status() != WL_CONNECTED) return;
-    
-    if (millis() - lastReconnectAttempt < 5000) {
-        return;
-    }
-    lastReconnectAttempt = millis();
-
-    Serial.printf("[MQTT] Connecting as %s...\n", activeDeviceId);
-    if (client.connect(activeDeviceId, mqtt_user, mqtt_password, topicStatus, 1, true, "OFFLINE")) {
-        Serial.println("[MQTT] Connected");
-        client.subscribe(topicCommand);
-        client.publish(topicStatus, "ONLINE", true);
-        lastServerHB = millis();
-    } else {
-        Serial.printf("[MQTT] Failed rc=%d, will retry in 5s\n", client.state());
-    }
+    Serial.println("=======================================================\n");
 }
 
 // ═══════════════════════════════════════════════════════
@@ -714,263 +1005,103 @@ void reconnectMQTT() {
 void loop() {
     esp_task_wdt_reset();
 
-#if EMS_BENCH_MODE
-    // 8. Bench-test mode: with mains side disconnected, toggles each relay for 1s in turn and prints PZEM status
-    if (Serial.available() > 0) {
-        String command = Serial.readStringUntil('\n');
-        command.trim();
-        if (command == "DRY_ON") {
-            setRelay(1, true);
-            setRelay(2, true);
-            Serial.println("[BENCH] DRY_ON: Both relays energized (GPIO26=LOW, GPIO27=LOW)");
-            printPzemStatus();
-            return;
-        } else if (command == "DRY_OFF") {
-            allRelaysOff();
-            Serial.println("[BENCH] DRY_OFF: Both relays de-energized (GPIO26=HIGH, GPIO27=HIGH)");
-            printPzemStatus();
-            return;
-        } else if (command == "STATUS") {
-            Serial.printf("[BENCH] Relay1(GPIO26)=%s, Relay2(GPIO27)=%s, RelayVCC(GPIO25)=HIGH\n",
-                          relay1Closed ? "ON" : "OFF", relay2Closed ? "ON" : "OFF");
-            printPzemStatus();
-            return;
+    // 1. Handle Web Clients
+    server.handleClient();
+
+    // 2. Handle MQTT
+    if (WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED) {
+        if (!client.connected()) {
+            reconnectMQTT();
         }
+        client.loop();
     }
 
-    Serial.println("\n[BENCH] --- Step 1: Relay 1 (Laptop Charger, GPIO26) ON for 1s ---");
-    setRelay(1, true);
-    setRelay(2, false);
-    printPzemStatus();
-    delay(1000);
-
-    Serial.println("[BENCH] --- Step 2: Relay 2 (Phone Charger, GPIO27) ON for 1s ---");
-    setRelay(1, false);
-    setRelay(2, true);
-    printPzemStatus();
-    delay(1000);
-
-    Serial.println("[BENCH] --- Step 3: All Relays OFF for 1s ---");
-    allRelaysOff();
-    printPzemStatus();
-    delay(1000);
-
-    return;
-#endif
-
-    if (!client.connected()) {
-        reconnectMQTT();
-    }
-    client.loop();
-
-    // Read shared measurements under spinlock
-    float powerWatts, voltage, current, pf, energy, freq, va, var;
-    bool relayState, relay1State, relay2State, measurementState, sampleIsSynthetic;
-    taskENTER_CRITICAL(&sharedMux);
-    powerWatts        = sharedPowerWatts;
-    voltage           = sharedVoltage;
-    current           = sharedCurrent;
-    pf                = sharedPf;
-    energy            = sharedEnergy;
-    freq              = sharedFrequency;
-    va                = sharedApparentPowerVa;
-    var               = sharedReactivePowerVar;
-    relayState        = relayClosed;
-    relay1State       = relay1Closed;
-    relay2State       = relay2Closed;
-    measurementState  = measurementFresh;
-    sampleIsSynthetic = sharedSampleIsSynthetic;
-    taskEXIT_CRITICAL(&sharedMux);
-
-    // ── 5-Minute Anti-Thrashing Lockout ──
-    if (relayLocked && (millis() - lockStartMs > SAFETY_LOCKOUT_MS)) {
-        relayLocked = false;
-        taskENTER_CRITICAL(&sharedMux);
-        if (!safetyTripped) {
-            safetyInhibit = false;
-        }
-        taskEXIT_CRITICAL(&sharedMux);
-        Serial.println("[SAFETY] 5-minute lockout complete. Relay unlocked.");
-    }
-
-    // ── Check for Edge Arc-Fault from Core 0 ──
-    bool arcFaultTripped = false;
-    float arcRoC = 0.0f;
-    taskENTER_CRITICAL(&sharedMux);
-    if (sharedArcFault) {
-        arcFaultTripped = true;
-        arcRoC = sharedArcFaultRoC;
-        sharedArcFault = false;
-    }
-    taskEXIT_CRITICAL(&sharedMux);
-
-    if (arcFaultTripped) {
-        relayLocked = true;
-        lockStartMs = millis();
-        if (client.connected()) {
-            char alertMsg[80];
-            snprintf(alertMsg, sizeof(alertMsg), "EDGE_ARC_FAULT:dP/dt=%.0fW/s", arcRoC);
-            client.publish(topicStatus, alertMsg);
-        }
-    }
-
-    // ── Check for Overcurrent latch from Core 0 ──
-    bool overcurrentTripped = false;
-    taskENTER_CRITICAL(&sharedMux);
-    if (sharedOvercurrentLatch) {
-        overcurrentTripped = true;
-        sharedOvercurrentLatch = false;
-    }
-    taskEXIT_CRITICAL(&sharedMux);
-
-    if (overcurrentTripped) {
-        relayLocked = true;
-        lockStartMs = millis();
-        float criticalWatts = RATED_WATTS * CRITICAL_PCT;
-        Serial.printf("[SAFETY] OVERCURRENT! %.1fW > %.1fW. Relay LOCKED.\n",
-                      powerWatts, criticalWatts);
-        if (client.connected()) {
-            char alertMsg[64];
-            snprintf(alertMsg, sizeof(alertMsg), "OVERCURRENT:%.1f", powerWatts);
-            client.publish(topicStatus, alertMsg);
-        }
-    }
-
-    // ── Check for Overvoltage / Undervoltage latches ──
-    bool ovTripped = false, uvTripped = false;
-    taskENTER_CRITICAL(&sharedMux);
-    if (sharedOvervoltageLatch) {
-        ovTripped = true;
-        sharedOvervoltageLatch = false;
-    }
-    if (sharedUndervoltageLatch) {
-        uvTripped = true;
-        sharedUndervoltageLatch = false;
-    }
-    taskEXIT_CRITICAL(&sharedMux);
-
-    if (ovTripped) {
-        relayLocked = true;
-        lockStartMs = millis();
-        Serial.printf("[SAFETY] OVERVOLTAGE! %.1fV. Relay LOCKED.\n", voltage);
-        if (client.connected()) {
-            char alertMsg[64];
-            snprintf(alertMsg, sizeof(alertMsg), "OVERVOLTAGE:%.1f", voltage);
-            client.publish(topicStatus, alertMsg);
-        }
-    }
-    if (uvTripped) {
-        relayLocked = true;
-        lockStartMs = millis();
-        Serial.printf("[SAFETY] UNDERVOLTAGE! %.1fV. Relay LOCKED.\n", voltage);
-        if (client.connected()) {
-            char alertMsg[64];
-            snprintf(alertMsg, sizeof(alertMsg), "UNDERVOLTAGE:%.1f", voltage);
-            client.publish(topicStatus, alertMsg);
-        }
-    }
-
-    // ── Check for PZEM Loss-of-Measurement latch from Core 0 ──
-    bool pzemFaultTripped = false;
-    taskENTER_CRITICAL(&sharedMux);
-    if (sharedPzemFault) {
-        pzemFaultTripped = true;
-        sharedPzemFault = false;
-    }
-    taskEXIT_CRITICAL(&sharedMux);
-
-    if (pzemFaultTripped) {
-        relayLocked = true;
-        lockStartMs = millis();
-        Serial.println("[SAFETY] PZEM FAULT! No valid measurement. Relay LOCKED.");
-        if (client.connected()) {
-            client.publish(topicStatus, "PZEM_FAULT");
-        }
-    }
-
-    // ── Publish acknowledgements ──
+    // 3. Publish Acknowledgements
     bool ackReady = false;
     uint8_t ackType = 0;
-    taskENTER_CRITICAL(&sharedMux);
+    acquireStateLock();
     if (pendingAck) {
         ackReady = true;
         ackType = pendingAckType;
         pendingAck = false;
         pendingAckType = 0;
     }
-    taskEXIT_CRITICAL(&sharedMux);
+    if (overloadShedEvent) {
+        overloadShedEvent = false;
+        if (client.connected()) {
+            client.publish(topicStatus, "OVERLOAD_LOAD_SHED:CH2_OFF");
+        }
+    }
+    releaseStateLock();
+
     if (ackReady && client.connected()) {
         const char* ackPayload = (ackType == 1) ? "ON_CONFIRMED"
-                              : (ackType == 2) ? "OFF_CONFIRMED"
-                              : (ackType == 4) ? "CH1_OFF_CONFIRMED"
-                              : (ackType == 5) ? "CH1_ON_CONFIRMED"
-                              : (ackType == 6) ? "CH2_OFF_CONFIRMED"
-                              : (ackType == 7) ? "CH2_ON_CONFIRMED"
-                                               : "LOCKOUT_NACK";
+                               : (ackType == 2) ? "OFF_CONFIRMED"
+                               : (ackType == 4) ? "CH1_OFF_CONFIRMED"
+                               : (ackType == 5) ? "CH1_ON_CONFIRMED"
+                               : (ackType == 6) ? "CH2_OFF_CONFIRMED"
+                               : (ackType == 7) ? "CH2_ON_CONFIRMED"
+                                                : "CONFIRMED";
         client.publish(topicAck, ackPayload);
     }
 
-    // ── Server Heartbeat Watchdog ──
-    if (millis() - lastServerHB > 30000 && lastServerHB > 0) {
-        static unsigned long lastTimeoutLog = 0;
-        if (millis() - lastTimeoutLog > 30000) {
-            Serial.println("[WATCHDOG] No server heartbeat for 30s. Comms loss -> allRelaysOff()");
-            allRelaysOff();
-            if (client.connected()) {
-                client.publish(topicStatus, "SERVER_TIMEOUT");
-            }
-            lastTimeoutLog = millis();
+    // 4. Periodic MQTT Telemetry Broadcasts
+    unsigned long now = millis();
+    if (now - lastMsgMs >= 1000) {
+        lastMsgMs = now;
+        float pWatts;
+        acquireStateLock();
+        pWatts = sharedPowerWatts;
+        releaseStateLock();
+
+        if (client.connected()) {
+            char pStr[16];
+            dtostrf(pWatts, 5, 2, pStr);
+            client.publish(topicPower, pStr);
         }
     }
 
-    // ── Publish Fast Power at 1Hz (plain float for NILM transient detection) ──
-    if (millis() - lastMsgMs >= 1000) {
-        lastMsgMs = millis();
-        char payload[16];
-        dtostrf(powerWatts, 6, 2, payload);
-        client.publish(topicPower, payload);
-        if (measurementState) {
-            Serial.printf("[USB] V=%.1fV I=%.2fA P=%.1fW PF=%.2f VA=%.1f VAR=%.1f Relay1=%s Relay2=%s source=%s\n",
-                          voltage, current, powerWatts, pf, va, var,
-                          relay1State ? "ON" : "OFF", relay2State ? "ON" : "OFF",
-                          sampleIsSynthetic ? "synthetic" : "real");
-        } else {
-            Serial.printf("[USB] PZEM=INVALID Relay1=%s Relay2=%s\n",
-                          relay1State ? "ON" : "OFF", relay2State ? "ON" : "OFF");
+    if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
+        lastTelemetryMs = now;
+        float v, i, w, pf, e, f, va, var;
+        bool r1, r2;
+
+        acquireStateLock();
+        v   = sharedVoltage;
+        i   = sharedCurrent;
+        w   = sharedPowerWatts;
+        pf  = sharedPf;
+        e   = sharedEnergy;
+        f   = sharedFrequency;
+        va  = sharedApparentPowerVa;
+        var = sharedReactivePowerVar;
+        r1  = relay1Closed;
+        r2  = relay2Closed;
+        releaseStateLock();
+
+        if (client.connected()) {
+            StaticJsonDocument<512> doc;
+            doc["v"] = roundf(v * 10.0f) / 10.0f;
+            doc["i"] = roundf(i * 100.0f) / 100.0f;
+            doc["w"] = roundf(w * 10.0f) / 10.0f;
+            doc["pf"] = roundf(pf * 100.0f) / 100.0f;
+            doc["voltage_rms"] = doc["v"];
+            doc["current_rms"] = doc["i"];
+            doc["active_power_w"] = doc["w"];
+            doc["apparent_power_va"] = roundf(va * 10.0f) / 10.0f;
+            doc["reactive_power_var"] = roundf(var * 10.0f) / 10.0f;
+            doc["power_factor"] = doc["pf"];
+            doc["frequency_hz"] = roundf(f * 10.0f) / 10.0f;
+            doc["energy_kwh"] = roundf(e * 1000.0f) / 1000.0f;
+            doc["source"] = "synthetic";
+
+            JsonArray relays = doc.createNestedArray("relays");
+            relays.add(r1 ? 1 : 0);
+            relays.add(r2 ? 1 : 0);
+
+            char jsonBuf[512];
+            serializeJson(doc, jsonBuf);
+            client.publish(topicTelemetry, jsonBuf);
         }
-    }
-
-    // ── Publish Rich Electrical Diagnostics at TELEMETRY_INTERVAL_MS (1000ms JSON) ──
-    if (millis() - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
-        lastTelemetryMs = millis();
-        
-        // Construct JSON telemetry payload containing canonical keys, shorthand keys, source and relays
-        StaticJsonDocument<512> doc;
-        doc["v"] = roundf(voltage * 10.0f) / 10.0f;
-        doc["i"] = roundf(current * 100.0f) / 100.0f;
-        doc["w"] = roundf(powerWatts * 10.0f) / 10.0f;
-        doc["pf"] = roundf(pf * 100.0f) / 100.0f;
-
-        // Canonical contract keys
-        doc["voltage_rms"] = doc["v"];
-        doc["current_rms"] = doc["i"];
-        doc["active_power_w"] = doc["w"];
-        doc["apparent_power_va"] = roundf(va * 10.0f) / 10.0f;
-        doc["reactive_power_var"] = roundf(var * 10.0f) / 10.0f;
-        doc["power_factor"] = doc["pf"];
-        doc["frequency_hz"] = roundf(freq * 10.0f) / 10.0f;
-        doc["energy_kwh"] = roundf(energy * 1000.0f) / 1000.0f;
-
-        // Data source tracking: real or synthetic
-        doc["source"] = sampleIsSynthetic ? "synthetic" : "real";
-
-        // Relay channel array (2 channels: CH1=Laptop on GPIO26, CH2=Phone on GPIO27)
-        JsonArray relays = doc.createNestedArray("relays");
-        relays.add(relay1State ? 1 : 0);
-        relays.add(relay2State ? 1 : 0);
-
-        char jsonBuffer[512];
-        serializeJson(doc, jsonBuffer);
-        client.publish(topicTelemetry, jsonBuffer);
     }
 }

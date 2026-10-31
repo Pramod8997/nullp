@@ -10,4 +10,6 @@ if sys.platform == "win32":
 import uvicorn
 
 if __name__ == "__main__":
-    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, loop="none")
+    host = os.environ.get("EMS_API_HOST", "0.0.0.0")
+    port = int(os.environ.get("EMS_API_PORT", "8000"))
+    uvicorn.run("src.api.main:app", host=host, port=port, reload=True, reload_dirs=["src"])

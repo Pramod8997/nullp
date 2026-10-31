@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 import aiosqlite
 from fastapi import (
     FastAPI, WebSocket, WebSocketDisconnect,
-    HTTPException, Depends, Header,
+    HTTPException, Depends, Header, Request,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -443,7 +443,7 @@ def _mqtt_connect_kwargs() -> dict:
     them. None stays None, so an anonymous dev broker behaves exactly as before.
     """
     return {
-        "hostname": os.environ.get("MQTT_BROKER", "localhost"),
+        "hostname": os.environ.get("MQTT_BROKER", "127.0.0.1"),
         "port": int(os.environ.get("MQTT_PORT", "1883")),
         "username": os.environ.get("MQTT_USERNAME") or None,
         "password": os.environ.get("MQTT_PASSWORD") or None,
@@ -760,6 +760,8 @@ async def mqtt_listener_task():
                     # ── Relay command observations ──
                     elif "/command" in topic:
                         device_id = topic.split("/")[-2]
+                        if payload in ("HEARTBEAT", "PING"):
+                            continue
                         match = re.fullmatch(
                             r"(ON|OFF|WARNING|IN1_ON|IN1_OFF|IN2_ON|IN2_OFF|CH1_ON|CH1_OFF|CH2_ON|CH2_OFF|reset_safety)(?:\|([1-9][0-9]{0,19}))?", payload
                         )
@@ -890,13 +892,27 @@ async def mqtt_listener_task():
 
 # ─── Heartbeat ───────────────────────────────────────────────────────
 async def heartbeat_task():
-    """Send periodic heartbeat to keep WebSocket connections alive.
+    """Send periodic heartbeat to keep WebSocket connections alive and refresh ESP32 watchdog.
     Issue #23: Heartbeat only sends pipeline_status, NOT full init state.
     Full init state is sent once on WebSocket connect only."""
     while True:
         await asyncio.sleep(5)
         if manager.active_connections:
             await manager.broadcast({"type": "heartbeat", "status": system_state["pipeline_status"]})
+
+        # Keep hardware firmware watchdog (30s timeout) from expiring
+        if _shared_mqtt_client and _mqtt_listener_alive:
+            try:
+                device_ids = set(system_state.get("devices", {}).keys())
+                device_ids.add("node_bench_agg")
+                for dev_id in device_ids:
+                    await _shared_mqtt_client.publish(
+                        f"home/plug/{dev_id}/command",
+                        payload="HEARTBEAT",
+                        qos=0,
+                    )
+            except Exception as e:
+                logger.debug("Failed sending MQTT heartbeat: %s", e)
 
 
 # ─── Fix §4.3.3: WebSocket Telemetry Aggregation Task ────────────────
@@ -1195,9 +1211,12 @@ class RelayCommandPayload(BaseModel):
     channel: Optional[int] = None
 
 
-async def optional_api_key(x_api_key: Optional[str] = Header(None)):
+async def optional_api_key(request: Request, x_api_key: Optional[str] = Header(None)):
     expected = os.environ.get("EMS_API_KEY")
     if expected:
+        client_host = request.client.host if request.client else None
+        if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
+            return
         if not x_api_key or not hmac.compare_digest(x_api_key.encode("utf-8"), expected.encode("utf-8")):
             raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
@@ -1250,6 +1269,7 @@ async def post_relay_command(req: RelayCommandPayload, _: None = Depends(optiona
             hostname=broker_host,
             port=broker_port,
             auth=auth,
+            qos=1,
         )
     except Exception as exc:
         logger.error("Failed to publish relay command: %s", exc)

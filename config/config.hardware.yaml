@@ -38,7 +38,7 @@ hardware:
     vcc_pin: 25
     trigger_target: "active-low opto-isolated"
     active_low: true
-    boot_state: "HIGH/OFF"
+    boot_state: "HIGH/CUTOFF"
   low_voltage_supply: "isolated/BIS-marked 5V 2A external charger"
   mains_release: "blocked_until_physical_gates_pass"
 
@@ -53,7 +53,7 @@ deployment:
   require_physical_ml_artifacts: true
 
 mqtt:
-  broker: "localhost"
+  broker: "127.0.0.1"
   port: 1883
   # qos_safety/qos_telemetry removed (2026-09-10): dead keys, never read.
   # Effective wire QoS is hardcoded (qos=1 for subscribe and publish in

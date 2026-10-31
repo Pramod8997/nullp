@@ -14,7 +14,7 @@ app:
   debug: true
 
 mqtt:
-  broker: "localhost"
+  broker: "127.0.0.1"
   port: 1883
   # qos_safety/qos_telemetry removed (2026-09-10): dead keys, never read.
   # Effective wire QoS is hardcoded (qos=1 for subscribe and publish in

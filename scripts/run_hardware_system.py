@@ -25,6 +25,11 @@ from pathlib import Path
 
 # Fix Windows console encoding for Unicode box drawing characters & emojis
 if sys.platform == "win32":
+    import asyncio
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
     try:
         if sys.stdout and hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -88,6 +93,7 @@ class LiveSystemOrchestrator:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(WORKSPACE_ROOT)
         env["PYTHONUNBUFFERED"] = "1"
+        env["MQTT_BROKER"] = "127.0.0.1"
         if env_extra:
             env.update(env_extra)
 
@@ -178,7 +184,7 @@ class LiveSystemOrchestrator:
         else:
             print(f"  🌐 Starting FastAPI Server on port 8000...")
             self.start_process(
-                [sys.executable, "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"],
+                [sys.executable, "scripts/start_api.py"],
                 "FastAPI-API",
                 CYAN,
                 env_extra={"EMS_API_KEY": os.environ.get("EMS_API_KEY", "changeme-ems-prod-key")},
@@ -194,11 +200,13 @@ class LiveSystemOrchestrator:
             print("  [*] Starting Vite React Frontend Dashboard...")
             frontend_dir = WORKSPACE_ROOT / "frontend"
             npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+            api_key = os.environ.get("EMS_API_KEY", "changeme-ems-prod-key")
             self.start_process(
                 [npm_cmd, "run", "dev"],
                 "Frontend-UI",
                 YELLOW,
                 cwd=frontend_dir,
+                env_extra={"VITE_API_KEY": api_key},
             )
 
         ready_text = """

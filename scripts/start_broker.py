@@ -1,13 +1,15 @@
+import sys
+import os
 import asyncio
 import logging
-from amqtt.broker import Broker
 
-# Set up logging to see broker activity
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-import sys
-import os
+from amqtt.broker import Broker
 
 host = sys.argv[1] if len(sys.argv) > 1 else os.getenv("MQTT_BROKER_HOST", "0.0.0.0")
 port = int(os.getenv("MQTT_BROKER_PORT", 1883))

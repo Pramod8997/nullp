@@ -8,7 +8,7 @@ import DigitalTwinPage from './pages/DigitalTwinPage/DigitalTwinPage';
 import SchedulePage from './pages/SchedulePage/SchedulePage';
 import AlertsPage from './pages/AlertsPage/AlertsPage';
 import SettingsPage from './pages/SettingsPage/SettingsPage';
-import { Sun, Moon } from 'lucide-react';
+import { Sun, Moon, Wifi, ExternalLink } from 'lucide-react';
 import { requestJson, WS_URL } from './api/client';
 
 const MAX_RECONNECT_DELAY = 10000;
@@ -38,7 +38,7 @@ const normalizeDevice = (device, receivedAt, provenance = 'BACKEND_SNAPSHOT') =>
   const power = finiteNumber(device.power);
   const sourceTimestamp = getSourceTimestamp(device.source_timestamp ?? device.timestamp ?? device.last_seen, receivedAt);
   const ageMs = sourceTimestamp === null ? 0 : Math.max(0, receivedAt - sourceTimestamp);
-  const isOffline = device.state === 'OFFLINE' || device.state === 'OFF' || (sourceTimestamp !== null && ageMs > 3500);
+  const isOffline = device.state === 'OFFLINE' || (sourceTimestamp !== null && ageMs > 8000);
   return {
     ...device,
     ...(power !== null ? { power: isOffline ? 0 : Math.max(0, Math.min(power, MAX_POWER)) } : {}),
@@ -298,7 +298,7 @@ function Dashboard() {
           }
           break;
 
-        // Real PZEM electrical telemetry (voltage / current / power factor)
+        // Real PZEM electrical telemetry (voltage / current / power factor / power / relays)
         case 'TELEMETRY':
           if (data.device_id) {
             setTelemetry((prev) => ({
@@ -307,11 +307,22 @@ function Dashboard() {
                 v: finiteNumber(data.v),
                 i: finiteNumber(data.i),
                 pf: finiteNumber(data.pf),
+                w: finiteNumber(data.w),
+                relays: Array.isArray(data.relays) ? data.relays : prev[data.device_id]?.relays,
                 ts: receivedAt,
                 source_timestamp: getSourceTimestamp(data.timestamp, receivedAt),
                 provenance: data.provenance || 'LIVE_HARDWARE',
               },
             }));
+            setDevices((prev) => prev[data.device_id] ? ({
+              ...prev,
+              [data.device_id]: {
+                ...prev[data.device_id],
+                freshness: 'live',
+                _receivedAt: receivedAt,
+                ...(Array.isArray(data.relays) ? { relays: data.relays } : {}),
+              },
+            }) : prev);
           }
           break;
 
@@ -386,18 +397,63 @@ function Dashboard() {
 
         case 'HARDWARE_ACK': {
           if (!data.device_id || typeof data.message !== 'string') break;
-          const ack = data.ack || data.command || data.message.match(/\b(ON_CONFIRMED|OFF_CONFIRMED|LOCKOUT_NACK)\b/i)?.[1];
+          const ack = data.ack || data.command || data.message.match(/\b(ON_CONFIRMED|OFF_CONFIRMED|CH1_ON_CONFIRMED|CH1_OFF_CONFIRMED|CH2_ON_CONFIRMED|CH2_OFF_CONFIRMED|LOCKOUT_NACK)\b/i)?.[1] || '';
+          const isCh1 = ack.includes('CH1') || ack.includes('IN1');
+          const isCh2 = ack.includes('CH2') || ack.includes('IN2');
+          const isConfirmed = ack.includes('CONFIRMED');
+          const isOn = ack.includes('ON');
+          setDevices((prev) => {
+            const currentDev = prev[data.device_id] || {};
+            const curRelays = Array.isArray(data.relays)
+              ? [...data.relays]
+              : [...(currentDev.relays || [0, 0])];
+            if (isCh1) curRelays[0] = isOn ? 1 : 0;
+            if (isCh2) curRelays[1] = isOn ? 1 : 0;
+            if (ack === 'ON_CONFIRMED') { curRelays[0] = 1; curRelays[1] = 1; }
+            if (ack === 'OFF_CONFIRMED') { curRelays[0] = 0; curRelays[1] = 0; }
+            const anyOn = curRelays[0] === 1 || curRelays[1] === 1 || ack === 'ON_CONFIRMED';
+            return {
+              ...prev,
+              [data.device_id]: {
+                ...currentDev,
+                state: anyOn ? 'ON' : 'OFF',
+                relays: curRelays,
+                confirmed: isConfirmed,
+                ackTimestamp: receivedAt,
+                provenance: 'EDGE_ACK',
+              },
+            };
+          });
           setRelayStates((prev) => ({
             ...prev,
             [data.device_id]: {
               ...prev[data.device_id],
               ack: ack || 'UNKNOWN',
-              state: ack === 'ON_CONFIRMED' ? 'ON' : ack === 'OFF_CONFIRMED' ? 'OFF' : prev[data.device_id]?.state,
-              confirmed: ack === 'ON_CONFIRMED' || ack === 'OFF_CONFIRMED',
+              state: ack.includes('ON') ? 'ON' : ack.includes('OFF') ? 'OFF' : prev[data.device_id]?.state,
+              confirmed: isConfirmed,
               ackTimestamp: receivedAt,
               provenance: 'EDGE_ACK',
             },
           }));
+          if (Array.isArray(data.relays) || isCh1 || isCh2 || isConfirmed) {
+            setTelemetry((prev) => {
+              const currentTelem = prev[data.device_id] || {};
+              const curRelays = Array.isArray(data.relays)
+                ? [...data.relays]
+                : [...(currentTelem.relays || [0, 0])];
+              if (isCh1) curRelays[0] = isOn ? 1 : 0;
+              if (isCh2) curRelays[1] = isOn ? 1 : 0;
+              if (ack === 'ON_CONFIRMED') { curRelays[0] = 1; curRelays[1] = 1; }
+              if (ack === 'OFF_CONFIRMED') { curRelays[0] = 0; curRelays[1] = 0; }
+              return {
+                ...prev,
+                [data.device_id]: {
+                  ...currentTelem,
+                  relays: curRelays,
+                },
+              };
+            });
+          }
           setAlerts((prev) => [{
             id: `ack-${data.device_id}-${receivedAt}`,
             type: 'HARDWARE_ACK',
@@ -626,11 +682,11 @@ function Dashboard() {
   const renderPage = () => {
     switch (activeTab) {
       case 'overview':
-        return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} analytics={analytics} />;
+        return <OverviewPage devices={devices} powerHistory={powerHistory} telemetry={telemetry} analytics={analytics} relayStates={relayStates} />;
 
       case 'appliances':
       case 'devices':
-        return <AppliancesPage devices={devices} />;
+        return <AppliancesPage devices={devices} telemetry={telemetry} relayStates={relayStates} />;
 
       case 'analytics':
         return (
@@ -702,6 +758,20 @@ function Dashboard() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Live ESP32 Wi-Fi Hardware Node Link & Badge */}
+            <a
+              id="esp32-node-header-badge"
+              href="http://172.20.10.10"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors shadow-sm cursor-pointer"
+              title="Open ESP32 On-Chip Web Dashboard (172.20.10.10)"
+            >
+              <Wifi size={13} className="text-emerald-500 animate-pulse" />
+              <span className="font-mono">ESP32: 172.20.10.10</span>
+              <ExternalLink size={11} className="opacity-70" />
+            </a>
+
             {/* Connection Status Badge */}
             <div
               className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold border ${

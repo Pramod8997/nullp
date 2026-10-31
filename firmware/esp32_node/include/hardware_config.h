@@ -46,7 +46,7 @@ constexpr uint8_t RELAY2_PIN = 27;
 #define RELAY_CH1_PIN 26
 #define RELAY_CH2_PIN 27
 
-// Keep active-low fail-safe relay macros
+// Relay polarity: LOW = ON (Energized / Closed), HIGH = CUTOFF (De-energized / Open)
 #ifndef RELAY_ON
 #define RELAY_ON LOW
 #endif

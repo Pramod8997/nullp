@@ -1,9 +1,10 @@
 import React from 'react';
 import DeviceCards from '../../components/DeviceCards';
 import ApplianceTable from '../../components/ApplianceTable/ApplianceTable';
+import RelayControlPanel from '../../components/RelayControlPanel';
 import { Cpu, Zap, Activity } from 'lucide-react';
 
-const AppliancesPage = ({ devices = {} }) => {
+const AppliancesPage = ({ devices = {}, telemetry = {}, relayStates = {} }) => {
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -16,14 +17,24 @@ const AppliancesPage = ({ devices = {} }) => {
             Appliance Fleet & Sub-Metering
           </h1>
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            Real-time individual load disaggregation, wattage limits, and state control.
+            Real-time individual load disaggregation, wattage limits, and physical dual-relay state control.
           </p>
         </div>
       </div>
 
+      {/* Physical Relay Control Console */}
+      <section>
+        <RelayControlPanel
+          deviceId="node_bench_agg"
+          devices={devices}
+          telemetry={telemetry}
+          relayStates={relayStates}
+        />
+      </section>
+
       {/* Device Fleet Cards */}
       <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl border border-gray-200/80 dark:border-gray-700/80 rounded-3xl p-6 shadow-sm">
-        <DeviceCards devices={devices} />
+        <DeviceCards devices={devices} telemetry={telemetry} />
       </div>
 
       {/* Detailed Appliance Table */}

@@ -1031,17 +1031,25 @@ class EMSOrchestrator:
                 if len(self._device_last_seen) > self._max_tracked_devices:
                     self._evict_stale_devices()
                 latest = self.device_telemetry[device_id]
-                await self._broadcast_event({
+                relays_state = None
+                try:
+                    raw_obj = json.loads(payload_str)
+                    if isinstance(raw_obj, dict) and "relays" in raw_obj:
+                        relays_state = raw_obj["relays"]
+                except Exception:
+                    pass
+                t_payload = {
                     "type": "TELEMETRY",
                     "device_id": device_id,
                     "v": latest["v"],
                     "i": latest["i"],
                     "w": latest["w"],
                     "pf": latest["pf"],
-                    # The ESP32 payload has no source clock. This is the
-                    # backend receive time, not a device measurement time.
                     "timestamp": time.time(),
-                })
+                }
+                if relays_state is not None:
+                    t_payload["relays"] = relays_state
+                await self._broadcast_event(t_payload)
                 return
 
             # Bug 3.1 fix: Handle label submissions via MQTT
